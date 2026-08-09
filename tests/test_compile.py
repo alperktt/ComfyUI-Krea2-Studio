@@ -1,0 +1,896 @@
+"""Phase-1 contract tests: canvas math, duration snapping, and label ordering.
+
+Runs standalone — `python tests/test_compile.py` — with no torch and no ComfyUI,
+because `canvas.py` and `compile.py` are deliberately free of both. The label
+ordering assertions are the important ones: if they drift out of step with
+`encode.py`'s reference loop, prompts bind to the wrong tensors and nothing
+raises.
+"""
+
+import importlib.util
+import os
+import sys
+import types
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _load():
+    package = types.ModuleType("mmc")
+    package.__path__ = [ROOT]
+    sys.modules["mmc"] = package
+    modules = {}
+    for name in ("canvas", "contextir", "compile"):
+        spec = importlib.util.spec_from_file_location(f"mmc.{name}", os.path.join(ROOT, f"{name}.py"))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[f"mmc.{name}"] = module
+        setattr(package, name, module)
+        spec.loader.exec_module(module)
+        modules[name] = module
+    return modules["canvas"], modules["compile"]
+
+
+canvas, compiler = _load()
+
+FAILURES = []
+
+
+def check(label, got, want):
+    if got != want:
+        FAILURES.append(f"{label}: got {got!r}, want {want!r}")
+
+
+def expect_error(label, fn, fragment):
+    try:
+        fn()
+    except compiler.CompileError as exc:
+        if fragment.lower() not in str(exc).lower():
+            FAILURES.append(f"{label}: error {str(exc)!r} does not mention {fragment!r}")
+    except Exception as exc:  # noqa: BLE001
+        FAILURES.append(f"{label}: raised {type(exc).__name__} instead of CompileError: {exc}")
+    else:
+        FAILURES.append(f"{label}: expected a CompileError, got none")
+
+
+# --- canvas ------------------------------------------------------------------
+
+# The native stop must reproduce core's own numbers exactly.
+check("16:9 @768", canvas.resolve_canvas(16 / 9, 768), (1344, 768))
+check("4:3 @768", canvas.resolve_canvas(4 / 3, 768), (1024, 768))
+check("1:1 @768", canvas.resolve_canvas(1.0, 768), (768, 768))
+check("9:16 @768", canvas.resolve_canvas(9 / 16, 768), (768, 1344))
+
+for label, ratio in canvas.ASPECT_PRESETS.items():
+    for edge in (384, 512, 640, 768, 896):
+        width, height = canvas.resolve_canvas(ratio, edge)
+        cap = canvas.NATIVE_MAX_PIXELS * (edge / canvas.NATIVE_SHORT_EDGE) ** 2
+        if width % 32 or height % 32:
+            FAILURES.append(f"{label} @{edge}: {width}x{height} is not a multiple of 32")
+        if width * height > cap:
+            FAILURES.append(f"{label} @{edge}: {width}x{height} exceeds the area cap")
+
+# Ratios outside 21:9..9:16 clamp rather than stretch.
+check("3:1 clamps", canvas.canvas_from_image(3000, 1000, 768)[3], True)
+check("1:3 clamps", canvas.canvas_from_image(1000, 3000, 768)[3], True)
+check("3:2 adaptive", canvas.canvas_from_image(1500, 1000, 768)[:2], (1152, 768))
+
+# --- duration ----------------------------------------------------------------
+
+for seconds in range(canvas.MIN_SECONDS, canvas.MAX_SECONDS + 1):
+    frames = canvas.frames_for_seconds(seconds)
+    if frames % 17 != 5:
+        FAILURES.append(f"{seconds}s -> {frames} frames is not on the 17n+5 grid")
+    if abs(canvas.seconds_for_frames(frames) - seconds) > 0.36:
+        FAILURES.append(f"{seconds}s -> {frames} frames drifts too far")
+
+check("8s is exact", canvas.frames_for_seconds(8), 192)
+check("6s", canvas.frames_for_seconds(6), 141)
+
+# The offered range is wider than the trained one on purpose: 17n+5 is the only
+# hard rule, and clips well past 15 s do generate. The pill says so; it does not
+# refuse. So the ends have to be reachable and still legal.
+check("a one-second shot is offered", canvas.frames_for_seconds(1) % 17, 5)
+check("...and is about a second", round(canvas.seconds_for_frames(canvas.frames_for_seconds(1)), 2), 0.92)
+check("a minute is reachable",
+      round(canvas.seconds_for_frames(canvas.frames_for_seconds(60))), 60)
+# Out of range clamps rather than raising — this is where a hand-edited blob and
+# a workflow saved against an older ceiling both land somewhere legal.
+check("past the ceiling clamps to the top",
+      canvas.frames_for_seconds(999), max(canvas.legal_frame_counts()))
+check("under the floor clamps to the bottom", canvas.frames_for_seconds(0), 5)
+
+check("the trained range is a subset, not the limit",
+      (canvas.is_trained_length(124), canvas.is_trained_length(362),
+       canvas.is_trained_length(107), canvas.is_trained_length(379)),
+      (True, True, False, False))
+
+# --- mode routing ------------------------------------------------------------
+
+def build(prompt="", assets=(), **rest):
+    data = {"prompt": prompt, "assets": list(assets), "duration_s": 6,
+            "aspect": "16:9", "short_edge": 768}
+    data.update(rest)
+    return compiler.compile_request(data, image_size_lookup=lambda _f: (1500, 1000))
+
+
+def image(handle, role="reference", **rest):
+    return {"handle": handle, "kind": "image", "role": role, "filename": f"{handle}.png", **rest}
+
+
+def video(handle, **rest):
+    return {"handle": handle, "kind": "video", "role": "reference", "filename": f"{handle}.mp4", **rest}
+
+
+def audio(handle, **rest):
+    return {"handle": handle, "kind": "audio", "role": "reference", "filename": f"{handle}.wav", **rest}
+
+
+check("text only", build().mode, "T2VA")
+check("start only", build(assets=[image("img-1", "first_frame")]).mode, "I2VA")
+check("end only", build(assets=[image("img-1", "last_frame")]).mode, "L2VA")
+check("both frames", build(assets=[image("img-1", "first_frame"), image("img-2", "last_frame")]).mode, "FL2VA")
+check("a reference", build(assets=[image("img-1")]).mode, "REF2VA")
+
+check("t2va uses the fl2va model", build().checkpoint, "fl2va")
+check("ref2va uses the ref model", build(assets=[image("img-1")]).checkpoint, "ref2va")
+
+# --- checkpoint pinning ------------------------------------------------------
+# The mode says how the request is encoded; the pin says which weights it runs
+# on. Keyframes are a payload Ref2VA can also take, so that pin is honoured.
+
+check("auto is the default", build().checkpoint_pinned, False)
+check("auto is spelled out too", build(checkpoint="auto").checkpoint, "fl2va")
+check("frames can be pinned to ref2va",
+      build(assets=[image("img-1", "first_frame")], checkpoint="ref2va").checkpoint, "ref2va")
+check("a pin is flagged as one",
+      build(checkpoint="ref2va").checkpoint_pinned, True)
+check("pinning what was already derived is not a pin",
+      build(checkpoint="fl2va").checkpoint_pinned, False)
+check("a pin does not change the encoding",
+      build(assets=[image("img-1", "first_frame")], checkpoint="ref2va").mode, "I2VA")
+
+expect_error("references cannot be pinned to fl2va",
+             lambda: build(assets=[image("img-1")], checkpoint="fl2va"),
+             "cannot be run through FL2VA")
+expect_error("an unknown checkpoint is refused",
+             lambda: build(checkpoint="sdxl"), "unknown checkpoint")
+
+# A pin moves the LoRAs and their trigger words with it: the words in the prompt
+# have to name the weights that are actually patched.
+check("a pin moves the trigger words",
+      build("x", assets=[image("img-1", "first_frame")], checkpoint="ref2va",
+            loras=[{"name": "a.safetensors", "modes": ["ref2va"], "triggers": ["ohwx"]}]).triggers,
+      ["ohwx"])
+
+# The image modes take their aspect from the keyframe, not the ratio pill.
+adaptive = build(assets=[image("img-1", "first_frame")])
+check("adaptive canvas", (adaptive.width, adaptive.height), (1152, 768))
+check("adaptive flag", adaptive.ratio_from_image, True)
+check("pill still rules ref2va", build(assets=[image("img-1")]).width, 1344)
+
+expect_error("frames + refs conflict",
+             lambda: build(assets=[image("img-1", "first_frame"), image("img-2")]),
+             "different checkpoints")
+
+# --- label ordering (the contract encode.py walks) ---------------------------
+
+full = build(assets=[
+    image("img-1"), image("img-2"),
+    video("vid-1", with_audio=True), video("vid-2"),
+    audio("aud-1"),
+])
+check("picture 1", full.labels["img-1"], "<Picture 1>")
+check("picture 2", full.labels["img-2"], "<Picture 2>")
+check("video 1", full.labels["vid-1"], "<Video 1>")
+check("video 2", full.labels["vid-2"], "<Video 2>")
+# vid-1's soundtrack is presented before vid-1 itself, so it takes <Audio 1>
+# and the standalone clip is pushed to <Audio 2>.
+check("soundtrack audio", full.labels["vid-1:audio"], "<Audio 1>")
+check("standalone audio", full.labels["aud-1"], "<Audio 2>")
+
+# encode.py executes this plan verbatim, so its order *is* the payload order.
+check("plan order",
+      [(s["op"], s["asset"].handle, s["label"]) for s in full.plan],
+      [("image", "img-1", "<Picture 1>"),
+       ("image", "img-2", "<Picture 2>"),
+       ("soundtrack", "vid-1", "<Audio 1>"),
+       ("video", "vid-1", "<Video 1>"),
+       ("video", "vid-2", "<Video 2>"),
+       ("audio", "aud-1", "<Audio 2>")])
+check("keyframe modes have no plan", build(assets=[image("img-1", "first_frame")]).plan, [])
+
+frames_only = build(assets=[image("img-9", "first_frame"), image("img-4", "last_frame")])
+check("first frame label", frames_only.labels["img-9"], "<Picture 1>")
+check("last frame label", frames_only.labels["img-4"], "<Picture 2>")
+check("lone last frame", build(assets=[image("img-4", "last_frame")]).labels["img-4"], "<Picture 1>")
+
+# --- prompt substitution -----------------------------------------------------
+
+check("substitution",
+      build("keep @img-1 and the walk from @vid-1", [image("img-1"), video("vid-1")]).body,
+      "keep <Picture 1> and the walk from <Video 1>")
+check("prose survives", build("meet me @ 5 sharp").body, "meet me @ 5 sharp")
+expect_error("dangling handle", lambda: build("use @img-7", [image("img-1")]), "no such asset")
+
+# --- the Context-IR skeleton -------------------------------------------------
+#
+# `body` is what the user wrote; `prompt` is what the DiT reads. The gap between
+# them is contextir.compose, and what matters is that it only ever *adds* — a
+# prompt that already carries its own sections has to come through untouched, or
+# a refiner's output would be silently rewritten.
+
+def lora_entry(name, **rest):
+    return {"name": name, "strength": 1.0, **rest}
+
+
+t2va = build("a walk")
+check("T2VA has no instruction line",
+      t2va.prompt, "integrated_multimodal_description: [Shot 1] a walk")
+check("...and an empty prompt composes to nothing", build("").prompt, "")
+
+i2va = build("a walk", assets=[image("img-1", "first_frame")])
+check("I2VA opens with the alignment instruction",
+      i2va.prompt.splitlines()[0],
+      "For the target video, at 0.00 seconds into the target video, "
+      "<Picture 1> (from [Shot 1]) is fully referenced.")
+check("...and the body follows as a field",
+      i2va.prompt.endswith("integrated_multimodal_description: [Shot 1] a walk"), True)
+
+# 6 s on the pill is 149 frames, which is 6.208333... s of video. The instruction
+# states the *real* duration, because that is what the model aligns against.
+l2va = build("a walk", assets=[image("img-1", "last_frame")])
+check("L2VA states the true duration to two decimals",
+      "aligns with the 5.88-second mark" in l2va.prompt, True)
+check("...and the pill's whole number never appears",
+      "6.00-second mark" in l2va.prompt, False)
+
+fl2va = build("a walk", assets=[image("img-1", "first_frame"), image("img-2", "last_frame")])
+check("FL2VA names both pictures",
+      "Picture 1 (from Shot 1)" in fl2va.prompt and "Picture 2 (from Shot 1)" in fl2va.prompt,
+      True)
+
+# The end frame is reached by the *last* shot, and a lone generation now has more
+# than one of them: the refiner divides a Creator clip into shots itself and
+# stores the markers in the body. Counted off that body rather than assumed to be
+# one, or a refined L2VA prompt would align its end frame against Shot 1 and
+# claim the video arrives there before its first cut.
+cut = build("", assets=[image("img-1", "last_frame")],
+            refined={"body": "[Shot 1] a walk [Shot 2] At 00:03.000, the camera cuts to the door"})
+check("a refined body's own shots are counted",
+      "<Picture 1> (from [Shot 2])" in cut.prompt, True)
+check("...and one that has none is still Shot 1",
+      "<Picture 1> (from [Shot 1])" in
+      build("", assets=[image("img-1", "last_frame")], refined={"body": "a walk"}).prompt, True)
+
+# The instruction has to be the first line, so triggers go inside the body.
+check("triggers land under the instruction, not above it",
+      build("a walk", assets=[image("img-1", "first_frame")],
+            loras=[lora_entry("a.safetensors", triggers=["ohwx"])]).prompt.splitlines()[0]
+      .startswith("For the target video,"),
+      True)
+check("...and still lead the description",
+      "integrated_multimodal_description: [Shot 1] ohwx, a walk"
+      in build("a walk", assets=[image("img-1", "first_frame")],
+               loras=[lora_entry("a.safetensors", triggers=["ohwx"])]).prompt,
+      True)
+
+sound = build("a walk", soundscape="rain on glass", music="slow piano")
+check("the soundscape becomes its own field",
+      "overall_soundscape: rain on glass" in sound.prompt, True)
+check("the score becomes its own field",
+      "non_diegetic_music: slow piano" in sound.prompt, True)
+check("an empty audio field emits nothing at all",
+      "overall_soundscape" in build("a walk", music="slow piano").prompt, False)
+check("N/A is something you type, not something inferred",
+      "non_diegetic_music: N/A" in build("a walk", music="N/A").prompt, True)
+check("the fields come through onto Compiled", (sound.soundscape, sound.music),
+      ("rain on glass", "slow piano"))
+
+# A prompt that is already Context-IR — hand-written, or from a refiner — is its
+# own rewrite and is left exactly as it is.
+already = build("integrated_multimodal_description: [Shot 1] a walk\n\n"
+                "overall_soundscape: wind only", soundscape="rain on glass")
+check("an existing body field is not wrapped again",
+      already.prompt.count("integrated_multimodal_description:"), 1)
+check("...and an existing audio field is not duplicated",
+      already.prompt.count("overall_soundscape:"), 1)
+check("...so the user's own soundscape wins over the global one",
+      "rain on glass" in already.prompt, False)
+
+pre_aligned = build("For the target video, at 0.00 seconds into the target video, "
+                    "<Picture 1> (from [Shot 1]) is fully referenced.\n\n"
+                    "integrated_multimodal_description: [Shot 1] a walk",
+                    assets=[image("img-1", "first_frame")])
+check("an instruction the user wrote is not repeated",
+      pre_aligned.prompt.count("For the target video,"), 1)
+
+# REF2VA has a different six-section form we cannot synthesise from one line, so
+# the body is never wrapped — only the two audio fields it shares are appended.
+ref = build("keep @img-1", [image("img-1")], soundscape="street noise")
+check("a reference body is left as prose",
+      "integrated_multimodal_description" in ref.prompt, False)
+check("...but still gets its soundscape", "overall_soundscape: street noise" in ref.prompt, True)
+check("...and no keyframe instruction", ref.prompt.startswith("keep <Picture 1>"), True)
+
+# The refiner writes `@handles` into the reference sections and the two audio
+# fields exactly as it does into the body — that is how a rewrite survives an
+# asset being added — so every one of those fields is substituted at queue time.
+# Before this, a section reached the DiT saying `@img-1`, a token it has never
+# seen, and the reference it named conditioned nothing.
+sectioned = build("", [image("img-1"), audio("aud-1")],
+                  soundscape="the song from @aud-1 fills the room",
+                  music="",
+                  refined={"body": "she sings, matching @img-1",
+                           "sections": {"subject_definitions":
+                                            "<Subject 1> is the woman in @img-1",
+                                        "summary": "<Subject 1> sings @aud-1",
+                                        "retention_analysis": "@img-1: fully_preserved"}})
+check("a refined section's handles become labels",
+      "<Subject 1> is the woman in <Picture 1>" in sectioned.prompt, True)
+check("...in every section",
+      "<Picture 1>: fully_preserved" in sectioned.prompt, True)
+check("...and the summary's audio too", "<Subject 1> sings <Audio 1>" in sectioned.prompt, True)
+check("the soundscape's handles become labels",
+      "overall_soundscape: the song from <Audio 1> fills the room" in sectioned.prompt, True)
+check("no handle survives into the DiT's prompt", "@img-1" in sectioned.prompt
+      or "@aud-1" in sectioned.prompt, False)
+expect_error("a dangling handle in the soundscape names the field",
+             lambda: build("a walk", soundscape="the song from @aud-9"),
+             "overall_soundscape references @aud-9")
+expect_error("a dangling handle in a section names the section",
+             lambda: build("", [image("img-1")],
+                           refined={"body": "keep @img-1",
+                                    "sections": {"subject_definitions": "from @vid-3",
+                                                 "summary": "", "retention_analysis": ""}}),
+             "subject_definitions references @vid-3")
+
+
+# --- reference limits --------------------------------------------------------
+
+expect_error("10 images", lambda: build(assets=[image(f"img-{i}") for i in range(10)]), "9 reference images")
+expect_error("4 videos", lambda: build(assets=[video(f"vid-{i}") for i in range(4)]), "3 reference videos")
+expect_error("audio alone", lambda: build(assets=[audio("aud-1")]), "at least one reference image or video")
+expect_error("soundtracks count as audio",
+             lambda: build(assets=[video(f"vid-{i}", with_audio=True) for i in range(3)] + [audio("aud-1")]),
+             "3 reference audio")
+expect_error("duplicate handles", lambda: build(assets=[image("img-1"), image("img-1")]), "duplicate")
+# --- segments ----------------------------------------------------------------
+
+check("no trim by default", build(assets=[video("vid-1")]).ref_videos[0].trim, None)
+check("trim parsed",
+      build(assets=[video("vid-1", trim={"start": 1, "end": 3.5})]).ref_videos[0].trim,
+      (1.0, 3.5))
+check("audio trims too",
+      build(assets=[video("vid-1"), audio("aud-1", trim={"start": 0.5, "end": 2})]).ref_audios[0].trim,
+      (0.5, 2.0))
+expect_error("a still has no timeline",
+             lambda: build(assets=[image("img-1", trim={"start": 0, "end": 1})]),
+             "only video and audio")
+expect_error("inverted trim",
+             lambda: build(assets=[video("vid-1", trim={"start": 3, "end": 1})]),
+             "start < end")
+expect_error("negative trim",
+             lambda: build(assets=[video("vid-1", trim={"start": -1, "end": 1})]),
+             "start < end")
+expect_error("non-numeric trim",
+             lambda: build(assets=[video("vid-1", trim={"start": "soon", "end": 1})]),
+             "numeric")
+expect_error("half a trim",
+             lambda: build(assets=[video("vid-1", trim={"start": 1})]),
+             "numeric")
+
+# --- video tracks ------------------------------------------------------------
+
+check("default track", build(assets=[video("vid-1")]).ref_videos[0].track, "picture")
+check("with_audio still reads as a track",
+      build(assets=[video("vid-1", with_audio=True)]).ref_videos[0].track, "picture+sound")
+check("an explicit track wins over with_audio",
+      build(assets=[image("img-1"), video("vid-1", with_audio=True, track="sound")]).ref_audios[0].track,
+      "sound")
+expect_error("unknown track", lambda: build(assets=[video("vid-1", track="both")]), "unknown track")
+expect_error("only video has a track",
+             lambda: build(assets=[image("img-1"), audio("aud-1", track="sound")]),
+             "only video has a track")
+
+# A clip taken for its sound alone is an audio reference and nothing else: no
+# <Video> label, no video slot, and the picture is never loaded.
+sound_only = build(assets=[image("img-1"), video("vid-1", track="sound")])
+check("sound-only takes no video slot", [a.handle for a in sound_only.ref_videos], [])
+check("sound-only is an audio reference", [a.handle for a in sound_only.ref_audios], ["vid-1"])
+check("sound-only label", sound_only.labels["vid-1"], "<Audio 1>")
+check("sound-only plan",
+      [(s["op"], s["asset"].handle) for s in sound_only.plan],
+      [("image", "img-1"), ("audio", "vid-1")])
+check("sound-only substitutes as audio",
+      build("hum like @vid-1", [image("img-1"), video("vid-1", track="sound")]).prompt,
+      "hum like <Audio 1>")
+
+# It still cannot stand on its own: a soundtrack with no picture beside it is
+# the same "audio is never a standalone reference" case as a bare .wav.
+expect_error("sound-only is not a picture",
+             lambda: build(assets=[video("vid-1", track="sound")]),
+             "at least one reference image or video")
+expect_error("sound-only counts against the audio slots",
+             lambda: build(assets=[image("img-1")]
+                           + [video(f"vid-{i}", track="sound") for i in range(3)]
+                           + [audio("aud-1")]),
+             "3 reference audio")
+# Three of them is fine on its own, which is what makes the fourth the failure.
+check("three sound-only clips fit",
+      len(build(assets=[image("img-1")]
+                + [video(f"vid-{i}", track="sound") for i in range(3)]).ref_audios), 3)
+# The picture bucket is what they left: four would have broken the 3-video limit.
+check("sound-only clips do not crowd the video slots",
+      len(build(assets=[image("img-1"), video("vid-a"), video("vid-b"), video("vid-c"),
+                        video("vid-d", track="sound")]).ref_videos), 3)
+
+check("a sound-only clip can be trimmed",
+      build(assets=[image("img-1"), video("vid-1", track="sound",
+                                          trim={"start": 1, "end": 2})]).ref_audios[0].trim,
+      (1.0, 2.0))
+
+# --- reference size ----------------------------------------------------------
+#
+# The default is per kind, and both halves of it are the behaviour that shipped
+# before video had the setting at all: an image with nothing said is encoded to
+# the generation's pixel area, a video to core's 768 reference canvas. Getting
+# this backwards would silently re-encode every existing video reference at a
+# different size, so it is worth pinning.
+
+check("an image defaults to match", build(assets=[image("img-1")]).ref_images[0].ref_size, "match")
+check("a video defaults to max", build(assets=[video("vid-1")]).ref_videos[0].ref_size, "max")
+check("an image can ask for max",
+      build(assets=[image("img-1", ref_size="max")]).ref_images[0].ref_size, "max")
+check("a video can ask for match",
+      build(assets=[video("vid-1", ref_size="match")]).ref_videos[0].ref_size, "match")
+# A clip taken for its sound has no picture to size, and lands in the audio
+# bucket where nothing reads the field — but it must still parse.
+check("a sound-only clip carries the video default",
+      build(assets=[image("img-1"), video("vid-1", track="sound")]).ref_audios[0].ref_size, "max")
+expect_error("unknown ref_size",
+             lambda: build(assets=[image("img-1", ref_size="huge")]), "must be 'match' or 'max'")
+
+# --- what a reference image takes --------------------------------------------
+#
+# "full" is the only behaviour that existed before the setting, so an old blob
+# reads unchanged. The narrowing itself lives in the refiner's prose — the DiT
+# is handed the same tensor either way — so all compile owes it is storage,
+# validation, and refusal anywhere the field would quietly mean nothing.
+
+check("a reference image defaults to the whole picture",
+      build(assets=[image("img-1")]).ref_images[0].takes, "full")
+check("a person reference is kept",
+      build(assets=[image("img-1", takes="person")]).ref_images[0].takes, "person")
+expect_error("unknown takes",
+             lambda: build(assets=[image("img-1", takes="face")]), "takes must be one of")
+expect_error("a keyframe cannot be narrowed",
+             lambda: build(prompt="x", assets=[image("img-1", role="first_frame", takes="person")]),
+             "used whole")
+expect_error("a video cannot be narrowed",
+             lambda: build(assets=[video("vid-1", takes="person")]), "used whole")
+
+# --- loras and trigger words -------------------------------------------------
+
+def lora(name, **rest):
+    return {"name": name, "strength": 1.0, **rest}
+
+
+check("no loras, no prefix", build("a walk").body, "a walk")
+check("triggers prefix the prompt",
+      build("a walk", loras=[lora("a.safetensors", triggers=["ohwx", "cinematic"])]).body,
+      "ohwx, cinematic, a walk")
+check("triggers survive an empty prompt",
+      build("", loras=[lora("a.safetensors", triggers=["ohwx"])]).body,
+      "ohwx")
+check("triggers are exposed, not only inlined",
+      build("x", loras=[lora("a.safetensors", triggers=["ohwx"])]).triggers,
+      ["ohwx"])
+
+# Order is list order; a word two LoRAs share is weighted once, not twice.
+check("triggers dedupe case-insensitively",
+      build("x", loras=[lora("a.safetensors", triggers=["ohwx", "Film"]),
+                        lora("b.safetensors", triggers=["FILM", "grain"])]).triggers,
+      ["ohwx", "Film", "grain"])
+
+# A LoRA that is not in the run contributes neither weights nor words. Both
+# sides read `active_loras`, so these cannot drift apart.
+check("the other checkpoint's triggers stay out",
+      build("x", loras=[lora("a.safetensors", modes=["ref2va"], triggers=["ohwx"])]).triggers,
+      [])
+check("...and come back in ref2va",
+      build("x", assets=[image("img-1")],
+            loras=[lora("a.safetensors", modes=["ref2va"], triggers=["ohwx"])]).triggers,
+      ["ohwx"])
+check("disabled contributes nothing",
+      build("x", loras=[lora("a.safetensors", enabled=False, triggers=["ohwx"])]).triggers, [])
+check("zero strength contributes nothing",
+      build("x", loras=[lora("a.safetensors", strength=0, triggers=["ohwx"])]).triggers, [])
+check("blank words are dropped",
+      build("x", loras=[lora("a.safetensors", triggers=["  ", "ohwx "])]).triggers, ["ohwx"])
+
+check("no modes means both",
+      compiler.lora_modes({"name": "a"}), ("fl2va", "ref2va"))
+check("a nonsense mode falls back to both",
+      compiler.lora_modes({"name": "a", "modes": ["sdxl"]}), ("fl2va", "ref2va"))
+check("active order is list order",
+      [e["name"] for e in compiler.active_loras(
+          [lora("b.safetensors"), lora("a.safetensors")], "fl2va")],
+      ["b.safetensors", "a.safetensors"])
+
+# Substitution runs first, so a label can never end up inside the prefix.
+check("triggers do not disturb labels",
+      build("keep @img-1", [image("img-1")],
+            loras=[lora("a.safetensors", modes=["ref2va"], triggers=["ohwx"])]).body,
+      "ohwx, keep <Picture 1>")
+
+expect_error("non-numeric strength",
+             lambda: build("x", loras=[lora("a.safetensors", strength="hard")]),
+             "strength must be a number")
+
+expect_error("video as a keyframe",
+             lambda: build(assets=[{"handle": "vid-1", "kind": "video", "role": "first_frame", "filename": "v.mp4"}]),
+             "only images")
+
+# --- timeline ----------------------------------------------------------------
+#
+# A segment is a whole generation, so most of the surface above already covers
+# it. What is new is only the three things the timeline owns: the inherited
+# prompt, the shared canvas, and continuation.
+
+
+def timeline(segments, prompt="", **rest):
+    return compiler.compile_timeline({"segments": segments, "prompt": prompt, **rest})
+
+
+def segment(prompt="", **rest):
+    return {"prompt": prompt, "assets": [], "loras": [], "duration_s": 6, **rest}
+
+
+chain = timeline([segment("wide shot"), segment("closer", **{"continue": True})], prompt="a red room")
+
+check("the global prompt leads each segment", chain[0].body, "a red room\nwide shot")
+check("...and the continuing one too", chain[1].body, "a red room\ncloser")
+check("an empty global prompt adds no blank line",
+      timeline([segment("only mine")])[0].body, "only mine")
+check("an empty segment prompt adds no blank line",
+      timeline([segment()], prompt="only global")[0].body, "only global")
+
+check("segment 1 cannot continue", chain[0].continues, False)
+check("segment 1 is text-only", chain[0].mode, "T2VA")
+check("continuing is a keyframe generation", chain[1].mode, "I2VA")
+check("...on the fl2va checkpoint", chain[1].checkpoint, "fl2va")
+check("the flag survives compilation", chain[1].continues, True)
+check("a continuation flag on segment 1 is ignored, not refused",
+      timeline([segment(**{"continue": True})])[0].mode, "T2VA")
+
+check("an end frame makes a continuing segment FL2VA",
+      timeline([segment(), segment(**{
+          "continue": True,
+          "assets": [{"handle": "img-1", "kind": "image", "role": "last_frame", "filename": "b.png"}],
+      })])[1].mode,
+      "FL2VA")
+# The inherited frame has no handle but still takes <Picture 1>, so the end frame
+# has to be <Picture 2> or the prompt binds to the wrong tensor.
+check("the inherited frame consumes <Picture 1>",
+      timeline([segment(), segment("end on @img-1", **{
+          "continue": True,
+          "assets": [{"handle": "img-1", "kind": "image", "role": "last_frame", "filename": "b.png"}],
+      })])[1].body,
+      "end on <Picture 2>")
+
+# Every segment is concatenated with the others at the end, which is only
+# defined if they all came out the same size.
+wide = timeline([segment(), segment(), segment()], aspect="9:16", short_edge=512)
+check("one canvas across the timeline",
+      {(c.width, c.height) for c in wide}, {canvas.resolve_canvas(9 / 16, 512)})
+
+expect_error("references in a continuing segment",
+             lambda: timeline([segment(), segment(**{
+                 "continue": True,
+                 "assets": [{"handle": "img-1", "kind": "image", "role": "reference", "filename": "a.png"}],
+             })]),
+             "continuation off")
+expect_error("a start frame in a continuing segment",
+             lambda: timeline([segment(), segment(**{
+                 "continue": True,
+                 "assets": [{"handle": "img-1", "kind": "image", "role": "first_frame", "filename": "a.png"}],
+             })]),
+             "already the previous segment")
+expect_error("errors name the segment",
+             lambda: timeline([segment(), segment(**{"duration_s": 6, "checkpoint": "nope"})]),
+             "segment 2")
+expect_error("an empty timeline", lambda: timeline([]), "at least one segment")
+expect_error("too many segments",
+             lambda: timeline([segment()] * (compiler.MAX_SEGMENTS + 1)),
+             "at most")
+
+# --- timeline globals --------------------------------------------------------
+#
+# Three things the timeline owns on top of the prompt and the canvas: the LoRAs
+# every segment is patched with, and the two audio fields. All three exist for
+# the same reason — a turbo LoRA, a room tone and a score are properties of the
+# piece, and setting them shot by shot is how they drift apart.
+
+turbo = lora_entry("turbo.safetensors", triggers=["fast"])
+
+globals_chain = timeline([segment("wide"), segment("close")], loras=[turbo])
+check("a global LoRA reaches segment 1", globals_chain[0].triggers, ["fast"])
+check("...and segment 2", globals_chain[1].triggers, ["fast"])
+
+mixed = timeline([segment("wide", loras=[lora_entry("shot.safetensors", triggers=["grain"])])],
+                 loras=[turbo])
+check("global words lead the segment's own", mixed[0].triggers, ["fast", "grain"])
+
+# A segment naming the same file replaces the global entry rather than stacking
+# the same weights twice at two strengths.
+override = compiler.merge_loras(
+    [lora_entry("turbo.safetensors", strength=1.0)],
+    [lora_entry("turbo.safetensors", strength=0.4)])
+check("a segment's entry replaces the global one",
+      [(e["name"], e["strength"]) for e in override], [("turbo.safetensors", 0.4)])
+check("an unrelated global entry survives beside it",
+      [e["name"] for e in compiler.merge_loras([turbo], [lora_entry("b.safetensors")])],
+      ["turbo.safetensors", "b.safetensors"])
+check("no globals is just the segment's list",
+      [e["name"] for e in compiler.merge_loras(None, [lora_entry("b.safetensors")])],
+      ["b.safetensors"])
+
+sound_chain = timeline([segment("wide"), segment("close")],
+                       soundscape="rain on glass", music="slow piano")
+check("the soundscape reaches every segment",
+      ["overall_soundscape: rain on glass" in c.prompt for c in sound_chain], [True, True])
+check("...and so does the score",
+      ["non_diegetic_music: slow piano" in c.prompt for c in sound_chain], [True, True])
+
+# A shot that genuinely sounds different can still say so; an empty field is
+# inheritance, not a clearing.
+per_shot = timeline([segment("wide"), segment("close", soundscape="underwater")],
+                    soundscape="rain on glass")
+check("a segment can override the soundscape", per_shot[1].soundscape, "underwater")
+check("...without disturbing the others", per_shot[0].soundscape, "rain on glass")
+check("an empty segment field inherits", per_shot[1].music, "")
+
+# --- the sound seam ----------------------------------------------------------
+#
+# The previous segment's audio tail rides in as a `ref_audio` block, which the
+# FL2VA weights read even though their documented inputs are text and frames.
+# Independent of the picture seam in both directions.
+
+sound_seam = timeline([segment("wide"), segment("close", **{"continue_audio": True})])
+check("the sound seam is off by default", sound_seam[0].continues_audio, False)
+check("...and on where it was set", sound_seam[1].continues_audio, True)
+check("the picture is not dragged along with it", sound_seam[1].continues, False)
+check("a sound-only seam is still T2VA", sound_seam[1].mode, "T2VA")
+check("the inherited tail gets a label the prompt defines",
+      "<Audio 1> is the end of the preceding shot's soundtrack" in sound_seam[1].prompt, True)
+check("...and nothing says so where the seam is silent",
+      "<Audio 1>" in sound_seam[0].prompt, False)
+
+both = timeline([segment(), segment(**{"continue": True, "continue_audio": True})])
+check("picture and sound can cross the same seam",
+      (both[1].continues, both[1].continues_audio), (True, True))
+check("...which is still an I2VA generation", both[1].mode, "I2VA")
+
+check("segment 1 has no seam to carry sound over",
+      timeline([segment(**{"continue_audio": True})])[0].continues_audio, False)
+
+check("the tail defaults to the documented length",
+      sound_seam[1].audio_tail_s, compiler.DEFAULT_AUDIO_TAIL_S)
+check("...is the timeline's to set",
+      timeline([segment(), segment(**{"continue_audio": True})], audio_tail_s=2.5)[1].audio_tail_s,
+      2.5)
+check("...clamps rather than sending an unpayable one",
+      timeline([segment(), segment(**{"continue_audio": True})], audio_tail_s=99)[1].audio_tail_s,
+      compiler.MAX_AUDIO_TAIL_S)
+check("a silent seam carries no tail at all", sound_seam[0].audio_tail_s, 0.0)
+
+expect_error("a negative tail",
+             lambda: timeline([segment(), segment(**{"continue_audio": True})], audio_tail_s=-1),
+             "greater than 0")
+expect_error("a non-numeric tail",
+             lambda: timeline([segment(), segment(**{"continue_audio": True})], audio_tail_s="long"),
+             "must be a number")
+
+# REF2VA already fills minimax_refs from its own ordered plan, so the inherited
+# sound has no slot to take without being numbered into it.
+expect_error("the sound seam on a reference segment",
+             lambda: timeline([segment(), segment(**{
+                 "continue_audio": True,
+                 "assets": [{"handle": "img-1", "kind": "image", "role": "reference",
+                             "filename": "a.png"}],
+             })]),
+             "not yet supported")
+
+# A lone request is unchanged by any of this.
+check("compile_request still defaults to not continuing", build("x").continues, False)
+
+
+# ---- one pass ---------------------------------------------------------------
+#
+# The same timeline read as the shots of a single generation. The assertions
+# worth keeping are the ones about *merging*: handles are allocated per segment,
+# so the same handle means different files in different shots and the same file
+# wears different handles — and if the merge gets that wrong, the labels bind to
+# the wrong tensors and, as everywhere else in this module, nothing raises.
+
+
+def single(segments, **rest):
+    return compiler.compile_single({"segments": segments, **rest},
+                                   image_size_lookup=lambda _f: (1500, 1000))
+
+
+def ref(handle, filename, role="reference"):
+    return {"handle": handle, "kind": "image", "role": role, "filename": filename}
+
+
+one = single([segment("a courier waits", duration_s=5),
+              segment("the camera cuts to her hands", duration_s=4)],
+             prompt="Live-action, cinematic")
+
+check("the shots become one description",
+      one.body,
+      "[Shot 1] Live-action, cinematic. a courier waits "
+      "[Shot 2] At 00:05.000, the camera cuts to her hands")
+check("shot 1 carries no cut time", one.body.count("At 00:0"), 1)
+# One generation, so the grid is applied once to the whole thing rather than per
+# shot. 9 s -> 216 -> the nearest 17n+5.
+check("the durations are summed and snapped once", one.frames, 209)
+check("...and there is only one of it", one.continues, False)
+
+check("a cut time the user wrote themselves is left alone",
+      single([segment("opening"), segment("At 00:02.000, the shot cuts away")]).body,
+      "[Shot 1] opening [Shot 2] At 00:02.000, the shot cuts away")
+
+# The merge. Shot 2's `img-1` is a different file from shot 1's, and its `img-2`
+# is the same file as shot 1's `img-1` — so the right answer is two references,
+# with shot 2's two handles pointing at opposite ends of the list.
+merged = single([
+    segment("@img-1 walks in", assets=[ref("img-1", "a.png")]),
+    segment("@img-1 sits beside @img-2", assets=[ref("img-1", "b.png"), ref("img-2", "a.png")]),
+])
+check("one reference per distinct file", [a.filename for a in merged.ref_images], ["a.png", "b.png"])
+check("...cited from both shots by whichever handle each of them used",
+      merged.body,
+      "[Shot 1] <Picture 1> walks in [Shot 2] At 00:06.000, <Picture 2> sits beside <Picture 1>")
+
+# The end frame is the video's final frame, so it belongs to the last shot —
+# which is what the instruction line has to name, and the only case where it is
+# not `Shot 1`.
+frames = single([segment("she stands at the door", assets=[ref("img-1", "a.png", "first_frame")]),
+                 segment("the camera cuts to the hallway"),
+                 segment("she reaches the window", assets=[ref("img-1", "z.png", "last_frame")])])
+check("frames at both ends make it FL2VA", frames.mode, "FL2VA")
+check("the start frame is Picture 1 and the end frame Picture 2",
+      frames.prompt.count("Picture 1 (from Shot 1)"), 1)
+check("...and the end frame is reached by the last shot",
+      frames.prompt.count("Picture 2 (from Shot 3)"), 1)
+
+# A card may write several shots of its own; the rest of the timeline has to
+# stay in step behind it, including the instruction line's Shot N.
+own = single([segment("[Shot 1] opening [Shot 2] At 00:02.000, closer"),
+              segment("out to the street", assets=[ref("img-1", "z.png", "last_frame")])])
+check("a card numbering its own shots advances the count",
+      own.body.endswith("[Shot 3] At 00:06.000, out to the street"), True)
+check("...and the end frame follows it there", "(from [Shot 3])" in own.prompt, True)
+
+expect_error("a card numbered out of step",
+             lambda: single([segment("a"), segment("[Shot 7] misnumbered")]),
+             "in this timeline it is [Shot 2]")
+expect_error("a shot with nothing in it",
+             lambda: single([segment("a"), segment("")]),
+             "has no prompt")
+expect_error("a start frame after the first shot",
+             lambda: single([segment("a"), segment("b", assets=[ref("img-1", "z.png", "first_frame")])]),
+             "one pass opens on shot 1")
+expect_error("an end frame before the last shot",
+             lambda: single([segment("a", assets=[ref("img-1", "z.png", "last_frame")]), segment("b")]),
+             "one pass ends on shot 2")
+expect_error("frames in one shot and references in another",
+             lambda: single([segment("a", assets=[ref("img-1", "z.png", "first_frame")]),
+                             segment("b @img-1", assets=[ref("img-1", "q.png")])]),
+             "cannot hold both")
+expect_error("shots that disagree about the checkpoint",
+             lambda: single([segment("a", checkpoint="fl2va"), segment("b", checkpoint="ref2va")]),
+             "disagree about the checkpoint")
+expect_error("shots that disagree about the soundscape",
+             lambda: single([segment("a"), segment("b", soundscape="rain")], soundscape="silence"),
+             "disagree about soundscape")
+
+# Switching a chained timeline over leaves its seam flags in the blob. They
+# describe joins that no longer exist, so they are ignored rather than refused —
+# the alternative is a mode you cannot switch into without editing JSON.
+check("carried-over seam flags are ignored",
+      single([segment("a"), segment("b", **{"continue": True, "continue_audio": True})]).continues,
+      False)
+
+# ---- the refiner's rewrite --------------------------------------------------
+#
+# A refined body stands in for the user's sentence and is substituted exactly as
+# a typed one is. That is the whole contract: it is stored with `@handles` in it
+# rather than with ordinals, so adding or removing an asset re-labels a refined
+# prompt correctly instead of leaving it pointing at the tensor that used to be
+# in that slot. Storing labels instead would fail silently, which is the failure
+# mode this module exists to prevent.
+
+REWRITE = "A courier in @img-1 waits under a sodium lamp, shot on 16mm."
+
+
+def refined(body=REWRITE, **rest):
+    return {"body": body, "source": "a courier waits", **rest}
+
+
+one_ref = compiler.compile_request(
+    {"prompt": "a courier waits", "refined": refined(),
+     "assets": [ref("img-1", "her.png")], "duration_s": 6},
+    image_size_lookup=lambda _f: (1000, 1000))
+
+check("the rewrite replaces the typed prompt",
+      one_ref.body, "A courier in <Picture 1> waits under a sodium lamp, shot on 16mm.")
+check("...and is wrapped by contextir like any other body",
+      compiler.compile_request({"prompt": "a courier waits",
+                                "refined": refined(body="A courier waits, in 16mm."),
+                                "duration_s": 6}).prompt,
+      "integrated_multimodal_description: [Shot 1] A courier waits, in 16mm.")
+
+# The point of storing handles: a second reference in front of it moves the
+# ordinal, and the rewrite has to move with it rather than keep pointing at 1.
+moved = compiler.compile_request(
+    {"prompt": "a courier waits", "refined": refined(),
+     "assets": [ref("img-2", "street.png"), ref("img-1", "her.png")], "duration_s": 6},
+    image_size_lookup=lambda _f: (1000, 1000))
+check("a rewrite re-labels when the references move", "<Picture 2>" in moved.body, True)
+
+check("switching the rewrite off falls back to the typed prompt",
+      compiler.compile_request({"prompt": "a courier waits",
+                                "refined": refined(enabled=False), "duration_s": 6}).body,
+      "a courier waits")
+check("an empty rewrite is no rewrite",
+      compiler.compile_request({"prompt": "a courier waits",
+                                "refined": refined(body="  "), "duration_s": 6}).body,
+      "a courier waits")
+expect_error("a rewrite naming an asset that is gone",
+             lambda: compiler.compile_request(
+                 {"prompt": "a courier waits", "refined": refined(), "duration_s": 6}),
+             "no such asset is attached")
+
+# The reference form's other three sections only exist when a refiner wrote
+# them, and only then is a REF2VA body wrapped in `detailed_description:`.
+sectioned = compiler.compile_request(
+    {"prompt": "her face is @img-1",
+     "refined": {"body": "The woman from @img-1 turns to the window.",
+                 "sections": {"subject_definitions": "<Subject 1>: the woman",
+                              "summary": "[Ref2VA] a portrait",
+                              "retention_analysis": "fully_preserved: her face"}},
+     "assets": [ref("img-1", "her.png")], "duration_s": 6, "soundscape": "rain"})
+check("a refined reference prompt gets the six-section form",
+      [line.split(":")[0] for line in sectioned.prompt.split("\n\n")],
+      ["subject_definitions", "summary", "retention_analysis",
+       "detailed_description", "overall_soundscape"])
+check("a hand-written reference prompt is still left alone",
+      compiler.compile_request({"prompt": "her face is @img-1",
+                                "assets": [ref("img-1", "her.png")], "duration_s": 6}).prompt,
+      "her face is <Picture 1>")
+
+# In a chained timeline the rewrite has already absorbed the global prompt — the
+# refiner was shown it — so joining it on again would say it twice.
+PLAIN = "A courier waits under a sodium lamp, shot on 16mm."
+chained_refine = timeline([segment("a courier waits", refined=refined(body=PLAIN))],
+                          prompt="Live-action")
+check("a refined segment does not get the global prompt twice", chained_refine[0].body, PLAIN)
+
+one_pass_refine = single([segment("a courier waits", refined=refined(body="A courier waits, in 16mm.")),
+                          segment("her hands", refined=refined(body="Her hands, closer."))],
+                         prompt="Live-action")
+check("one pass uses each shot's rewrite as its shot body",
+      one_pass_refine.body,
+      "[Shot 1] A courier waits, in 16mm. [Shot 2] At 00:06.000, Her hands, closer.")
+
+check("an absent render mode means chained", compiler.render_mode({}), "chained")
+expect_error("an unknown render mode", lambda: compiler.render_mode({"render": "stitched"}), "unknown render mode")
+
+if FAILURES:
+    print(f"{len(FAILURES)} failure(s):")
+    for failure in FAILURES:
+        print("  -", failure)
+    sys.exit(1)
+print("all contract tests passed")

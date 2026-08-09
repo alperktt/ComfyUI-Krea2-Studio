@@ -1,0 +1,392 @@
+// The stage: the picture, and nothing at all when there is no picture.
+//
+// The node makes video and used to show none of it. Everything about a
+// generation was legible except the generation — the live preview was latent2rgb
+// mush on a KSampler nobody could see, and the finished clip only existed if you
+// wired a save node to it yourself.
+//
+// It behaves like every other preview in ComfyUI, which is the point: **absent
+// until there is something to show, and then as large as the node will allow.**
+// A box reserving space for a render nobody has asked for is a box permanently
+// full of nothing, so the element is display:none while idle and the owner is
+// told when that changes. The owner is a Satellite (satellite.js): a card that
+// floats at the node's right edge, so the picture arrives beside the controls
+// rather than displacing them.
+//
+// The step count and the clock are overlaid on the picture for the same reason:
+// a caption row under the box is space the picture could have had.
+//
+// **Everything here keys off the node's own id**, because a render is a subgraph
+// and nothing in it is on the canvas:
+//
+// - `progress_state` carries `parent_node_id`, which is exactly our id for every
+//   node the expansion emitted. That is how the step readout finds the sampler.
+// - core's `b_preview_with_metadata` carries the same field.
+// - KJNodes' `kj_preview_override` carries only the emitting node's raw id,
+//   which is ours plus a `GraphBuilder` prefix — so that one is a prefix match.
+//   Its own frontend looks for a canvas node with that id, finds none, and does
+//   nothing, so listening in on it costs that pack nothing.
+// - `executed` carries `display_node`, which `render.emit_tail` has already
+//   stamped with our id.
+
+import { api } from "../../../scripts/api.js";
+import { el } from "./dom.js";
+import { outputUrl } from "./api.js";
+
+/** Every event this listens to. `b_preview` is the metadata-less legacy frame:
+ *  it names no node, so it is only trusted while `progress_state` already says
+ *  one of ours is the thing sampling — see the handler. */
+const EVENTS = ["progress_state", "b_preview_with_metadata", "b_preview",
+                "kj_preview_override", "executed", "execution_error", "execution_start"];
+
+/** A progress report this long is a sampler; the loaders and decoders report a
+ *  step or two each. What lets the stage open on progress rather than waiting
+ *  for a first frame, without opening as an empty black box for as long as a
+ *  checkpoint takes to read off disk. */
+const OPENS_ON_STEPS = 4;
+
+export class Stage {
+  /**
+   * @param {object} spec
+   * @param {() => string|number} spec.nodeId  read late: a node pasted from the
+   *   clipboard is renumbered after it is built
+   * @param {(showing: boolean) => void} [spec.onVisibility]  fired when the
+   *   stage appears or disappears — assigned by the Satellite that hosts it,
+   *   which shows and hides the floating card off this signal
+   */
+  /**
+   * @param {(saved: object) => HTMLElement[]} [spec.resultChips]  extra chips
+   *   for the finished-render overlay, built by the owner from the `executed`
+   *   payload — the PreStage's "start frame / end frame / reference" hand-off.
+   */
+  constructor({ nodeId, onVisibility, onGallery, resultChips }) {
+    this.nodeId = nodeId;
+    this.onVisibility = onVisibility;
+    this.onGallery = onGallery;
+    this.resultChips = resultChips;
+    this.state = "idle";
+    this.progress = null;    // {step, total}
+    this.frame = null;       // object URL or data URI of the newest preview
+    this.result = null;      // {url, name} of the finished video
+    this.error = null;
+    this.startedAt = 0;
+
+    this.media = el("div", { class: "mmc-stage-media" });
+    this.rule = el("div", { class: "mmc-stage-rule" });
+    this.readout = el("div", { class: "mmc-stage-readout" });
+    this.root = el("div", { class: "mmc-stage" }, [this.media, this.rule, this.readout]);
+
+    this.onEvent = (event) => this.handle(event.type, event.detail);
+    for (const name of EVENTS) api.addEventListener(name, this.onEvent);
+
+    this.render();
+  }
+
+  /** Called when the node body is torn down. Listeners on `api` outlive the DOM
+   *  otherwise, and a deleted node would go on decoding previews forever. */
+  destroy() {
+    for (const name of EVENTS) api.removeEventListener(name, this.onEvent);
+    this.releaseFrame();
+    clearInterval(this.ticker);
+  }
+
+  releaseFrame() {
+    if (this.frameUrl) URL.revokeObjectURL(this.frameUrl);
+    this.frameUrl = null;
+  }
+
+  /** Is `id` this node, or something the expansion emitted from it? */
+  ours(id) {
+    if (id === null || id === undefined) return false;
+    const mine = String(this.nodeId());
+    const other = String(id);
+    return other === mine || other.startsWith(`${mine}.`);
+  }
+
+  /** Whether there is anything worth taking up room for. */
+  showing() {
+    return this.state !== "idle";
+  }
+
+  // ---- the wire ------------------------------------------------------------
+
+  handle(type, detail) {
+    if (!detail) return;
+    switch (type) {
+      case "execution_start":
+        // A new queue: whatever is on the stage belongs to the last one. Back to
+        // hidden until the first frame of this one arrives, rather than leaving
+        // the previous render up while a different one is being made.
+        this.reset();
+        break;
+
+      case "progress_state": {
+        // Every node the expansion emitted reports `parent_node_id` = our id.
+        // The one with the most steps is the sampler; the loaders and decoders
+        // report a step or two each and would otherwise win the race.
+        let best = null;
+        for (const entry of Object.values(detail.nodes ?? {})) {
+          if (!this.ours(entry.parent_node_id) && !this.ours(entry.node_id)) continue;
+          if (entry.state !== "running") continue;
+          if (!best || (entry.max ?? 0) > (best.max ?? 0)) best = entry;
+        }
+        if (!best) break;
+        // The stage opens the moment something with real steps is running —
+        // not on the loaders (their one-step reports stay below the
+        // threshold), and not waiting for a first preview frame either, which
+        // may simply never arrive (preview method off, or a frontend that
+        // stopped carrying metadata on the frames).
+        if (!this.showing()) {
+          if ((best.max ?? 0) < OPENS_ON_STEPS) break;
+          this.begin();
+          this.render();
+        }
+        this.progress = { step: best.value ?? 0, total: best.max ?? 0 };
+        this.renderReadout();
+        break;
+      }
+
+      case "b_preview_with_metadata":
+        // Core's own previewer — latent2rgb unless somebody pointed the H3
+        // latent format at a decoder, which nothing does. This is the fallback
+        // when KJNodes is not installed, and it beats an empty box.
+        if (!this.ours(detail.parentNodeId) && !this.ours(detail.nodeId)) break;
+        this.metaFrameAt = Date.now();
+        this.begin();
+        this.releaseFrame();
+        this.frameUrl = URL.createObjectURL(detail.blob);
+        this.frame = this.frameUrl;
+        this.frameIsClip = false;
+        this.render();
+        break;
+
+      case "b_preview": {
+        // The legacy frame: a bare blob, naming no node. Only trusted while
+        // this stage is already sampling — the queue runs one thing at a time,
+        // so while ours is the sampler every frame on the wire is ours. Stands
+        // down whenever the metadata variant is flowing, which carries the
+        // same picture with a name on it.
+        if (this.state !== "sampling") break;
+        if (this.metaFrameAt && Date.now() - this.metaFrameAt < 2000) break;
+        const blob = detail instanceof Blob ? detail : detail.blob;
+        if (!blob) break;
+        this.releaseFrame();
+        this.frameUrl = URL.createObjectURL(blob);
+        this.frame = this.frameUrl;
+        this.frameIsClip = false;
+        this.render();
+        break;
+      }
+
+      case "kj_preview_override": {
+        if (!this.ours(detail.node_id)) break;
+        // The boundary-0 message carries the sigma schedule and often no picture
+        // at all. Take the step count from it, but do not open the stage on it —
+        // see above.
+        if (Number.isFinite(detail.total)) {
+          this.progress = { step: detail.step ?? 0, total: detail.total };
+        }
+        if (!detail.image) break;
+        this.begin();
+        this.releaseFrame();
+        this.frame = `data:${detail.mime || "image/jpeg"};base64,${detail.image}`;
+        // With NVENC available the pack encodes the step clip as video/mp4,
+        // which an <img> renders as a black box. webp — animated or not — and
+        // jpeg are images either way.
+        this.frameIsClip = (detail.mime || "").startsWith("video/");
+        this.render();
+        break;
+      }
+
+      case "executed": {
+        // `render.emit_tail` stamped our id on the save node, so this is our
+        // render coming back even though the node that made it is not on the
+        // canvas.
+        if (String(detail.display_node) !== String(this.nodeId())) break;
+        // Under our own keys, not "images": that is the key core's stock
+        // widgets watch, and they were rendering a second player on the canvas
+        // node right under this stage. MiniMaxH3Save reports mmc_video and
+        // MiniMaxH3SaveImage reports mmc_image instead; which one arrives is
+        // also what says whether the result is a clip or a still.
+        const saved = detail.output?.mmc_video?.[0] ?? detail.output?.mmc_image?.[0];
+        if (!saved) break;
+        this.state = "done";
+        this.progress = null;
+        this.result = { url: outputUrl(saved), name: saved.filename,
+                        isImage: !detail.output?.mmc_video, saved };
+        // The finished clip takes the preview's place, so the last sampled
+        // frame is now a picture that can never be shown again — and the clock
+        // it was ticking under has stopped.
+        clearInterval(this.ticker);
+        this.releaseFrame();
+        this.frame = null;
+        this.render();
+        break;
+      }
+
+      case "execution_error":
+        if (!this.ours(detail.node_id)) break;
+        this.state = "failed";
+        this.progress = null;
+        clearInterval(this.ticker);
+        this.error = detail.exception_message || "the render failed";
+        this.render();
+        break;
+    }
+  }
+
+  reset() {
+    clearInterval(this.ticker);
+    this.metaFrameAt = 0;
+    this.state = "idle";
+    this.result = null;
+    this.error = null;
+    this.progress = null;
+    this.releaseFrame();
+    this.frame = null;
+    this.frameIsClip = false;
+    this.render();
+  }
+
+  /** First frame of a queue. Starts the clock once rather than on every step, so
+   *  the elapsed readout is elapsed and not a stutter. */
+  begin() {
+    if (this.state === "sampling") return;
+    this.state = "sampling";
+    this.startedAt = Date.now();
+    clearInterval(this.ticker);
+    // Only the readout, and only once a second: the frames arrive when they
+    // arrive, and a full render on a timer would fight the preview for the box.
+    this.ticker = setInterval(() => this.renderReadout(), 1000);
+  }
+
+  // ---- render --------------------------------------------------------------
+
+  render() {
+    const showing = this.showing();
+    this.root.style.display = showing ? "flex" : "none";
+    this.root.dataset.state = this.state;
+    // Told rather than inferred: the owner has to give up the height the prompt
+    // box was growing into, and it cannot know to do that from a re-render it
+    // did not trigger.
+    this.onVisibility?.(showing);
+    if (!showing) return;
+
+    if (this.state === "done" && this.result) {
+      this.media.replaceChildren(this.result.isImage ? this.still() : this.video());
+    }
+    else if (this.frame) this.media.replaceChildren(this.previewFrame());
+    else this.media.replaceChildren();
+
+    if (this.state === "sampling" && this.progress?.total) {
+      this.rule.style.transform = `scaleX(${Math.min(1, this.progress.step / this.progress.total)})`;
+      this.rule.style.opacity = "1";
+    } else {
+      this.rule.style.opacity = "0";
+    }
+
+    this.renderReadout();
+  }
+
+  /** The overlay. Its own method because the clock ticks it every second, and
+   *  rebuilding the picture for that would restart a playing video. */
+  renderReadout() {
+    if (!this.showing()) return;
+
+    if (this.state === "failed") {
+      this.readout.replaceChildren(el("span", { class: "mmc-stage-chip warn", text: this.error }));
+      return;
+    }
+    if (this.state !== "sampling") {
+      // A finished render is just the picture — plus the way to the ones before
+      // it, plus whatever hand-off chips the owner builds from the result (the
+      // PreStage's "start frame / end frame / reference" row).
+      this.readout.replaceChildren(
+        ...(this.state === "done" && this.onGallery ? [
+          el("button", {
+            class: "mmc-stage-chip mmc-stage-gallery",
+            text: "Gallery",
+            title: "Browse finished renders",
+            onclick: () => this.onGallery(),
+            onpointerdown: (event) => event.stopPropagation(),
+          }),
+        ] : []),
+        ...(this.state === "done" && this.result?.saved && this.resultChips
+          ? this.resultChips(this.result.saved) : []),
+      );
+      return;
+    }
+    this.readout.replaceChildren(
+      el("span", {
+        class: "mmc-stage-chip",
+        text: this.progress?.total ? `${this.progress.step} / ${this.progress.total}` : "sampling",
+      }),
+      el("span", { class: "mmc-stage-chip", text: elapsed(Date.now() - this.startedAt) }),
+    );
+  }
+
+  /** The newest step preview. An animated clip plays itself in a bare <video>;
+   *  no transport, no sound-on-hover — it is a rough decode of the step's
+   *  latent, not the result, and the result's player is video() below. */
+  previewFrame() {
+    if (!this.frameIsClip) {
+      return el("img", { class: "mmc-stage-img", src: this.frame, alt: "" });
+    }
+    const clip = el("video", {
+      class: "mmc-stage-video",
+      src: this.frame,
+      autoplay: true, loop: true, playsinline: true,
+    });
+    // The property rather than the attribute: Chromium's autoplay gate reads
+    // `muted`, and setAttribute("muted") sets only the attribute.
+    clip.muted = true;
+    return clip;
+  }
+
+  /** A finished still. An <img> and nothing else — no transport to draw, and
+   *  the hand-off chips live in the readout overlay with the gallery. */
+  still() {
+    return el("img", {
+      class: "mmc-stage-img",
+      src: this.result.url,
+      alt: this.result.name,
+      onpointerdown: (event) => event.stopPropagation(),
+    });
+  }
+
+  video() {
+    // Plays itself, silently, forever. Silence is not a preference: no browser
+    // will autoplay a video with sound at all, so an unmuted one would simply
+    // sit on its first frame — and a node body that starts talking the moment a
+    // render lands is a node body you turn off.
+    //
+    // **So the sound follows the pointer**, which is what VHS's preview does and
+    // is the only place volume can come from without either a click or a
+    // surprise: putting the pointer on the picture is deliberate enough to mean
+    // "let me hear this", and taking it off takes the sound away again. Nothing
+    // about the autoplay policy is being worked around — the page has sticky
+    // user activation long before a render exists, because queueing one is a
+    // click.
+    //
+    // The control bar is the browser's: scrubbing and volume are solved problems
+    // and a hand-built transport here would only be a worse one. Muting from it
+    // sticks until the pointer next arrives, which is the same rule.
+    return el("video", {
+      class: "mmc-stage-video",
+      src: this.result.url,
+      controls: true, autoplay: true, loop: true, muted: true, playsinline: true,
+      onmouseenter: (event) => { event.currentTarget.muted = false; },
+      onmouseleave: (event) => { event.currentTarget.muted = true; },
+      // The canvas pans on drag, and a drag that starts on the scrub bar is a
+      // scrub rather than a pan.
+      onpointerdown: (event) => event.stopPropagation(),
+    });
+  }
+}
+
+/** `92000` -> `"1:32"`. Minutes only: a render that runs for an hour has bigger
+ *  problems than its readout. */
+function elapsed(ms) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}

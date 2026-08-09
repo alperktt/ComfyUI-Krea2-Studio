@@ -1,0 +1,603 @@
+"""The refine button's endpoint: a blob in, the rewritten prose out.
+
+Refining is a server round trip rather than a step inside `execute` for three
+reasons, and they all point the same way. The rewrite is what the DiT will
+actually read, so it has to be visible and editable *before* a five-minute
+sampler pass rather than after it. It has to be stored, or the same queue would
+produce different prompts on consecutive runs and ComfyUI's cache would miss on
+every one of them. And the media it needs to look at is addressed by filename in
+the input folder, which is a thing only the server can open.
+
+So the frontend posts the blob it is already holding, this module compiles it to
+find out what the request actually is — the mode, the reference slots, the
+ordinals each handle will be given — asks the model, and hands back prose the
+frontend writes into the same blob. Nothing here is on the queue path; by the
+time the node runs, the rewrite is an ordinary field in `creator_data`.
+"""
+
+import asyncio
+import os
+
+from aiohttp import web
+
+from server import PromptServer
+
+from . import compile as compiler, media, preview, refine, refine_local, refine_skill
+
+# What one call will look at. Every image rides in the context window for the
+# whole generation, and a 24-card timeline with references on every card would
+# fill it with pictures and leave no room for the guide.
+MAX_IMAGES = 16
+
+# What each role is, in the words the glossary uses. The reference guide names
+# these slots itself; this is the same distinction said once for the model.
+_WHAT = {
+    "first_frame": "the target video's first frame",
+    "last_frame": "the target video's final frame",
+}
+
+# A narrowed reference image, said as what it is and what it is not. The DiT is
+# handed the whole picture either way; the narrowing has to live in the prose —
+# the subject definition and the retention line — which is exactly what these
+# notes tell the refiner to write. Phrased as scope, not prohibition: the
+# retention markers can only cover what the definition claims.
+_TAKES_WHAT = {
+    "person": "a person reference",
+    "object": "an object reference",
+    "scene": "a scene reference",
+    "style": "a style reference",
+}
+_TAKES_NOTE = {
+    "person": "only the person is the reference — face, hair, skin, build and "
+              "what they wear. The picture's background, palette, lighting, "
+              "pose and action are not part of it: define the subject as the "
+              "person alone and retain nothing else from this picture",
+    "object": "only the object itself is the reference. The picture's "
+              "surroundings, lighting and arrangement are not part of it: "
+              "define the subject as the object alone and retain nothing else "
+              "from this picture",
+    "scene": "only the place is the reference — the environment, its surfaces "
+             "and its light. Any people or passing objects in the picture, and "
+             "its framing, are not part of it",
+    "style": "only the look is the reference — medium, palette, light and "
+             "rendering. The picture's subjects, layout and content are not "
+             "part of it",
+}
+
+
+def _slot(asset, label, show_label):
+    """One glossary line's worth of an asset."""
+    what = _WHAT.get(asset.role)
+    if what is None:
+        what = {
+            "image": _TAKES_WHAT.get(asset.takes, "a reference image"),
+            "video": {"picture": "a reference video, picture only",
+                      "picture+sound": "a reference video, picture and soundtrack",
+                      "sound": "a reference video used for its soundtrack alone"}.get(
+                          asset.track, "a reference video"),
+            "audio": "a reference audio clip",
+        }[asset.kind]
+    row = {"handle": asset.handle, "what": f"{what} ({os.path.basename(asset.filename)})"}
+    if asset.kind == "image" and asset.role == "reference" and asset.takes in _TAKES_NOTE:
+        row["note"] = _TAKES_NOTE[asset.takes]
+    # Only where the ordinal is unambiguous. Handles are allocated per segment,
+    # so across a strip two cards each have a `<Picture 1>` — showing both would
+    # tell the model that one label means two files.
+    if show_label and label:
+        row["label"] = label
+    if asset.kind == "audio" or (asset.kind == "video" and asset.track == "sound"):
+        row["note"] = "you cannot hear it; take what it holds from the request"
+    return row
+
+
+def _still(path):
+    """One frame of a clip, as a PIL image.
+
+    The picker's cached thumbnail when there is one — the same still the user is
+    looking at in the grid — and a fresh decode into memory when there is not.
+    `preview` owns both halves of that; this borrows its renderer rather than
+    opening a second PyAV path that could disagree about which frame is
+    representative.
+    """
+    import io
+
+    from PIL import Image
+
+    try:
+        cached = preview._cache_path(path, "thumb", "jpg")
+        if os.path.exists(cached):
+            return Image.open(cached)
+    except OSError:
+        pass
+    buffer = io.BytesIO()
+    preview._render_thumb(path, buffer)
+    buffer.seek(0)
+    return Image.open(buffer)
+
+
+def _look(compiled, show_labels):
+    """The glossary and the pictures for one shot.
+
+    Images are opened at full size and downscaled by `refine_local.to_tensor`.
+    A clip contributes the still the picker already decoded for it — one frame
+    says what a reference holds, and decoding more here would put minutes of
+    PyAV on a request the user is waiting on with a spinner.
+    """
+    from PIL import Image
+
+    slots, images = [], []
+    ordered = [a for a in (compiled.first_frame, compiled.last_frame) if a is not None]
+    ordered += compiled.ref_images + compiled.ref_videos + compiled.ref_audios
+
+    for asset in ordered:
+        slot = _slot(asset, compiled.labels.get(asset.handle), show_labels)
+        picture = None
+        try:
+            path = media.resolve(asset.filename)
+            if asset.kind == "image":
+                picture = Image.open(path)
+            elif asset.kind == "video" and asset.track != "sound":
+                picture = _still(path)
+        except Exception:  # noqa: BLE001 — an unreadable file is a slot without a picture
+            picture = None
+        if picture is not None:
+            images.append(picture)
+            # Which of the message's images this is comes later, in `_number`,
+            # once every shot's pictures are in one list and the tail past
+            # `MAX_IMAGES` is known.
+            slot["picture"] = True
+        elif asset.kind != "audio" and asset.track != "sound":
+            # It should have had one and does not: the file would not open. Said
+            # rather than left silent, because the glossary line stays either way
+            # and a handle the model believes it can see is worse than one it
+            # knows it cannot.
+            slot["note"] = "the file could not be read, so no picture of it is attached"
+        slots.append(slot)
+    return slots, images
+
+
+def _shot(compiled, text, seconds, continues, show_labels):
+    slots, images = _look(compiled, show_labels)
+    assets = [a for a in [compiled.first_frame, compiled.last_frame] if a is not None]
+    assets += compiled.ref_images + compiled.ref_videos + compiled.ref_audios
+    return {
+        "mode": compiled.mode,
+        "seconds": seconds,
+        "text": text,
+        "continues": continues,
+        "slots": slots,
+        # Kept for the reply, not for the message: `normalize_handles` needs the
+        # map to read an ordinal back off, and `check` needs the handle set.
+        "labels": dict(compiled.labels),
+        "handles": {a.handle for a in assets},
+        # The references alone, for the dropped-citation warning: a keyframe is
+        # bound by the instruction line and needs no mention in the prose, but a
+        # reference nothing points at conditions nothing.
+        "refs": {a.handle for a in
+                 compiled.ref_images + compiled.ref_videos + compiled.ref_audios},
+    }, images
+
+
+def _plan(body):
+    """The request -> (mode, shots, images), whichever of the three shapes it is.
+
+    One shot for the Creator node and for a single timeline card; every card at
+    once for a whole-timeline refine, which is the only way shot 4 can be written
+    knowing what shot 1 established.
+    """
+    kind = body.get("kind")
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise compiler.CompileError("no state was sent")
+    if kind not in ("creator", "segment", "timeline"):
+        raise compiler.CompileError(f"unknown refine target {kind!r}")
+
+    if kind == "creator":
+        compiled = compiler.compile_request(data, media.image_size)
+        shot, images = _shot(compiled, str(data.get("prompt") or ""),
+                             compiled.seconds, False, True)
+        return compiled.mode, [shot], images
+
+    single = compiler.render_mode(data) == "single"
+    segments = compiler.timeline_segments(data)
+    payloads = compiler.timeline_payloads(data, media.image_size)
+
+    wanted = list(range(len(segments)))
+    if kind == "segment":
+        index = int(body.get("index", 0))
+        if not 0 <= index < len(segments):
+            raise compiler.CompileError(f"there is no segment {index + 1}")
+        wanted = [index]
+
+    shots, images = [], []
+    lone = len(wanted) == 1
+    for index in wanted:
+        payload = payloads[index]
+        compiled = compiler.compile_segment(payload, media.image_size)
+        shot, pictures = _shot(
+            compiled,
+            # The joined text: in a chained timeline the global prompt stands in
+            # front of every segment, and the rewrite has to have absorbed it,
+            # because at compile time it replaces the join outright.
+            str(payload["request"].get("prompt") or ""),
+            float(segments[index].get("duration_s") or 0) if single else compiled.seconds,
+            bool(payload.get("continue")),
+            lone,
+        )
+        shot["index"] = index
+        shots.append(shot)
+        images.extend(pictures)
+
+    return _representative(data, shots, single), shots, images
+
+
+def _representative(data, shots, single):
+    """The mode the system prompt is written for.
+
+    The four keyframe modes share one guide and one reply shape, so a strip that
+    mixes them needs nothing special — each card's own note goes in the message
+    beside its text. The reference form is a different document with three more
+    sections in its reply, and a single call cannot be writing both at once, so a
+    strip that mixes the two is refused here rather than silently rewritten into
+    whichever form came first.
+    """
+    if single:
+        # One pass is one generation, so the merged request has the only mode
+        # there is — the cards' individual modes are not what will be encoded.
+        return compiler.compile_single(data, media.image_size).mode
+
+    modes = [shot["mode"] for shot in shots]
+    reference = [n + 1 for n, mode in enumerate(modes) if mode == "REF2VA"]
+    if reference and len(reference) != len(modes):
+        plain = next(n + 1 for n, mode in enumerate(modes) if mode != "REF2VA")
+        raise compiler.CompileError(
+            f"segment {reference[0]} has @ references and segment {plain} has none. "
+            f"Those are two different prompt formats — the six-section reference "
+            f"form and the plain one — and one rewrite is written in one of them. "
+            f"Refine those cards individually."
+        )
+    # Every chained segment is its own generation over its own reference pool,
+    # so each needs its own `subject_definitions` and `retention_analysis` — and
+    # one call returns one set. Copying that set onto every segment would put
+    # labels in a card's analysis that the card's own references never define.
+    # One pass has no such problem: there the shots share one merged pool.
+    if reference and len(modes) > 1:
+        raise compiler.CompileError(
+            "a chained timeline of reference segments is refined a card at a time. "
+            "Each segment is its own generation over its own references, so each "
+            "needs its own reference analysis, and one rewrite writes one. "
+            "(One-pass mode merges the references into a single pool and refines "
+            "the whole strip at once.)"
+        )
+    return modes[0] if modes else "T2VA"
+
+
+def _number(shots, limit):
+    """Bind each picture to the glossary line it belongs to, and cut the tail.
+
+    The images ride in one flat list — every shot's, concatenated in play order —
+    and the glossary is printed per shot, so the two only line up if every listed
+    asset has a picture. Several do not: an audio reference, a video taken for
+    its soundtrack alone, a file that would not open. Counting the pictures here
+    and stamping the number onto the slot that produced each one is what makes
+    the correspondence explicit rather than positional, so an audio clip on the
+    first card cannot shift every later picture onto the wrong handle.
+
+    Doing it after the cap is applied means the slots past it say they were not
+    shown, rather than pointing at an image that is no longer in the message.
+    Returns how many were dropped.
+    """
+    number, dropped = 0, 0
+    for shot in shots:
+        for slot in shot["slots"]:
+            if not slot.pop("picture", False):
+                continue
+            if number >= limit:
+                dropped += 1
+                slot["note"] = (f"not shown to the model — one call looks at at most "
+                                f"{limit} images")
+                continue
+            number += 1
+            slot["image"] = number
+    return dropped
+
+
+def _shared(shots):
+    """One handle set, label map and reference set covering every shot.
+
+    The sections, the soundscape and the score are written once for the whole
+    reply, so they are read back against every shot's references at once. With
+    one shot — the only place the reference sections exist outside a one-pass
+    strip — this is exactly that shot's own maps. Across several, handles are
+    allocated per segment, so the same label can mean two different files; an
+    entry two shots disagree on is dropped rather than converted to whichever
+    card came first, and the label the model wrote stays in the text where
+    `check` can point at it.
+    """
+    handles, refs, labels, conflicted = set(), set(), {}, set()
+    for shot in shots:
+        handles |= shot["handles"]
+        refs |= shot.get("refs", set())
+        for key, label in shot["labels"].items():
+            if labels.setdefault(key, label) != label:
+                conflicted.add(key)
+    for key in conflicted:
+        del labels[key]
+    owners = {}
+    for key, label in labels.items():
+        owners.setdefault(label, []).append(key)
+    for keys in owners.values():
+        if len(keys) > 1:
+            for key in keys:
+                del labels[key]
+    return handles, refs, labels
+
+
+def _run_skill(body, name, mode, shots, pictures, seconds, dropped):
+    """The skill path: the packaged skill is the whole instruction.
+
+    Nothing of the harness rides along — no rules, no guide, no JSON contract,
+    no prefill — so the reply is the finished document itself and is stored
+    whole as the one body. `contextir.compose` passes an already-sectioned body
+    through untouched, which is what makes that storable at all.
+
+    One generation writes one document, so this covers exactly one shot: the
+    Creator node, or a single card. A whole-strip refine has no meaning here —
+    the skill's output is not divisible into cards after the fact.
+    """
+    if len(shots) != 1:
+        raise compiler.CompileError(
+            "a skill writes one whole prompt at a time — refine cards one by one, "
+            "or switch the refiner back to its built-in prompts"
+        )
+    shot = shots[0]
+
+    skill = refine_skill.load(name)
+    content = refine_local.chat(
+        body.get("model") or "",
+        refine_skill.system_prompt(skill),
+        refine_skill.user_message(shot, seconds=seconds, images=len(pictures),
+                                  mode=mode, language=body.get("language")),
+        [refine_local.to_tensor(p) for p in pictures],
+        temperature=body.get("temperature", 0.7),
+        seed=body.get("seed", -1),
+        max_tokens=body.get("max_tokens"),
+        prefill="",
+    )
+    written = refine.normalize_handles(refine_skill.parse_reply(content), shot["labels"])
+
+    problems = []
+    if dropped:
+        problems.append(
+            f"{dropped} attached file{'s were' if dropped != 1 else ' was'} not shown to "
+            f"the model — one call looks at at most {MAX_IMAGES}"
+        )
+    problems += ["The rewrite " + p for p in refine.check(written, shot["handles"], shot["labels"])]
+    for handle in refine.uncited(written, shot["refs"], shot["labels"]):
+        problems.append(
+            f"the rewrite never mentions @{handle} — the file is still attached, "
+            f"but nothing in the prompt will point at it. Refine again, or write "
+            f"it in yourself."
+        )
+
+    # The document carries its own audio sections, so the two fields stay empty
+    # rather than duplicating them outside it, and there is no `seen` readout —
+    # the skill's contract has no such field, and inventing one would be the
+    # harness leaking back in.
+    return {
+        "mode": mode,
+        "skill": skill["name"],
+        "shots": [{"index": shot.get("index"), "body": written}],
+        "soundscape": "",
+        "music": "",
+        "sections": None,
+        "seen": "",
+        "problems": problems,
+    }
+
+
+def _run(body):
+    """The blocking half: compile, look, ask, parse. Runs on a thread."""
+    derived, shots, pictures = _plan(body)
+
+    dropped = _number(shots, MAX_IMAGES)
+    pictures = pictures[:MAX_IMAGES]
+
+    seconds = sum(float(s.get("seconds") or 0) for s in shots)
+
+    skill = str(body.get("skill") or "").strip()
+    if skill:
+        return _run_skill(body, skill, derived, shots, pictures, seconds, dropped)
+
+    # Which template writes the rewrite. `auto` — the default — is the derived
+    # mode; a pinned template replaces it everywhere the prompting looks,
+    # including each shot's own mode note, so the message cannot contradict the
+    # system prompt about what kind of request this is. What is *attached* is
+    # untouched: the glossary and the queue-time alignment line stay real.
+    mode, forced = refine.choose_template(body.get("template"), derived)
+    if forced:
+        for shot in shots:
+            shot["mode"] = mode
+
+    # Who divides the video into shots. In the Creator node nothing else does:
+    # there is one card, one duration and no cut times anywhere, so a clip of any
+    # length comes back as a single uncut shot unless the model is asked for the
+    # cuts. A timeline already has them — the cards are the shots and their cut
+    # times are the running sum of the durations the user set — so it is left
+    # alone, and a model moving a cut off the frame the next card starts on is
+    # not a failure mode this can have.
+    cuts = refine.shot_limit(seconds) if body.get("kind") == "creator" else 0
+
+    # ComfyUI's generation loop samples plain logits — nothing constrains the
+    # reply to a shape — so the shape is written into the instruction as words
+    # and the reply is started mid-object.
+    shape = refine.reply_shape(mode, len(shots), cuts=cuts, images=len(pictures))
+    system = refine.system_prompt(mode, body.get("language") or "English",
+                                  shape=shape, cuts=cuts)
+    message = refine.user_message(
+        shots,
+        seconds=seconds,
+        images=len(pictures),
+        mode=mode,
+    )
+    content = refine_local.chat(
+        body.get("model") or "",
+        system, message, [refine_local.to_tensor(p) for p in pictures],
+        # Rewriting is a fidelity task, not an ideation one: the default leans
+        # cold so that named things survive, and the dial is still the user's.
+        temperature=body.get("temperature", 0.3),
+        seed=body.get("seed", -1),
+        max_tokens=body.get("max_tokens"),
+    )
+    parsed = refine.parse_reply(content, mode, len(shots), cuts=cuts)
+
+    # Several shots came back where one card was asked about, which is the whole
+    # point of `cuts` — they are one description with cuts in it, assembled here
+    # the way `compile.compile_single` assembles a one-pass timeline, and stored
+    # as the single body the card has room for.
+    if "cuts" in parsed:
+        parsed["shots"] = [refine.join_shots(parsed["shots"], parsed["cuts"], seconds)]
+
+    problems = []
+    if dropped:
+        problems.append(
+            f"{dropped} attached file{'s were' if dropped != 1 else ' was'} not shown to "
+            f"the model — one call looks at at most {MAX_IMAGES}"
+        )
+    # Asked for whenever a picture rides along, so its absence is a model that
+    # wrote the rewrite without ever attending to the images — which is exactly
+    # the failure the field was added to make visible.
+    if pictures and not parsed.get("seen"):
+        problems.append(
+            "the model did not say what it saw in the attached images, so it may "
+            "have written past them — check the rewrite against your frames"
+        )
+
+    out = []
+    for shot, written in zip(shots, parsed["shots"]):
+        # Back to handles: the model has just read a guide written entirely in
+        # ordinals, so it reaches for them however it is asked. Storing the
+        # handle instead is what lets the rewrite survive an asset being added.
+        written = refine.normalize_handles(written, shot["labels"])
+        for problem in refine.check(written, shot["handles"], shot["labels"]):
+            where = f"Shot {shot['index'] + 1} " if "index" in shot else "The rewrite "
+            problems.append(where + problem)
+        out.append({"index": shot.get("index"), "body": written})
+
+    # The fields written once for the whole reply get the same treatment as the
+    # bodies. This is where the references usually end up in the reference form
+    # — a picture is cited in `subject_definitions` and folded into a
+    # `<Subject N>`, never to be named in a shot body — so leaving these raw is
+    # leaving most of the citations as ordinals that go stale.
+    handles, refs, labels = _shared(shots)
+
+    def normalized(text, field):
+        text = refine.normalize_handles(text, labels)
+        for problem in refine.check(text, handles, labels):
+            problems.append(f"The {field} {problem}")
+        return text
+
+    parsed["soundscape"] = normalized(parsed["soundscape"], "overall_soundscape")
+    parsed["music"] = normalized(parsed["music"], "non_diegetic_music")
+    sections = parsed.get("sections")
+    if sections:
+        sections = {name: normalized(text, name) for name, text in sections.items()}
+        parsed["sections"] = sections
+
+    # A reference the whole rewrite never points at conditions nothing, and
+    # until now that was the one failure nothing reported.
+    everything = "\n".join([entry["body"] for entry in out]
+                           + list((sections or {}).values())
+                           + [parsed["soundscape"], parsed["music"]])
+    for handle in refine.uncited(everything, refs, labels):
+        problems.append(
+            f"the rewrite never mentions @{handle} — the file is still attached, "
+            f"but nothing in the prompt will point at it. Refine again, or write "
+            f"it in yourself."
+        )
+
+    # Quoted request text is the user dictating exact words, and it is the one
+    # fidelity promise that can be checked mechanically rather than trusted to
+    # the system prompt.
+    for span in refine.dropped_quotes([s.get("text") or "" for s in shots], everything):
+        problems.append(
+            f'the request quotes "{span}" and the rewrite never writes it — '
+            f'those exact words will not reach the video model. Refine again, '
+            f'or edit them in.'
+        )
+
+    return {
+        "mode": mode,
+        # Which template actually wrote this, and whether that was the request's
+        # own mode or the user's pin — the panel shows it either way, because
+        # "which form is this prose in" should be readable off the result rather
+        # than deduced from what was attached.
+        "template": mode,
+        "derived": derived,
+        "forced": forced,
+        "shots": out,
+        "soundscape": parsed["soundscape"],
+        "music": parsed["music"],
+        "sections": parsed.get("sections"),
+        # What the model said it could see. Not stored in the blob and not
+        # queued — it is a readout of this call, and it goes stale the moment
+        # anything is refined again.
+        "seen": parsed.get("seen") or "",
+        "problems": problems,
+    }
+
+
+@PromptServer.instance.routes.get("/minimax_creator/refine/models")
+async def refine_models(request):
+    """The text encoders on disk.
+
+    A directory listing that cannot fail and cannot tell a usable text encoder
+    from a T5 — which is why it is unfiltered here and judged in
+    `refine_local._check`, on the loaded model, where the answer is real.
+    """
+    loop = asyncio.get_running_loop()
+    names = await loop.run_in_executor(None, refine_local.list_models)
+    return web.json_response({"models": names})
+
+
+@PromptServer.instance.routes.get("/minimax_creator/refine/skills")
+async def refine_skills(request):
+    """The skill packages under the node's skills/ directory.
+
+    A directory listing, like the models route: whether a listed package is
+    actually loadable is judged in `refine_skill.load`, on the press, where a
+    broken zip becomes a message rather than a missing menu entry.
+    """
+    return web.json_response({"skills": refine_skill.list_skills()})
+
+
+@PromptServer.instance.routes.post("/minimax_creator/refine")
+async def refine_prompt(request):
+    """Rewrite one prompt, one card, or a whole timeline.
+
+    Errors come back as 400 with a message rather than as a stack trace: every
+    one of them is something the user can act on — no model is chosen, the
+    chosen file is not a Qwen3-VL, the blob does not compile yet — and the panel
+    shows the message where the button was.
+    """
+    try:
+        body = await request.json()
+    except ValueError:
+        return web.json_response({"error": "the request body was not JSON"}, status=400)
+
+    if not (body.get("model") or "").strip():
+        return web.json_response({"error":
+            "No text encoder chosen. Put a Qwen3-VL 4B or 8B text encoder in "
+            "models/text_encoders and pick it in the refiner's settings."
+        }, status=400)
+
+    loop = asyncio.get_running_loop()
+    try:
+        # Decoding images and waiting on a local model are both long enough that
+        # doing them on the event loop would stall the prompt queue and the
+        # websocket for the whole call.
+        return web.json_response(await loop.run_in_executor(None, _run, body))
+    except (refine.RefineError, compiler.CompileError, media.MediaError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    except Exception as exc:  # noqa: BLE001
+        return web.json_response({"error": f"{type(exc).__name__}: {exc}"}, status=500)

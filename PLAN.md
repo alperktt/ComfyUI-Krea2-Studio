@@ -1,0 +1,205 @@
+# Plan
+
+Where this is going and why. The README describes what the code *is*; this is
+the reasoning behind it and what is left.
+
+## The goal
+
+A Krea-style single-prompt experience for MiniMax H3 inside ComfyUI. One node,
+one prompt box, media attached by `@` mention. Not a graph of director nodes.
+
+## Why the `@` chip is the whole design
+
+H3 is not prompted with free text. It expects a structured Context-IR in which
+every reference is addressed by an ordinal label — `<Picture 2>`, `<Video 1>`,
+`<Audio 1>`, `<Subject 3>` — and the Ref2VA form has six mandatory sections
+including a `retention_analysis` with fixed markers.
+
+Producing those labels by hand, in the order the tokenizer presents them, is the
+actual difficulty of using the model. The `@` chip removes it: you attach media
+and write "use @img-2 for her face", and the labels are assigned and substituted
+for you. Everything else in this package exists to support that one gesture.
+
+## Decisions
+
+| Decision | Choice | Why |
+|---|---|---|
+| Backend | Local open weights | Runs offline through core's `nodes_minimax_h3`. No API key, no uploads. Costs 2K output and the hosted Context-IR preprocessor. |
+| Surface | One node with a DOM body | Stays inside the graph, composes with other nodes, saves in the workflow. Matches how LTX Director is built. |
+| `@` source | The ComfyUI input folder | "Add image" uploads via `/upload/image`, which writes to `input/` — so attaching and `@`-browsing are the same store. No separate asset database. |
+| Duration | Whole seconds in the UI | The user asked for `6 s` on the pill. The 17n+5 grid is handled behind it; downstream sees the true value. |
+| Checkpoints | Two MODEL inputs, routed | FL2VA and Ref2VA are different checkpoints. What you attach picks the mode; the mode picks which input is passed through. |
+| Clip segments | Optional `trim`, one editor, two entry points | Whole clip stays the default and the grid stays a grid. The picker cell and the attached chip open the same modal, so the segment is chosen the same way before or after attaching. Cutting in `media.py` rather than asking for a pre-trimmed file keeps the input folder the only asset store. |
+| Video sound | `track`: picture, picture+sound, or sound — sound on by default, probed | A clip chosen for its motion is usually wanted for its sound too. But the default is only right when there is a soundtrack to bind, and no browser reports that portably — hence `/minimax_creator/probe`, which reads the container header. A silent clip attaches silent instead of failing at queue time on a choice the user never made. Explicitly choosing a track in the segment editor outranks the default. |
+| Sound without the picture | The same `track` field, routed into `ref_audios` by `compile.py` | A soundtrack you want to cite is often attached to a clip whose look you do not — a voice, a room tone, a piece of scoring. Making that a third value of the field that already decided picture-vs-picture-and-sound keeps one axis with three points instead of two booleans that can contradict each other. It is a bucketing question, not a loading one: the decoder already reads an audio stream out of an mp4, so the whole feature is which list the asset lands in, decided once in `compile.py` and mirrored by `state.js` so the slot counters agree. The clip keeps its `vid-N` handle — the handle names the file, not the bucket — so switching the picture back on never rewrites the prompt. |
+| LoRAs | Managed in the node, patched onto the routed checkpoint | The node already decides which of the two checkpoints comes out, so it is the only place that knows what a LoRA would be patching. A LoRA trained against FL2VA does nothing on Ref2VA and says nothing about it — `load_lora` only logs the keys it could not place — so each entry names the checkpoints it claims, and one that lands somewhere it matches no keys is refused rather than quietly generating an unchanged video. |
+| Trigger words | Copied onto the entry, prefixed at compile time, printed in the node | The sidecar is a cache, not a contract: it can be wrong, absent, or on a different machine, so the entry owns the literal words and a sidecar word is just a chip switched on. Prefixing is what every LoRA is documented against, but it edits a prompt the user cannot see edited — hence the line under the chips. `prompt_override` still bypasses the lot. |
+| LoRA cards | CiviMeta sidecars, optional | `{model}.civitai/` beside each file already holds the showcase media, title, base model and trigger words. Reading it is a JSON load and a `readdir`; a LoRA without one still gets a working card from its filename. |
+| Prompt shape | A Context-IR skeleton composed at compile time, additive only | H3-Base was trained on H3-Context-IR's output, not on sentences: a mode instruction line, then `integrated_multimodal_description` / `overall_soundscape` / `non_diegetic_music`. We cannot write the prose without an LLM (that is phase 5) but the field names, the ordering, the `[Shot 1]` marker and the `S.SS` alignment line are mechanical, and emitting them is the difference between in- and out-of-distribution. `contextir.py` only ever *adds* what is absent, so a hand-written or refined prompt that already carries its own sections comes through untouched — and Ref2VA, whose six-section form we cannot synthesise, is only checked for the two audio fields it shares. |
+| Sound and music | Two global fields on the timeline, per-segment override | `overall_soundscape` and `non_diegetic_music` are the two Context-IR fields that describe the whole piece rather than a shot — a cut is not where the room tone changes — so the timeline owns them and a segment leaving them empty inherits rather than clearing. An empty box emits *nothing*: `N/A` is the guide's way of saying "deliberately none", which is a real statement and not what a blank field means. |
+| Global LoRAs | On the timeline, merged in front of each segment's own | A turbo LoRA is a property of the run, not of shot 3. Merged in `compile.merge_loras` before anything compiles, so `active_loras` and `collect_triggers` see one stack and the weights and the trigger words cannot disagree. A segment naming the same file replaces the global entry rather than stacking it twice at two strengths. |
+| Turbo switch | A pill on the sampler row that drives the ordinary LoRA stack | The H3 turbo LoRAs (larryvrh's v4 EMA, the lightx2v distill and Kijai's conversions of it) are a run-level speed choice: 4/6/8 steps for draft/medium/good against a native 20, euler + beta because the joint audio latent warbles on res_multistep at those counts. The switch owns no second stack — engaged, the file is a normal `loras` entry the manager and the chip can disable, and `turbo.sync` reconciles on every commit so removing it anywhere gives the saved sampler row back. Which file it engages is machine configuration and lives in the weights popover; strength is guessed from the filename (lightx2v ~0.6, larryvrh 1.0) and the manager's slider overrides it. Merged turbo checkpoints — distillation baked into the weights — engage with *no LoRA at all* ("no LoRA · merged checkpoint" in the picker, remembered as `turbo.merged`): the switch then owns only the sampler row, and the user picking it is trusted to know their checkpoint. compile.py never sees the `turbo` block. |
+| Sound across a seam | The previous segment's audio tail as a `ref_audio` block, on FL2VA | The model card lists FL2VA's inputs as text and frames only, but the packed sequence has `ref_audio` rows and the weights read them — the same conditioning LTX takes. So a seam can carry the room tone, key and tempo instead of restarting them. Core cannot express it unaided: `MiniMaxH3.extra_conds` rebuilds `cond_video_latents` from the reference list and wipes the keyframe latents doing it, so `payload.py` installs a diffusion-model wrapper that puts them back in layout order. A repair, not a behaviour — with only one of the two present it reproduces exactly what core computed. |
+| Seam switches | Two, independent | Picture and sound cross a cut separately: a hard cut whose score keeps playing and a match cut that resets the room tone are both ordinary. Two switches say that; one control with three states would have to invent an ordering between them. |
+| Audio tail length | 1 s, capped at 4 | Reference audio costs `40 × seconds × 2` rows through every sampling step, *and* advances the layout's RoPE cursor — so a long tail pushes the target's time origin off the keyframe, which stays pinned at the text, and the inherited start frame stops reading as frame 0. A second is also all a seam needs: what crosses a cut is the ambience and the tempo, not the phrase. |
+| Default cfg | 1.0 | The released checkpoints are CFG-distilled — guidance is in the weights. Real guidance on top of that burns the picture and doubles the sampling cost. It stays an ordinary widget: a default, not a constraint. |
+| Chained vs one pass | A toggle on the timeline, chained by default | H3's own prompt format is already a shot list with cut times (`[Shot 2] At 00:05.000, the camera cuts to…`), so the same strip of cards reads two ways: one generation each, joined — or one generation whose description holds all of them. One pass has no seam to cross, so continuity, sound and colour carry because they were never broken, and every rough edge below is a property of chaining rather than of the timeline. It is a toggle and not a replacement because chained is still the only way to pass what one context window will hold, and because the two modes lose different things. `compile.single_payload` flattens the timeline into one ordinary request and the graph loop runs once; nothing downstream knows which mode it is in. |
+| What one pass collapses | Merged, or refused where merging would be a guess | A single pass has one mode, one checkpoint, one LoRA stack, one seed and one soundscape. References merge across shots by file — the same face cited in shot 1 and shot 4 is one `<Picture N>`, which is the point — and handles, which are allocated per segment, are rewritten onto the merged pool before labels are assigned. The rest is refused rather than resolved: shots that disagree about the checkpoint or the soundscape, a start frame anywhere but shot 1, an end frame anywhere but the last. Picking a winner between two deliberate settings is the kind of quiet decision this package does not make. |
+| Refining | A button, not a queue-time step | What the DiT actually reads has to be visible *before* five minutes of sampling, not inferable from the result afterwards. A rewrite inside `execute` would also differ between two runs of the same queue, so ComfyUI's cache would miss every time and there would be nothing to hand-correct. Pressing a button puts the rewrite in the blob, where it saves with the workflow, diffs, and can be edited, switched off without being thrown away, or reverted. |
+| What the LLM writes | The prose, and — in a lone generation — where the cuts go | The instruction line, `[Shot N]`, the *written form* of the cut times and the `S.SS` figure are computed by `contextir.py` off the real frame count. So the reply is JSON — one body per shot plus the audio fields — and `compose` assembles it exactly as it assembles a typed prompt. The model never sees a format it could break, and a 7B is enough for what is left. Where the cuts *land* is a separate question, and on the Creator node it is the model's: one card carries one duration and nothing in it divides a clip, so otherwise a twenty-second prompt is one uncut shot exactly like a six-second one. Given the duration the model returns 1..N bodies with the second each starts on (`refine.shot_limit`, one shot per two seconds, capped), and `plan_cuts` makes the numbers monotonic and makes them fit — a shot with no room merges into the one before it rather than being dropped. A timeline keeps the automatic times: its cards *are* the shots, their cuts are the running sum of the durations the user set, and a model second-guessing them would move a cut off the frame the next card starts on. |
+| How references survive a rewrite | Stored as `@handles`, never as ordinals | Ordinals are assigned by `plan_references` at queue time and move whenever an asset is added, removed or switched track. A rewrite with `<Picture 2>` baked in would go quietly stale and bind to the wrong tensor — the one failure this package is built around. Keeping handles means `_substitute` runs on a refined prompt exactly as on a typed one, so re-labelling is automatic and one-pass handle renaming keeps working. The model is shown both forms and `normalize_handles` converts back whatever it wrote. |
+| Per-mode templates, not the guides | One distilled template per mode, each ending in a worked example | The refiner used to embed the whole official guide — four to five thousand tokens of someone else's finished-document spec sitting between the rules and the request — and a 4B that had just read it treated the user's sentence as conversation: it answered, dropped names, rewrote. Each mode now gets `prompts/modes/<mode>.txt`: the same rules distilled to what that mode needs, plus one request-and-reply pair written in the reply's own JSON shape with `@handles`. The pair is what actually teaches "expand, don't answer"; writing it in the contract's shape (not the guides' `<Picture N>` document form) means the one thing imitated is the one thing wanted. Content bleed — the old reason for stripping the guides' cases — is handled by fencing each example with an ownership sentence and giving it a deliberately non-default scene. The shared craft (camera vocabulary, `<d>` form, the two audio fields) lives once in `prompts/modes/craft.txt`. The official guides stay on disk for the skill package, which ships them verbatim. Which template runs is the derived mode — the mode *is* the template — with a pin in the refiner's settings on the weights-route pattern (`refine.choose_template`): auto by default, the four base templates swap freely, REF2VA follows references in both directions and refuses a mismatched pin. The reply carries `template`/`forced`, the panel chips it (`i2va`, or `t2va (pinned)`), and the blob keeps it beside `model` so a reloaded workflow still says which form its stored prose is in. |
+| What a reference image takes | A scope on the chip: `full · person · object · scene · style` | "Her from @img-1" used to retain the whole picture — background, palette, pose — because nothing said the person alone was the reference. The narrowing cannot live on the encode path (the DiT is handed the whole tensor regardless); it lives where H3's own format expresses it, the prose: `Asset.takes` flows into the refiner's glossary as a scoped description plus a retention order ("define the subject as the person alone and retain nothing else from this picture"), and the REF2VA template teaches narrow-by-default subjects even on `full`. Stored only when not `full` so old blobs read unchanged; refused on keyframes and videos, where it would quietly mean nothing — a keyframe is bound whole by the alignment line and a video's narrowing is its `track`. |
+| The request behind a fence | `<request>…</request>`, and the rules point at it | Raw, the user's sentence is the last conversational-looking text in the turn and a small model answers it. Fenced, it is a quotation the rules can name: "typed at a video generator, not at you". Two code-side checks back the prose promise up: `dropped_quotes` reports any text the request put in quotation marks that the rewrite fails to carry (the one fidelity promise checkable mechanically), and the default temperature is 0.3 — rewriting is a fidelity task, and at 0.7 a small model paraphrases the very words it was told to keep. |
+| Fidelity over improvement | Everything named survives and is expanded | The point is a lazy prompt becoming a working one, not a better idea than the user's. "Shot on a small-frame camera" stays in the prose *and* gains the grain, depth of field and highlight rolloff that format actually has. A named style opens shot 1 and governs every later one. Where the request and the guide disagree, the request decides content and the guide decides form. Enforced by the system prompt rather than by code, which is why the panel shows the rewrite as an editable draft next to the sentence it came from. |
+| Sound, music, speech | Soundscape always; music only when asked; speech written out | The three asymmetries the guide leaves implicit. A scene always makes noise, so `overall_soundscape` is always written — from the request when it says anything, from what the place and the action would sound like when it does not. A score is a deliberate addition, so `non_diegetic_music` is left empty unless the request asks for music, and empty means "the model decides" rather than the guide's `N/A`, which means "deliberately none". And "she says something" is not a prompt H3 can voice, so the refiner writes the actual line, in the `<d>` form, at roughly two to three words per second so it finishes inside the shot. |
+| Whole-timeline refine | One call for every card | Continuity across a cut is only kept by a rewrite that wrote both sides of it: shot 4 keeps the look, the people and the light shot 1 established because the same call saw them, not because anything copied them forward. Each card's own attachments are listed under it in the message, since handles are per segment and two cards both have an `@img-1`. A chained timeline mixing reference and plain segments is refused — those are two different guides and one reply cannot be written in both — and pointed at per-card refining instead. |
+| Where the refiner runs | A ComfyUI text encoder, and nothing else | It shipped with an Ollama backend beside this one and no longer has it. A second process holds a second copy of the weights in VRAM ComfyUI can neither see nor reclaim, and on a machine already streaming H3's own 25 GB encoder off system RAM that is the difference between a rewrite and a coffee break — so the backend that was there for compatibility was costing the thing the refiner is for. A Qwen3-VL loaded through `comfy.sd.load_clip` is an ordinary entry in the model list: the sampler evicts it when it needs the VRAM, and `CLIP.generate` is core's own sampling loop, so the whole path is a tokenize and a call. What it cost to drop Ollama is the grammar, which compiled the reply schema and guaranteed the shape; core samples plain logits, so the shape is written into the instruction as words (`reply_shape`) and the assistant turn is prefilled with `{`, which removes the place "Here is the rewrite:" would have gone. In practice a 2B holds the shape that way, so the guarantee was not what was carrying it. H3's own encoder is *not* a candidate and is refused by name: truncated to 50 of 64 layers, no final norm, no `lm_head`, so there is nothing to decode with. |
+| Refiner settings | `localStorage`, not the blob | Which text encoder is on this disk is a fact about this computer. In `creator_data` it would ship to whoever opens the workflow next, and nudging the temperature would invalidate the node's cache. |
+| Audio slots | Refused in the UI, not at queue time | Audio is capped at three, soundtracks included, so the sound switch on both the chip and the segment editor checks capacity and says no. `compile.py` still enforces it; the UI just says so while there is still something to change. |
+| Pre-stage surface | A second zero-socket node, spawned by a pill | The pipeline consumes stills — keyframes, references, style sheets — and had no way to make one. `MiniMaxH3PreStage` is the Creator's architecture verbatim (blob, DOM body, expanded subgraph, satellite result card) because it is driven the same way; the pill spawns and removes it because a pre-stage is a property of the shot being set up, not a node to hunt the menu for. First `LiteGraph.createNode` in the repo. Its result card floats on its *left*, so the desk reads *still ← pre-stage · creator → video*. |
+| Pre-stage peer linkage | Derived by scan; the blob's `peer` id is a hint | Ids renumber on paste, so a stored id is never a contract. The pill's on/off state is re-derived from which PreStage claims this node's id; an orphan whose peer no longer resolves is adopted by the node it was visibly beside, and deleting the PreStage by hand needs no bookkeeping at all. |
+| Local image models | Krea 2 + Ideogram 4.0, both native in core | Same statement as the first row, for stills: open weights, no API key, no uploads. Loaders, CLIP types (`krea2` / `ideogram4`), the reference conditioning and the Ideogram scheduler are all core's — `render_image.py` emits the official templates' wiring and reimplements nothing. Two sampler shapes: Krea through `KSampler`; Ideogram through its own resolution-shifted sigmas, `SamplerCustomAdvanced`, and a *dual-model* guider, because it ships its unconditional branch as a second checkpoint (cfg 7, dropped to 3 over the last 30%). |
+| Ideogram prompts | Plain natural language, no JSON schema | Ideogram 4 was trained on structured JSON captions and its hosted magic-prompt expands text into them — but for art-directed, human-focused work a clean sentence prompt reads better than the schema, so the schema is deliberately not modelled at all. |
+| Ideogram references | Refused with a message | `Ideogram4.extra_conds` reads no reference conditioning, and a render that silently ignored the attached images is the failure this package exists to avoid. The message names the fix: switch the model pill to Krea 2, or clear the references. |
+| Krea style references | Core's Qwen-edit encoder, three slots | The official reference workflow's wiring: `TextEncodeQwenImageEditPlus` (which feeds the references to the text encoder *and* VAE-encodes them into the conditioning's reference latents) plus the `index_timestep_zero` method node, with the shift moved onto `ModelSamplingFlux(1.15, 0.5)` on that branch only. The three-reference cap is that node's shape, not taste. |
+| Image turbo | A checkpoint swap under the H3 pill's contract | Krea 2 Turbo *is* a distilled checkpoint, so "the switch drives the LoRA stack" does not transfer — but the contract does: the pill saves the sampler row once per throw, restores it exactly on release, and owns no second stack. The LoRAs are untouched either way (Krea LoRAs train on RAW and apply on Turbo). Ideogram has no turbo pill; its speed axis is the official preset table (48/20/12 steps), which owns the schedule shape as well as the count. |
+| Pre-stage hand-off | By file, through chips on the result card | The still saves under `output/minimax/prestage/` and the chips write `sub/name.png [output]` into the peer's blob — the same annotated-path currency the gallery attach uses, so there is one store and no copy. Start/end/reference land under the peer's own capacity and exclusivity rules, refused with the peer's own words. On a timeline the roles land where one pass would put them: start opens shot 1, end closes the last shot. |
+| Queueing both nodes | Comfy's cache, not an ordering | One Queue runs both output nodes, and an untouched pre-stage is a cache hit — its blob and widgets are the key. The hand-off is by file, so there is deliberately no execution edge to get wrong; "queue selected" is the escape hatch for running one alone. |
+| Frame extraction | Client-side, through the trim editor's own scrubbing | `framegrab.js` is the trim editor's canvas + `seeked` + `drawFrame` machinery with a different ending: the playhead frame is painted at the clip's own resolution and uploaded through core's `/upload/image`, landing on an `input/prestage_frames/` shelf. Zero server half. |
+
+## Phases
+
+- [x] **1 — Backend, headless.** `canvas.py`, `compile.py`, `media.py`,
+  `encode.py`, the node. Driven by hand-written `creator_data` so the reference
+  ordering was provable before any UI existed.
+- [x] **2 — Asset route and picker.** `/minimax_creator/assets`, the picker
+  modal, the tool rail, the pill row, state serialisation.
+- [x] **3 — `@` chips.** Contenteditable prompt, mention menu, attach-on-select.
+- [x] **4 — LoRAs.** `lora.py`, the listing and preview routes, the manager
+  modal. Took over the rail's dead "Add effect" slot.
+- [x] **5 — Refiner.** `refine.py`, `refine_routes.py`, `js/…/refine.js`. A
+  local Context-IR rewrite through a ComfyUI text encoder, against MiniMax's own guides, with
+  the attached images shown to a vision model. Optional; `prompt_override` is
+  still the manual escape hatch.
+- [x] **6 — Pre-stage.** `compile_image.py`, `render_image.py`, `prestage.py`,
+  `js/…/prestage.js`, `js/…/framegrab.js`. A left-side image node (Krea 2 /
+  Ideogram 4.0, both local open weights) spawned by a pill on the Creator or
+  Timeline; stills land back as start/end frames or references through chips on
+  its result card. Same body architecture, same picker, same LoRA manager.
+
+## Known rough edges in a chained timeline
+
+Diagnosed, not yet fixed, and worth knowing before blaming the prompt. All four
+are consequences of decoding and re-encoding between segments, so **none of them
+exist in one-pass mode** — which is the strongest argument for the toggle, and
+the reason to reach for it first on anything a single generation can hold.
+
+- **The seam duplicates a frame.** Segment N+1 is conditioned to open on segment
+  N's last frame, and `MiniMaxH3TimelineJoin` keeps both, so every join holds the
+  same moment twice. It reads as a hitch. Dropping the first frame of a
+  continuing segment is a two-line change but it moves the finished clip's length
+  off the sum of the pills, which is a decision, not a cleanup.
+- **The sound seam is new and unproven.** The previous segment's audio tail now
+  rides into the next one as a `ref_audio` block — see the decision row above —
+  but this is the one part of the package that is not doing what the model card
+  documents, so it wants looking at rather than trusting. Two things to watch:
+  whether the sound actually carries, and whether the inherited start frame still
+  lands, since the audio reference pushes the target's RoPE origin away from the
+  keyframe cond rows. If the second one bites, the tail length is the dial.
+- **Only on the base modes so far.** A Ref2VA segment fills `minimax_refs` from
+  its own ordered plan, so the inherited sound needs an `<Audio N>` inside that
+  numbering rather than a line of its own. Refused with a message rather than
+  dropped.
+- **Roundtrip drift compounds.** Decode → last frame → re-encode is exactly what
+  core's own I2VA path does, so one hop is faithful; six of them are not. Exposure
+  and colour walk.
+
+## How the refiner is put together
+
+`contextir.py` emits the *skeleton* — the instruction line, the field names, the
+shot markers, the cut times. It cannot write the prose, and the prose is most of
+what makes a Context-IR prompt work. The refiner is the prose, and it fits into
+the slot `compose` was already leaving empty: because `compose` only ever adds
+what is missing, a rewrite passes through it exactly as a hand-written prompt
+does.
+
+MiniMax do not open-source the hosted preprocessor but do publish what it emits
+(`skills/h3-prompt-writing`: `base-en.txt`, `ref-en.txt`), shipped verbatim in
+`prompts/` — copied rather than imported from the sibling `MiniMax-H3-LLM`
+package, which may not be installed.
+
+The path, end to end:
+
+1. The frontend posts the blob it is already holding to `/minimax_creator/refine`
+   — the whole `creator_data`, or the whole `timeline_data` plus which card.
+2. `refine_routes.py` **compiles** it. That is where the mode, the reference
+   slots and the ordinal each handle will be given come from; there is no second
+   description of the request anywhere.
+3. It opens what is attached — reference images at full size, one cached still
+   per clip, downscaled to 1024 px — and builds the glossary that says what each
+   handle holds and what it will become.
+4. `refine.py` sends the rules, the shared craft, that mode's template with its
+   worked example, the glossary, the pictures and the user's sentence behind a
+   `<request>` fence — the shape asked for in words and the reply prefilled with
+   `{`, so a small model returns the right shape rather than the right shape
+   wrapped in an apology.
+5. Ordinals in the reply are converted back to handles, the result is checked
+   for labels nothing backs, and the prose goes into `refined` in the blob.
+6. `compile.refined_body` substitutes it at queue time exactly as it substitutes
+   a typed prompt.
+
+It could not have been a node in the graph: a refiner node would need the
+composed prompt as input and hand it back, which is a cycle. Hence a button
+inside the node — and `prompt_override`, unchanged, for anyone driving their own
+rewriter.
+
+**What it does not do yet.** It looks at one still per reference clip rather
+than several, so it can say what a clip contains but not how it moves. It cannot
+hear audio at all — a reference soundtrack is announced and described from the
+request. And it is a language model: everything it writes is a draft in an
+editable box, sitting next to the sentence it came from, for exactly that reason.
+
+## Deliberately not doing
+
+- **Effect presets.** There are none in the open weights. The rail slot that
+  said so now opens the LoRA manager, which is the community's version of the
+  same idea.
+- **Splitting a LoRA off the audio stream.** Only `audio_patch_proj` and
+  `audio_out` are audio-specific in the H3 DiT; every block is shared across the
+  packed `[text | refs | audio | video]` sequence. So there is no mask that would
+  make a LoRA video-only, and a switch claiming to be one would be lying. What a
+  LoRA was trained on stays a fact about the LoRA, not something to enforce here.
+- **Frames + references together.** Different checkpoints, one pass. Refused
+  rather than silently dropping one. The hosted API can do it; the weights
+  cannot.
+- **2K output.** `H3-Regenerate-2K` is hosted-only. The slider stops at 896 and
+  marks anything past the trained 768 short edge as off-distribution.
+- **A shim that lets the node load without H3.** It would register a node that
+  cannot generate. The raw `ModuleNotFoundError` names the missing module.
+
+## Environment
+
+**Requires ComfyUI >= 0.30.0** for `comfy_extras/nodes_minimax_h3` and
+`comfy/ldm/minimax`.
+
+Read core source from the tree that actually *runs*. A Desktop install executes
+its own bundled ComfyUI, and a second checkout kept alongside it for reading is
+a different revision within a release or two — close enough to look right and
+wrong about the thing you are checking. The two drift.
+
+`--base-directory` is a separate question from which tree runs: it is only where
+`custom_nodes`, `input`, `models` and `output` live, and on a Desktop install it
+usually is not the source tree. The graph tests take both as environment
+variables for that reason — `COMFYUI_PATH` for the tree to import, `COMFYUI_BASE`
+for the base directory when it differs.
+
+## Testing
+
+`python3 tests/test_compile.py` and `python3 tests/test_refine.py` — no torch
+and no ComfyUI. Verify a change to the ordering contract by mutating
+`plan_references()` and confirming the suite fails; a test that cannot fail is
+not protecting anything. The same applies to `refine.normalize_handles`, whose
+failure mode is a prompt that still compiles and binds to the wrong tensor.
+
+The reference *encode* path has not yet been run against real weights.

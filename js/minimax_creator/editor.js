@@ -1,0 +1,890 @@
+// The generation body: tool rail, attached assets, prompt, pill row, mode badge.
+//
+// Used twice — as the MiniMax Creator node's body, and as a timeline segment's
+// editor — because a segment is a whole generation and deserves the same
+// controls. It owns a state object and calls back when it changes; who persists
+// that state, and where, is the caller's business.
+//
+// Every mutation funnels through commit(), which notifies the owner and
+// re-renders. The skeleton is built once and render() only refills the four
+// volatile hosts — the prompt box must survive untouched, because rebuilding a
+// contenteditable destroys the caret, and attaching an asset from the @ menu
+// commits *while the user is typing in it*.
+
+import { el, icon, ICONS, svg } from "./dom.js";
+import { openPicker } from "./picker.js";
+import { openLoras } from "./loras.js";
+import { openTrim, trimLabel } from "./trim.js";
+import { PromptBox } from "./prompt.js";
+import { RefinePanel, refineButton, refine } from "./refine.js";
+import { openAspectPopover, openResolutionPopover, aspectGlyph, PILL_GLYPH } from "./pills.js";
+import { samplingBar } from "./sampling.js";
+import { Stage } from "./stage.js";
+import { weightsPill, loadCatalog, catalogFiles } from "./models.js";
+import * as Turbo from "./turbo.js";
+import { viewUrl, probeAudio } from "./api.js";
+import * as S from "./state.js";
+import { MIN_SECONDS, MAX_SECONDS, describeRatio, isTrainedLength } from "./canvas.js";
+
+const HANDLE_RE = /@([A-Za-z]+-\d+)/g;
+
+// What a reference video's chip says it is doing, and what the chip switches to
+// when you click it. "sound only" goes back to bringing the picture along,
+// because the way out of it is the way you got in.
+const TRACK_CHIP = {
+  "picture+sound": { text: "sound on", next: "picture" },
+  "picture": { text: "sound off", next: "picture+sound" },
+  "sound": { text: "sound only", next: "picture+sound" },
+};
+
+export class CreatorEditor {
+  /**
+   * @param {object} options
+   * @param {object} options.state        mutated in place; the caller owns persistence
+   * @param {() => void} options.onCommit  after every change, before the re-render
+   * @param {boolean} [options.canvasPills]  false in a timeline segment, where the
+   *   aspect and resolution belong to the timeline and not to one shot
+   * @param {boolean} [options.continuePill]  true for a timeline segment after the
+   *   first, which may start from the previous segment's last frame
+   * @param {() => object} [options.refineTarget]  the payload the refine route
+   *   wants — `{kind, data, index}`. Supplied by the owner because only it knows
+   *   whether this state is a whole `creator_data` or one card of a timeline;
+   *   without it the Refine button is not drawn at all.
+   * @param {(result: object) => void} [options.onRefined]  the parts of a reply
+   *   that are not this state's: in a timeline the soundscape and the score
+   *   belong to the timeline, so the owner takes them.
+   * @param {() => void} [options.onReverted]  the rewrite was thrown away — the
+   *   other half of `onRefined`, so an owner holding parts of a reply can drop
+   *   them too rather than keep prose nothing refers to any more.
+   */
+  /**
+   * @param {() => string|number} [options.nodeId]  the ComfyUI node this body is
+   *   mounted on. Supplied only for a node body, never for a timeline segment
+   *   editor: it is what the stage listens for its own previews with, and what
+   *   says this editor owns the weights rather than inheriting them.
+   */
+  /**
+   * @param {{active: () => boolean, toggle: () => void}} [options.preStage]
+   *   the pre-stage pill's wiring, supplied only for a node body: whether a
+   *   PreStage currently claims this node, and spawning/removing one. The state
+   *   is derived by scan on every render, never stored — see minimax_creator.js.
+   */
+  constructor({ state, onCommit, canvasPills = true, continuePill = false,
+                refineTarget = null, onRefined = null, onReverted = null,
+                samplingWidgets = null, onWidgetChange = null, nodeId = null,
+                routeOf = null, setRoute = null, preStage = null }) {
+    this.preStage = preStage;
+    this.state = state;
+    // Where the standing checkpoint route is read from and written to. A node
+    // body owns its own; a timeline segment editor reads the timeline's and
+    // cannot set it, because a route that differed between two shots of one clip
+    // would not be a route.
+    this.routeOf = routeOf ?? (() => this.state.models?.route ?? "auto");
+    this.setRoute = setRoute;
+    this.onCommit = onCommit;
+    this.canvasPills = canvasPills;
+    this.continuePill = continuePill;
+    this.refineTarget = refineTarget;
+    this.onRefined = onRefined;
+    this.onReverted = onReverted;
+    // Only the node body has these. The same editor opens as a timeline
+    // segment, where the sampler belongs to the timeline and not to one shot.
+    this.samplingWidgets = samplingWidgets;
+    this.onWidgetChange = onWidgetChange;
+    this.nodeId = nodeId;
+    this.sizes = new Map();   // filename -> {width,height}, for the adaptive canvas readout
+
+    this.prompt = new PromptBox({
+      getState: () => this.state,
+      onInput: (text) => {
+        this.state.prompt = text;
+        this.onCommit?.();
+        this.renderNotices();   // dangling-handle warning, without disturbing the caret
+      },
+      onAttach: (row) => this.attachFromMention(row),
+      attachBlocked: (action) => S.blockedReason(this.state, action),
+    });
+
+    // Built once and refreshed in place: it holds textareas that are typed into,
+    // and a full render would rebuild the one under the caret. `onRefined`
+    // decides whether the two audio fields live here — in a timeline they are
+    // the timeline's and are edited in its own modal.
+    this.refinePanel = new RefinePanel({
+      getState: () => this.state,
+      // Also the dimming: the panel's toggle and its Revert both change whether
+      // the prompt above is queued, and neither goes through a full render.
+      onCommit: () => { this.onCommit?.(); this.syncPrompt(); },
+      audioFields: !this.onRefined,
+      onRevert: () => this.onReverted?.(),
+    });
+
+    this.railHost = el("div");
+    this.assetsHost = el("div");
+    this.loraHost = el("div");
+    this.pillsHost = el("div");
+    this.noticeHost = el("div");
+    // Last, the way the Timeline puts it last: the panel says what the piece is
+    // and this says how it is run.
+    this.samplingHost = el("div");
+
+    // The stage, for a node only. A timeline segment editor is a modal over
+    // a node that has its own — two stages listening for the same previews would
+    // be two answers to one question. Not mounted here: attach() hands it to a
+    // Satellite, which floats it beside the node, so the body's layout never
+    // changes when a render lands.
+    this.stage = this.nodeId ? new Stage({
+      nodeId: this.nodeId,
+      onGallery: () => this.openGallery(),
+    }) : null;
+
+    this.root = el("div", { class: "mmc-root" }, [
+      this.railHost,
+      this.assetsHost,
+      this.loraHost,
+      el("div", { class: "mmc-panel" }, [this.prompt.root, this.refinePanel.root, this.pillsHost]),
+      this.noticeHost,
+      this.samplingHost,
+    ]);
+
+    // The weights pill needs the file lists to say anything useful, and every
+    // node body on the canvas shares the one request.
+    if (this.nodeId) loadCatalog(() => this.adoptWeights());
+
+    this.prompt.setValue(this.state.prompt ?? "");
+    this.render();
+    this.probeKeyframe();
+  }
+
+  /** Called when the node body goes away. */
+  destroy() {
+    this.stage?.destroy();
+  }
+
+  /**
+   * Fill weights nobody has picked from unambiguous filename matches.
+   *
+   * The one case this is really for: a workflow saved when these were sockets
+   * loads with the links dropped and nothing chosen, and the files are already
+   * on disk under recognisable names. Committed like any other change, so it
+   * saves with the workflow and can be overridden by picking something else.
+   */
+  adoptWeights() {
+    if (S.guessModels(this.state.models, catalogFiles())) this.commit();
+    else this.render();
+  }
+
+
+  /** The sampler widgets as turbo.js wants them: write-through without the
+   *  re-render, because everything that uses this commits — and renders — once
+   *  at the end rather than three times along the way. */
+  widgetIO() {
+    return {
+      value: (name, fallback) => this.samplingWidgets?.[name]?.value ?? fallback,
+      set: (name, value) => {
+        const widget = this.samplingWidgets?.[name];
+        if (!widget) return;
+        widget.value = value;
+        widget.callback?.(value);
+        this.onWidgetChange?.();
+      },
+    };
+  }
+
+  commit() {
+    // Before notifying, because attaching a reference can invalidate a
+    // checkpoint pin that was legal when it was made.
+    S.normalizeCheckpoint(this.state);
+    // Same timing, same reason: removing or disabling the turbo LoRA anywhere —
+    // the chip's ✕, the manager — is switching turbo off, and the sampler row
+    // has to come back before this state is serialized with `on` still in it.
+    if (this.samplingWidgets && this.state.turbo) Turbo.sync(this.state, this.widgetIO());
+    this.onCommit?.();
+    this.render();
+  }
+
+  /** Point the editor at a different state object.
+   *
+   *  The Creator node needs this because loading a saved workflow assigns widget
+   *  values after the node is created, so the editor built in `nodeCreated` saw
+   *  an empty blob and has to catch up once the graph has finished configuring.
+   */
+  setState(state) {
+    this.state = state;
+    this.sizes.clear();
+    this.prompt.setValue(this.state.prompt ?? "");
+    this.refinePanel.problems = [];
+    this.render();
+    this.probeKeyframe();
+  }
+
+  /**
+   * Ask the refiner to rewrite this state's prompt.
+   *
+   * The reply is a whole-request answer even when only one shot was asked for —
+   * the soundscape and the score describe the piece — so the shot body lands
+   * here and the rest goes wherever the owner keeps it.
+   */
+  async refine() {
+    try {
+      const result = await refine(this.refineTarget());
+      const shot = result.shots?.[0];
+      if (!shot?.body) throw new Error("the refiner returned nothing for this prompt");
+      this.refinePanel.apply(result, shot);
+      this.onRefined?.(result);
+      this.commit();
+    } catch (error) {
+      this.refinePanel.fail(String(error.message || error));
+    }
+  }
+
+  /**
+   * Attach a file the user picked from the @ menu, and return its new handle.
+   * Selecting from the input folder is what creates the reference — there is no
+   * separate "add it first, then mention it" step.
+   */
+  attachFromMention(row) {
+    const blocked = S.blockedReason(this.state, "reference");
+    if (blocked) { this.flash(blocked); return null; }
+    const { used, max, filesLeft } = S.capacity(this.state, row.kind);
+    if (used >= max || filesLeft <= 0) {
+      this.flash(`No ${row.kind} slots left (${used}/${max} used, ${filesLeft} files free of ${S.MAX_REF_FILES}).`);
+      return null;
+    }
+    const handle = S.nextHandle(this.state, row.kind);
+    const entry = {
+      handle, kind: row.kind, role: "reference", filename: row.path,
+      // Max by default, for a picture and for a clip alike: fidelity is why a
+      // reference is attached, and "match" trading it for speed is a downgrade
+      // to opt into, not out of. Ignored for audio, which has no size.
+      ref_size: "max",
+    };
+    if (row.kind === "video") entry.track = S.DEFAULT_TRACK;
+    this.state.assets.push(entry);
+    this.commit();
+    // The caller needs the handle now, to put a chip under a live caret; the
+    // sound default settles a round trip later and commits again.
+    if (row.kind === "video") this.applySoundDefault(entry);
+    return handle;
+  }
+
+  // ---- asset actions -------------------------------------------------------
+
+  async addReferences(kind) {
+    const blocked = S.blockedReason(this.state, "reference");
+    if (blocked) return this.flash(blocked);
+    const { used, max, filesLeft } = S.capacity(this.state, kind);
+    if (used >= max || filesLeft <= 0) {
+      return this.flash(`No ${kind} slots left (${used}/${max} used, ${filesLeft} files free of ${S.MAX_REF_FILES}).`);
+    }
+    const chosen = await openPicker({
+      kinds: ["image", "video", "audio", "renders"],
+      kind,
+      capacity: (k) => S.capacity(this.state, k),
+    });
+    if (!chosen) return;
+    await this.attachAssets(chosen);
+  }
+
+  /**
+   * The gallery: the same picker, opened on the renders tab. No capacity
+   * precheck, unlike addReferences — looking at finished renders is legal with
+   * every slot full; only an actual pick has to answer for room, and the
+   * picker's own counters already hold it to that.
+   */
+  async openGallery() {
+    const chosen = await openPicker({
+      kinds: ["renders", "image", "video", "audio"],
+      kind: "renders",
+      capacity: (k) => S.capacity(this.state, k),
+    });
+    if (!chosen) return;
+    const blocked = S.blockedReason(this.state, "reference");
+    if (blocked) return this.flash(blocked);
+    await this.attachAssets(chosen);
+  }
+
+  /** Turn picked assets into reference entries. The shared tail of both the
+   *  slot buttons and the gallery. */
+  async attachAssets(chosen) {
+    const undecided = [];
+    for (const asset of chosen) {
+      const entry = {
+        handle: S.nextHandle(this.state, asset.kind),
+        kind: asset.kind,
+        role: "reference",
+        filename: asset.path,
+        ref_size: "max",
+      };
+      if (asset.kind === "video") entry.track = S.DEFAULT_TRACK;
+      if (asset.trim) entry.trim = asset.trim;
+      this.state.assets.push(entry);
+      if (asset.kind !== "video") continue;
+      // A track means the user opened the segment editor and said so. Anything
+      // else is the default, which needs a round trip to settle. Both are applied
+      // after the push, so the file the video occupies counts against the total.
+      if (asset.track) this.setTrack(entry, asset.track, { defer: true });
+      else undecided.push(entry);
+    }
+    this.commit();
+    for (const entry of undecided) await this.applySoundDefault(entry);
+  }
+
+  /**
+   * A reference video is attached with its sound on — that is what you almost
+   * always want from a clip you chose for its motion *and* its audio. Sequenced
+   * one at a time, so the three audio slots are handed out in pick order rather
+   * than raced for.
+   */
+  async applySoundDefault(asset) {
+    const has = await probeAudio(asset.filename);
+    // A silent clip stays silent: switching sound on for a file with no audio
+    // track would fail at queue time over a choice the user never made.
+    if (has === false) return;
+    if (!this.state.assets.includes(asset)) return;   // removed while we were asking
+    if (this.setTrack(asset, "picture+sound", { defer: true })) this.commit();
+  }
+
+  /**
+   * Choose which of a reference video's streams are referenced. Applied first
+   * and rolled back if the result would not compile: a track change can move the
+   * clip between the video and audio buckets, so whether it fits is a question
+   * about the whole reference set rather than about one counter.
+   */
+  setTrack(asset, track, { defer = false } = {}) {
+    const previous = asset.track;
+    if (previous === track) return true;
+    asset.track = track;
+    const problem = S.overflow(this.state);
+    if (problem) {
+      asset.track = previous;
+      this.flash(`@${asset.handle} stays ${TRACK_CHIP[previous]?.text || previous} — ${problem}`);
+      return false;
+    }
+    if (!defer) this.commit();
+    return true;
+  }
+
+  /** The segment editor, on an already-attached clip. */
+  async editSegment(asset) {
+    const result = await openTrim({
+      path: asset.filename,
+      kind: asset.kind,
+      trim: asset.trim ?? null,
+      track: asset.track,
+      showTrack: asset.kind === "video",
+    });
+    if (!result) return;
+    if (result.trim) asset.trim = result.trim;
+    else delete asset.trim;
+    if (result.track) this.setTrack(asset, result.track, { defer: true });
+    this.commit();
+  }
+
+  async setFrame(role) {
+    const blocked = S.blockedReason(this.state, role);
+    if (blocked) return this.flash(blocked);
+    const existing = S.frameAsset(this.state, role);
+    const chosen = await openPicker({ kinds: ["image"], kind: "image", single: true, capacity: () => ({ used: 0, max: 1, filesLeft: 1 }) });
+    if (!chosen) return;
+    const asset = chosen[0];
+    if (existing) this.remove(existing.handle, { silent: true });
+    this.state.assets.push({
+      handle: S.nextHandle(this.state, "image"),
+      kind: "image",
+      role,
+      filename: asset.path,
+    });
+    this.commit();
+    this.probeKeyframe();
+  }
+
+  remove(handle, { silent = false } = {}) {
+    this.state.assets = this.state.assets.filter((a) => a.handle !== handle);
+    if (!silent) this.commit();
+  }
+
+  /** Image dimensions for the adaptive-canvas readout. The backend re-reads
+   *  them from disk; this is only so the pills can tell the truth early. */
+  probeKeyframe() {
+    const anchor = S.frameAsset(this.state, "first_frame") || S.frameAsset(this.state, "last_frame");
+    if (!anchor || this.sizes.has(anchor.filename)) return;
+    const probe = new Image();
+    probe.onload = () => {
+      this.sizes.set(anchor.filename, { width: probe.naturalWidth, height: probe.naturalHeight });
+      this.render();
+    };
+    probe.src = viewUrl(anchor.filename);
+  }
+
+  flash(message) {
+    this.notice = message;
+    this.render();
+    clearTimeout(this.noticeTimer);
+    this.noticeTimer = setTimeout(() => { this.notice = null; this.render(); }, 6000);
+  }
+
+  // ---- render --------------------------------------------------------------
+
+  render() {
+    const state = this.state;
+    const anchor = S.frameAsset(state, "first_frame") || S.frameAsset(state, "last_frame");
+    const geometry = S.resolved(state, anchor ? this.sizes.get(anchor.filename) : null);
+
+    this.railHost.replaceChildren(this.renderRail());
+    this.assetsHost.replaceChildren(...(state.assets.length ? [this.renderAssets()] : []));
+    this.loraHost.replaceChildren(...(state.loras.length ? [this.renderLoras()] : []));
+    this.pillsHost.replaceChildren(this.renderPills(geometry, S.mode(state)));
+    this.samplingHost.replaceChildren(...(this.samplingWidgets ? [samplingBar({
+      widgets: this.samplingWidgets,
+      value: (name, fallback) => {
+        const widget = this.samplingWidgets[name];
+        return widget ? widget.value : fallback;
+      },
+      // Write through to the real widget, callback included — some of them (the
+      // seed's after-generate control) hang behaviour off it.
+      set: (name, value) => {
+        const widget = this.samplingWidgets[name];
+        if (!widget) return;
+        widget.value = value;
+        widget.callback?.(value);
+        this.onWidgetChange?.();
+        this.render();
+      },
+      // One generation, always: a Creator render has no segments to spread a
+      // seed across.
+      perSegment: false,
+      // The turbo switch, for a node body only: a timeline segment has no
+      // sampler of its own to throw it on.
+      turbo: this.nodeId ? Turbo.turboPills({
+        container: this.state,
+        ...this.widgetIO(),
+        onCommit: () => this.commit(),
+      }) : [],
+      // Last on the row, because it is the one thing there you set when you
+      // install a checkpoint rather than when you write a prompt.
+      trailing: this.nodeId ? [weightsPill({
+        models: this.state.models,
+        checkpoints: [S.checkpoint(this.state)],
+        onChange: () => this.commit(),
+        turbo: { container: this.state, widgetIO: this.widgetIO() },
+      })] : [],
+    })] : []));
+    this.prompt.refresh();
+    this.syncPrompt();
+    this.refinePanel.render();
+    this.renderNotices();
+  }
+
+  /**
+   * Show whether the typed prompt is the thing being queued.
+   *
+   * A rewrite replaces it at compile time rather than joining it, so while one
+   * is on the box is holding a draft. Said by dimming it, beside the panel's own
+   * line, because the panel is below the fold on a small node and the box is
+   * what the eye lands on. Called on the panel's commits too — the toggle
+   * changes this and nothing else in the editor.
+   */
+  syncPrompt() {
+    const refined = this.state.refined;
+    this.prompt.setSuperseded(!!refined?.body?.trim() && refined.enabled !== false);
+  }
+
+  renderNotices() {
+    this.noticeHost.replaceChildren(
+      ...(this.notice ? [el("div", { class: "mmc-warn", text: this.notice })] : []),
+      ...(this.renderDangling() || []),
+    );
+  }
+
+  renderRail() {
+    const disabled = S.hasFrames(this.state);
+    const tool = (kind, label, iconName) =>
+      el("button", {
+        class: "mmc-tool",
+        disabled: disabled || undefined,
+        title: disabled ? S.blockedReason(this.state, "reference") : `Attach a reference ${kind}`,
+        onclick: () => this.addReferences(kind),
+      }, [el("span", { class: "mmc-tool-icon" }, [icon(iconName)]), el("span", { text: label })]);
+
+    return el("div", { class: "mmc-rail" }, [
+      tool("image", "Add image", "image"),
+      tool("video", "Add video", "video"),
+      tool("audio", "Add audio", "audio"),
+      // Not gated by hasFrames: LoRAs sit on the checkpoint, not in the
+      // reference slots, so they are the one thing frames and references share.
+      el("button", {
+        class: "mmc-tool",
+        title: "Manage the LoRAs patched onto the routed checkpoint",
+        onclick: () => this.manageLoras(),
+      }, [el("span", { class: "mmc-tool-icon" }, [icon("effect")]), el("span", { text: "Add LoRA" })]),
+      // Last in the rail because it is the step after everything else: the
+      // rewrite is written against the references and the duration, so it wants
+      // them settled first.
+      ...(this.refineTarget ? [refineButton({ run: () => this.refine() })] : []),
+    ]);
+  }
+
+  async manageLoras() {
+    await openLoras({ state: this.state, onChange: () => this.commit() });
+    this.commit();
+  }
+
+  renderLoras() {
+    const target = S.checkpoint(this.state);
+    const chip = (entry) => {
+      const modes = S.loraModes(entry);
+      const idle = !modes.includes(target);
+      return el("div", {
+        class: `mmc-asset${idle ? " idle" : ""}`,
+        title: idle
+          ? `${entry.name} — set to ${modes.map((m) => S.CHECKPOINT_LABEL[m]).join(" + ")}, but this graph routes to ${S.CHECKPOINT_LABEL[target]}.`
+          : entry.name,
+      }, [
+        el("span", { class: "mmc-asset-thumb" }, [svg(ICONS.effect, 15)]),
+        el("span", { class: "mmc-asset-handle", text: entry.name.split("/").pop().replace(/\.[^.]+$/, "") }),
+        el("button", {
+          class: "mmc-ghost",
+          style: { fontSize: "11px" },
+          title: "Strength, and which checkpoint this LoRA belongs to",
+          text: `${Number(entry.strength ?? 1).toFixed(2)} · ${S.claimsBoth(entry) ? "both" : S.CHECKPOINT_LABEL[modes[0]]}`,
+          onclick: () => this.manageLoras(),
+        }),
+        el("button", {
+          class: "mmc-asset-x", text: "✕", title: `Remove ${entry.name}`,
+          onclick: () => { S.removeLora(this.state, entry.name); this.commit(); },
+        }),
+      ]);
+    };
+
+    const parts = [el("div", { class: "mmc-assets" }, this.state.loras.map(chip))];
+    // Trigger words go in front of the prompt at compile time. Showing the
+    // prefix is the difference between that and the prompt quietly not being
+    // what the box says it is.
+    const triggers = S.promptTriggers(this.state);
+    if (triggers.length) {
+      parts.push(el("div", {
+        class: "mmc-note",
+        title: "Prefixed to the prompt when this queues. Edit the list on the LoRA cards.",
+      }, [
+        el("span", { class: "mmc-note-key", text: "triggers" }),
+        el("span", { text: triggers.join(", ") }),
+      ]));
+    }
+    return el("div", { class: "mmc-lora-block" }, parts);
+  }
+
+  renderAssets() {
+    const chip = (asset) => {
+      const thumb = asset.kind === "image"
+        ? el("img", { class: "mmc-asset-thumb", src: viewUrl(asset.filename, { preview: true }), alt: asset.filename })
+        : el("span", { class: "mmc-asset-thumb" }, [svg(ICONS[asset.kind], 15)]);
+
+      const parts = [thumb, el("span", { class: "mmc-asset-handle", text: `@${asset.handle}` })];
+
+      if (asset.role !== "reference") {
+        parts.push(el("span", { class: "mmc-asset-role", text: asset.role === "first_frame" ? "start" : "end" }));
+      }
+      if (asset.kind !== "image") {
+        parts.push(el("button", {
+          class: "mmc-ghost",
+          style: { fontSize: "11px" },
+          title: "Use the whole clip, or only a segment of it",
+          text: trimLabel(asset),
+          onclick: () => this.editSegment(asset),
+        }));
+      }
+      if (asset.kind === "video") {
+        const chip = TRACK_CHIP[asset.track] || TRACK_CHIP[S.DEFAULT_TRACK];
+        parts.push(el("button", {
+          class: "mmc-ghost",
+          style: { fontSize: "11px" },
+          title: "On by default: this clip's soundtrack is bound as a reference audio, taking an "
+               + "<Audio> slot before the video's own label, and needing the audio VAE connected. "
+               + "Off references the picture silently. Pick 'sound only' in the segment editor to "
+               + "reference the soundtrack without the picture.",
+          text: chip.text,
+          onclick: () => this.setTrack(asset, chip.next),
+        }));
+      }
+      if (S.takeable(asset)) {
+        const take = S.takes(asset);
+        parts.push(el("button", {
+          class: "mmc-ghost",
+          style: { fontSize: "11px" },
+          title: "What of this picture is the reference. full: the whole image. "
+               + "person / object / scene / style: only that — a person reference "
+               + "keeps the likeness and drops the picture's background, palette, "
+               + "pose and action. Read by Refine, and worth saying in the prompt "
+               + "too if you skip refining.",
+          text: take,
+          onclick: () => {
+            asset.takes = S.TAKES[(S.TAKES.indexOf(take) + 1) % S.TAKES.length];
+            this.commit();
+          },
+        }));
+      }
+      if (S.sizeable(asset)) {
+        const size = S.refSize(asset);
+        parts.push(el("button", {
+          class: "mmc-ghost",
+          style: { fontSize: "11px" },
+          title: asset.kind === "video"
+            ? "match: scale to the generation's pixel area. max: core's 768 reference canvas — "
+              + "more detail, and much the slower of the two. A video's reference tokens are its "
+              + "whole grid once per latent frame, so at full length one clip is about as long as "
+              + "the target video itself, and all of it rides through every sampling step."
+            : "match: scale to the generation's pixel area. max: 2048 short edge — better identity, "
+              + "several times slower, because reference tokens ride through every sampling step.",
+          text: size,
+          onclick: () => { asset.ref_size = size === "max" ? "match" : "max"; this.commit(); },
+        }));
+      }
+      parts.push(el("button", {
+        class: "mmc-asset-x", text: "✕", title: `Remove @${asset.handle}`,
+        onclick: () => this.remove(asset.handle),
+      }));
+      return el("div", {
+        class: `mmc-asset mmc-tag-${S.tagIndex(asset.handle)}`,
+        title: asset.filename,
+      }, parts);
+    };
+
+    return el("div", { class: "mmc-assets" }, this.state.assets.map(chip));
+  }
+
+  renderPills(geometry, currentMode) {
+    const state = this.state;
+    const refs = S.hasReferences(state);
+    const frameLabel = (role, fallback) => {
+      const asset = S.frameAsset(state, role);
+      return asset ? `@${asset.handle}` : fallback;
+    };
+
+    const framePill = (role, label, iconName) => {
+      const blocked = S.blockedReason(state, role);
+      return el("button", {
+        class: "mmc-pill",
+        disabled: blocked ? true : undefined,
+        title: blocked || `Choose the ${label.toLowerCase()}`,
+        onclick: blocked ? undefined : () => this.setFrame(role),
+      }, [
+        icon(iconName, 16),
+        el("span", {
+          text: role === "first_frame" && S.continues(state)
+            ? "from last frame" : frameLabel(role, label),
+        }),
+      ]);
+    };
+
+    // Steps of one second up to the trained ceiling, then of five: past 15 s the
+    // pill is a coarse control by then anyway, and nudging 15 → 60 one second at
+    // a time is 45 clicks.
+    const grain = state.duration_s >= 15 ? 5 : 1;
+    const trained = isTrainedLength(geometry.frames);
+    const duration = el("div", {
+      class: `mmc-pill mmc-pill-group${trained ? "" : " off-distribution"}`,
+      title: `${geometry.frames} frames · ${geometry.seconds.toFixed(2)} s at 24 fps`
+           + (trained ? "" : "\nOutside the ~5–15 s the open weights were trained on. It will "
+                           + "generate, but coherence and motion are on their own past here — "
+                           + "and cost rises with the square of the length."),
+    }, [
+      el("button", {
+        class: "mmc-step", text: "−", disabled: state.duration_s <= MIN_SECONDS || undefined,
+        onclick: () => {
+          const step = state.duration_s > 15 ? 5 : 1;
+          state.duration_s = Math.max(MIN_SECONDS, state.duration_s - step);
+          this.commit();
+        },
+      }),
+      icon("clock", 16),
+      el("span", { text: `${state.duration_s} s`, style: { minWidth: "38px", textAlign: "center" } }),
+      el("button", {
+        class: "mmc-step", text: "+", disabled: state.duration_s >= MAX_SECONDS || undefined,
+        onclick: () => {
+          state.duration_s = Math.min(MAX_SECONDS, state.duration_s + grain);
+          this.commit();
+        },
+      }),
+    ]);
+
+    const aspectPill = el("button", {
+      class: "mmc-pill",
+      disabled: geometry.fromImage || undefined,
+      title: geometry.fromImage
+        ? "The aspect ratio comes from the keyframe in the image modes — the resolution slider still sets the scale."
+        : "Aspect Ratio",
+      onclick: (event) => this.openAspect(event.currentTarget),
+    }, geometry.fromImage
+      // The ratio the keyframe brought with it, which is the one case where the
+      // pill is showing a shape no entry in the list would have drawn.
+      ? [aspectGlyph(geometry.ratio, PILL_GLYPH),
+         el("span", { text: describeRatio(geometry.ratio) }),
+         el("span", { class: "mmc-pill-sub", text: "from image" })]
+      : [aspectGlyph(geometry.ratio, PILL_GLYPH), el("span", { text: state.aspect })]);
+
+    const resPill = el("button", {
+      class: "mmc-pill",
+      title: "Short edge. Lower is faster; 768 is what the open weights were trained at.",
+      onclick: (event) => this.openResolution(event.currentTarget),
+    }, [
+      icon("res", 16),
+      el("span", { text: `${state.short_edge}p` }),
+      el("span", { class: "mmc-pill-sub", text: `${geometry.width} × ${geometry.height}` }),
+    ]);
+
+    return el("div", { class: "mmc-pills" }, [
+      ...(this.continuePill ? [this.renderContinue()] : []),
+      framePill("first_frame", "Start frame", "frameIn"),
+      framePill("last_frame", "End frame", "frameOut"),
+      duration,
+      // In a timeline the canvas belongs to the timeline, not to one shot: the
+      // segments are concatenated at the end and have to come out the same size.
+      ...(this.canvasPills ? [aspectPill, resPill] : []),
+      this.renderRouting(currentMode),
+      ...(this.preStage ? [this.renderPreStagePill()] : []),
+    ]);
+  }
+
+  /** The pre-stage pill: an image-generation node at this node's left edge,
+   *  spawned and removed here because the pre-stage is a property of the shot
+   *  being set up, not a node to hunt the menu for. */
+  renderPreStagePill() {
+    const on = this.preStage.active();
+    return el("button", {
+      class: `mmc-pill mmc-prestage-toggle${on ? " on" : ""}`,
+      title: on
+        ? "The pre-stage node on the left generates stills for this render — start and end "
+          + "frames, references, style sheets. Click to remove it."
+        : "Add a pre-stage: an image node (Krea 2 / Ideogram 4) at this node's left edge whose "
+          + "stills land here as start/end frames or references with one click.",
+      onclick: () => { this.preStage.toggle(); this.render(); },
+    }, [icon("image", 16), el("span", { text: "pre-stage" })]);
+  }
+
+  /**
+   * A finished pre-stage still, pushed into this state by the neighbour's
+   * result chips. Returns a refusal message, or null on success — the same
+   * capacity and exclusivity rules every other attach path answers to, said to
+   * the PreStage so it can show them where the click happened.
+   */
+  attachFromPreStage({ role, filename }) {
+    if (role === "reference") {
+      const blocked = S.blockedReason(this.state, "reference");
+      if (blocked) return blocked;
+      const { used, max, filesLeft } = S.capacity(this.state, "image");
+      if (used >= max || filesLeft <= 0) {
+        return `No image slots left (${used}/${max} used, ${filesLeft} files free of ${S.MAX_REF_FILES}).`;
+      }
+      this.state.assets.push({
+        handle: S.nextHandle(this.state, "image"),
+        kind: "image", role: "reference", filename, ref_size: "max",
+      });
+      this.commit();
+      return null;
+    }
+    const blocked = S.blockedReason(this.state, role);
+    if (blocked) return blocked;
+    const existing = S.frameAsset(this.state, role);
+    if (existing) this.remove(existing.handle, { silent: true });
+    this.state.assets.push({
+      handle: S.nextHandle(this.state, "image"),
+      kind: "image", role, filename,
+    });
+    this.commit();
+    this.probeKeyframe();
+    return null;
+  }
+
+  /**
+   * The continuation switch, on a timeline segment after the first.
+   *
+   * Off is a hard cut. On makes the previous segment's last frame this one's
+   * start frame — which is a keyframe generation, and so locks the references
+   * out for the same reason a real start frame does.
+   */
+  renderContinue() {
+    const on = S.continues(this.state);
+    const blocked = on ? null : S.blockedReason(this.state, "continue");
+    return el("button", {
+      class: `mmc-pill mmc-continue${on ? " on" : ""}`,
+      disabled: blocked ? true : undefined,
+      title: blocked || (on
+        ? "Starts from the previous segment's last frame. Click for a hard cut instead."
+        : "Hard cut from the previous segment. Click to start from its last frame."),
+      onclick: blocked ? undefined : () => {
+        this.state.continue = !on;
+        this.commit();
+      },
+    }, [icon("frameIn", 16), el("span", { text: on ? "continues" : "hard cut" })]);
+  }
+
+  /**
+   * The mode and the weights it runs on, and — where there is a choice — the
+   * control that changes the second without changing the first.
+   *
+   * Two things can decide the weights. The node-level **route** is a standing
+   * instruction and wins outright; failing that, this generation's own pin does,
+   * and failing that the mode. Clicking cycles the route, because that is the
+   * one of the two that survives a mode change: pinning per generation is
+   * dropped the moment attaching a reference makes it illegal, so a preference
+   * expressed there quietly evaporates. `routeOf` is null in a timeline segment
+   * editor, where the route belongs to the timeline and this is a readout.
+   */
+  renderRouting(currentMode) {
+    const state = this.state;
+    const route = this.routeOf?.() ?? "auto";
+    const forced = route !== "auto";
+    const routed = forced ? route : S.checkpoint(state);
+    const pinned = !forced && S.checkpointPinned(state);
+    // Forcing FL2VA on a reference generation is refused at compile time, so the
+    // badge says so here rather than letting the queue do it.
+    const impossible = forced && route === "fl2va" && S.hasReferences(state);
+    const canCycle = !!this.setRoute;
+
+    const badge = el(canCycle ? "button" : "span", {
+      class: `mmc-mode${forced || pinned ? " pinned" : ""}${impossible ? " bad" : ""}`,
+      title: impossible
+        ? "This generation has references, which are encoded for Ref2VA and cannot be "
+          + "read by FL2VA. It will be refused — change the route to auto or Ref2VA."
+        : forced
+          ? `Every generation on this node runs on ${S.CHECKPOINT_LABEL[route]}, whatever `
+            + "the mode derives. Click to change it."
+          : canCycle
+            ? "Following the mode. Click to run everything on one checkpoint instead — "
+              + "Ref2VA takes the text-only and keyframe payloads too."
+            : "Following the timeline's route.",
+      onclick: canCycle ? () => this.setRoute(S.nextRoute(route)) : undefined,
+    });
+    badge.appendChild(el("b", { text: currentMode }));
+    badge.appendChild(document.createTextNode(` → ${S.CHECKPOINT_LABEL[routed]}`));
+    if (forced) badge.appendChild(el("span", { class: "mmc-pin", text: "always" }));
+    else if (pinned) badge.appendChild(el("span", { class: "mmc-pin", text: "pinned" }));
+    return badge;
+  }
+
+  /** Handles in the prompt with no asset behind them. compile.py rejects these,
+   *  so say so here rather than at queue time. */
+  renderDangling() {
+    const known = new Set(this.state.assets.map((a) => a.handle));
+    const missing = [...new Set(Array.from(this.state.prompt.matchAll(HANDLE_RE), (m) => m[1]))]
+      .filter((handle) => !known.has(handle));
+    if (!missing.length) return null;
+    return [el("div", {
+      class: "mmc-warn",
+      text: `${missing.map((h) => "@" + h).join(", ")} ${missing.length > 1 ? "are" : "is"} in the prompt but not attached.`,
+    })];
+  }
+
+  // ---- popovers ------------------------------------------------------------
+
+  openAspect(anchor) {
+    openAspectPopover(anchor, this.state, () => this.commit());
+  }
+
+  openResolution(anchor) {
+    openResolutionPopover(anchor, this.state, () => {
+      const asset = S.frameAsset(this.state, "first_frame") || S.frameAsset(this.state, "last_frame");
+      return S.resolved(this.state, asset ? this.sizes.get(asset.filename) : null);
+    }, () => this.commit());
+  }
+}

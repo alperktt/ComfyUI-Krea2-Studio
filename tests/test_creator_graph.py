@@ -1,0 +1,550 @@
+"""What `MiniMaxH3Creator.execute` wires up, and that it agrees with the Timeline.
+
+The Creator owns its sampler now, so like the Timeline it returns a subgraph
+rather than tensors and the thing worth checking is the graph. Nothing is
+sampled — the expansion can be inspected without a model or a denoising step.
+
+    COMFYUI_PATH=~/ComfyUI <comfy-venv>/bin/python3 tests/test_creator_graph.py
+
+The load-bearing case is the last one: a Creator render and a one-segment
+one-pass timeline must emit the *same* graph. That is the whole claim behind
+`render.py` existing, and it is the assertion that fails if either node grows a
+private copy of the wiring.
+
+Skips itself with a message if ComfyUI cannot be imported.
+"""
+
+import asyncio
+import importlib
+import json
+import os
+import sys
+
+# The checkout this file lives in *is* the package under test, so the import
+# name is read off the directory rather than guessed — `__init__.py` imports
+# relatively, which means it has to come in as a package under whatever name
+# the clone was given.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PACKAGE = os.path.basename(ROOT)
+
+# A stock install is one tree and `--base-directory` defaults to it. Point
+# COMFYUI_PATH at the ComfyUI that actually runs, and set COMFYUI_BASE as well
+# if the base directory is somewhere else (a Desktop install: it usually is).
+COMFY = os.environ.get("COMFYUI_PATH", os.path.expanduser("~/ComfyUI"))
+BASE = os.environ.get("COMFYUI_BASE", COMFY)
+
+
+def _boot():
+    sys.path.insert(0, COMFY)
+    sys.argv = ["main.py", "--base-directory", BASE]
+    import nodes
+    import server
+
+    loop = asyncio.new_event_loop()
+    server.PromptServer(loop)
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(nodes.init_extra_nodes(init_custom_nodes=False))
+
+    sys.path.insert(0, os.path.dirname(ROOT))
+    return importlib.import_module(PACKAGE), nodes
+
+
+try:
+    package, comfy_nodes = _boot()
+except Exception as exc:  # noqa: BLE001
+    print(f"skipped: ComfyUI not importable ({type(exc).__name__}: {exc})")
+    sys.exit(0)
+
+cn = importlib.import_module(f"{PACKAGE}.creator_node")
+tl = importlib.import_module(f"{PACKAGE}.timeline")
+
+FAILURES = []
+
+
+def check(label, got, want):
+    if got != want:
+        FAILURES.append(f"{label}: got {got!r}, want {want!r}")
+
+
+def expect_error(label, fn, fragment):
+    try:
+        fn()
+    except Exception as exc:  # noqa: BLE001
+        if fragment not in str(exc):
+            FAILURES.append(f"{label}: error {str(exc)!r} does not mention {fragment!r}")
+    else:
+        FAILURES.append(f"{label}: expected an error mentioning {fragment!r}, got none")
+
+
+# The node has no sockets at all now: the weights are named in the blob and the
+# loaders are built inside the subgraph. Filenames rather than links, and never
+# checked against the disk — `models.py` only writes them into a loader's widget.
+MODELS = {
+    "fl2va": "h3/fl2va.safetensors",
+    "ref2va": "h3/ref2va.safetensors",
+    "clip": "h3/text_encoder.safetensors",
+    "vae": "h3/video_vae.safetensors",
+    "audio_vae": "h3/audio_vae.safetensors",
+    "preview": "taeh3.safetensors",
+}
+
+DATA = json.dumps({
+    "version": 1,
+    "prompt": "a red room",
+    "assets": [],
+    "loras": [],
+    "duration_s": 6,
+    "aspect": "16:9",
+    "short_edge": 768,
+    "models": MODELS,
+})
+
+NODE_ID = "7"
+
+
+def build(data=DATA, **overrides):
+    kwargs = dict(
+        creator_data=data,
+        seed=100, steps=20, cfg=1.0, sampler_name="res_multistep", scheduler="simple",
+    )
+    kwargs.update(overrides)
+    # `unique_id` reaches `execute` as a hidden input, which only the executor
+    # fills in. Stamped by hand here so the save node gets the display id it
+    # would get in a real run — that link is the whole reason the node can show
+    # its own result, and a test that skipped it would not notice it break.
+    return with_id(cn.MiniMaxH3Creator, NODE_ID, lambda: cn.MiniMaxH3Creator.execute(**kwargs))
+
+
+def with_id(node_class, unique_id, run):
+    """Run `run()` with the node's hidden `unique_id` filled in.
+
+    Constructed rather than `HiddenHolder.from_dict`, whose keys are `Hidden`
+    enum members and not the plain names.
+    """
+    from comfy_api.latest import io as comfy_io
+
+    previous = node_class.hidden
+    node_class.hidden = comfy_io.HiddenHolder(
+        unique_id=unique_id, prompt=None, extra_pnginfo=None, dynprompt=None,
+        auth_token_comfy_org=None, api_key_comfy_org=None)
+    try:
+        return run()
+    finally:
+        node_class.hidden = previous
+
+
+def by_class(graph):
+    out = {}
+    for node_id, node in graph.items():
+        out.setdefault(node["class_type"], []).append((node_id, node["inputs"]))
+    return out
+
+
+out = build()
+graph = out.expand
+kinds = by_class(graph)
+
+# The node has no output sockets, so the expansion exports no links — but that
+# has to be an empty tuple and not `None`, which is what `NodeOutput` gives for
+# no values. `execution.py` takes `len()` of this to find the exported links,
+# and a bare `NodeOutput(expand=...)` fails the whole prompt there.
+check("expansion exports no links", out.result, ())
+
+# One generation is one of everything, and none of the chaining machinery: a
+# Creator render has no seam, so a last-frame, audio-tail or join node in here
+# would be a node that can never do anything.
+check("one segment node", len(kinds["MiniMaxH3TimelineSegment"]), 1)
+check("one sampler", len(kinds["KSampler"]), 1)
+check("one video decode", len(kinds["VAEDecode"]), 1)
+check("one audio decode", len(kinds["VAEDecodeAudio"]), 1)
+for absent in ("MiniMaxH3LastFrame", "MiniMaxH3AudioTail", "MiniMaxH3TimelineJoin"):
+    check(f"no {absent} in a single render", absent in kinds, False)
+
+# ---- the loaders ------------------------------------------------------------
+#
+# The node has no model sockets, so the graph has to build its own. The claim
+# worth pinning is the one that saves real VRAM: this is a T2VA render, which
+# routes to FL2VA, so the Ref2VA weights must not be loaded at all. Both used to
+# be wired and both used to load, every queue.
+
+check("one UNETLoader, not two", len(kinds["UNETLoader"]), 1)
+check("...for the checkpoint the mode routes to",
+      kinds["UNETLoader"][0][1]["unet_name"], MODELS["fl2va"])
+check("the text encoder is loaded as H3's",
+      (kinds["CLIPLoader"][0][1]["clip_name"], kinds["CLIPLoader"][0][1]["type"]),
+      (MODELS["clip"], "minimax"))
+check("both VAEs are loaded",
+      sorted(i["vae_name"] for _, i in kinds["VAELoader"]),
+      sorted([MODELS["vae"], MODELS["audio_vae"]]))
+
+# The segment node takes the loaders' outputs, which are links exactly as the
+# old sockets' raw_links were — a loaded object as a literal input value hashes
+# as Unhashable and would miss the cache on every queue.
+segment_id, segment_inputs = kinds["MiniMaxH3TimelineSegment"][0]
+loader_ids = {node_id for node_id, _ in
+              kinds["UNETLoader"] + kinds["CLIPLoader"] + kinds["VAELoader"]}
+for socket in ("clip", "vae", "audio_vae", "model_fl2va"):
+    value = segment_inputs.get(socket)
+    if not (isinstance(value, list) and len(value) == 2 and value[0] in loader_ids):
+        FAILURES.append(f"segment input {socket!r} is not a link to a loader: {value!r}")
+check("the checkpoint nothing routes to is not wired either",
+      "model_ref2va" in segment_inputs, False)
+
+# ---- the tail ---------------------------------------------------------------
+#
+# The node has no outputs either: it saves the render itself. The display-id
+# stamp is what puts the result back on the node the user is looking at, and
+# without it the `executed` message lands on an expanded node on nobody's canvas.
+
+check("nothing comes out of the node", out.args, ())
+check("one save node", len(kinds["MiniMaxH3Save"]), 1)
+save_id, save_inputs = kinds["MiniMaxH3Save"][0]
+check("it is reported against the node that built it",
+      graph[save_id].get("override_display_id"), NODE_ID)
+check("it saves the decoded picture",
+      graph[save_inputs["images"][0]]["class_type"], "VAEDecode")
+check("...and the decoded sound",
+      graph[save_inputs["audio"][0]]["class_type"], "VAEDecodeAudio")
+check("both decode the same sampler",
+      graph[save_inputs["images"][0]]["inputs"]["samples"][0],
+      graph[save_inputs["audio"][0]]["inputs"]["samples"][0])
+check("at the rate the frame count was snapped to", save_inputs["fps"], 24.0)
+
+# The payload is a segment payload with nothing in front of it.
+payload = json.loads(segment_inputs["segment_data"])
+check("the payload carries the request", sorted(payload), ["continue", "continue_audio", "request"])
+check("nothing to continue from", (payload["continue"], payload["continue_audio"]), (False, False))
+check("the request is the creator blob", payload["request"]["prompt"], "a red room")
+
+# Sampler settings arrive verbatim, and the seed is not offset — there is only
+# one generation to give a seed to.
+sampler = kinds["KSampler"][0][1]
+check("the seed is used as given", sampler["seed"], 100)
+check("the sampler settings arrive verbatim",
+      (sampler["steps"], sampler["cfg"], sampler["sampler_name"], sampler["scheduler"], sampler["denoise"]),
+      (20, 1.0, "res_multistep", "simple", 1.0))
+
+# ---- prompt_override --------------------------------------------------------
+#
+# It has no socket any more, but a hand-written blob may still carry one, and it
+# has to reach the segment node through the payload — that string is the node's
+# cache key, so an override kept anywhere else would change the prompt without
+# re-running the generation.
+
+hand_written = json.loads(DATA)
+hand_written["prompt_override"] = "<Picture 1> hand-written"
+overridden = json.loads(
+    by_class(build(json.dumps(hand_written)).expand)
+    ["MiniMaxH3TimelineSegment"][0][1]["segment_data"])
+check("the override rides in the payload",
+      overridden.get("prompt_override"), "<Picture 1> hand-written")
+check("...and changes the cache key",
+      overridden["prompt_override"] != payload.get("prompt_override"), True)
+
+# ---- weights ----------------------------------------------------------------
+#
+# A file nobody picked is refused before anything is queued, naming the field and
+# the folder to fix it in — the same contract the missing-checkpoint error had
+# when these were sockets.
+
+def without(field):
+    blob = json.loads(DATA)
+    del blob["models"][field]
+    return json.dumps(blob)
+
+
+expect_error("a missing checkpoint is refused up front",
+             lambda: build(without("fl2va")),
+             "models/diffusion_models")
+expect_error("...and names the generation that needed it",
+             lambda: build(without("fl2va")),
+             "This generation routes to it")
+expect_error("a missing text encoder is refused too",
+             lambda: build(without("clip")),
+             "models/text_encoders")
+# The reference checkpoint is not needed by a text-only render and must not be
+# demanded by one — that is the whole point of only emitting what is routed to.
+check("an unrouted checkpoint is not required",
+      "UNETLoader" in by_class(build(without("ref2va")).expand), True)
+
+# ---- the route --------------------------------------------------------------
+#
+# The two checkpoints are one architecture trained twice, and Ref2VA takes the
+# text-only and keyframe payloads FL2VA was trained for. `route` says so once for
+# the whole node, where the per-request `checkpoint` pin says it for one
+# generation and does not survive the mode changing under it.
+
+def routed(route, data=DATA):
+    blob = json.loads(data)
+    blob["models"]["route"] = route
+    return json.dumps(blob)
+
+
+# This request is T2VA, which derives fl2va. Forced the other way, the reference
+# weights are what gets loaded — and the FL2VA ones are not loaded at all.
+forced = by_class(build(routed("ref2va")).expand)
+check("a forced route overrides what the mode derived",
+      [i["unet_name"] for _, i in forced["UNETLoader"]], [MODELS["ref2va"]])
+check("...and the segment is wired to that checkpoint",
+      "model_ref2va" in forced["MiniMaxH3TimelineSegment"][0][1], True)
+check("...and not to the other one",
+      "model_fl2va" in forced["MiniMaxH3TimelineSegment"][0][1], False)
+
+# It reaches the segment through the payload, because that string is the node's
+# cache key: a route kept anywhere else would change which weights ran without
+# re-running the generation.
+check("the route rides in the payload",
+      json.loads(forced["MiniMaxH3TimelineSegment"][0][1]["segment_data"])["request"]["checkpoint"],
+      "ref2va")
+check("...which changes the cache key",
+      forced["MiniMaxH3TimelineSegment"][0][1]["segment_data"] != segment_inputs["segment_data"],
+      True)
+
+# Forcing it the other way round is the one direction that is not a preference:
+# reference blocks have nothing to attend to in FL2VA, so it is refused rather
+# than quietly producing a wrong video.
+with_refs = json.loads(DATA)
+with_refs["assets"] = [{"handle": "img-1", "kind": "image", "role": "reference",
+                        "filename": "a.png"}]
+expect_error("forcing FL2VA onto a reference generation is refused",
+             lambda: build(routed("fl2va", json.dumps(with_refs))),
+             "cannot be run through FL2VA")
+# ...but forcing Ref2VA onto one is a no-op rather than an error.
+check("forcing Ref2VA onto a reference generation is fine",
+      [i["unet_name"] for _, i in
+       by_class(build(routed("ref2va", json.dumps(with_refs))).expand)["UNETLoader"]],
+      [MODELS["ref2va"]])
+
+check("auto is what it always was",
+      [i["unet_name"] for _, i in by_class(build(routed("auto")).expand)["UNETLoader"]],
+      [MODELS["fl2va"]])
+# A route only names one checkpoint, so the other one being unset cannot stop it.
+check("a forced route does not require the checkpoint it skips",
+      [i["unet_name"] for _, i in
+       by_class(build(routed("ref2va", without("fl2va"))).expand)["UNETLoader"]],
+      [MODELS["ref2va"]])
+
+# ---- devices ----------------------------------------------------------------
+#
+# ComfyUI-MultiGPU registers a subclass of each core loader taking the identical
+# inputs plus `device`, so putting one field on another card is a class swap and
+# one argument. The pack is absent in this harness, which makes both halves worth
+# pinning: nothing pinned must emit the *core* loaders, and something pinned
+# without the pack must refuse rather than silently load everything on one card.
+
+models_mod = importlib.import_module(f"{PACKAGE}.models")
+
+
+def on_device(**pins):
+    blob = json.loads(DATA)
+    blob["models"]["devices"] = pins
+    return json.dumps(blob)
+
+
+check("no MultiGPU loaders when nothing is pinned",
+      [k for k in kinds if k.endswith("MultiGPU")], [])
+expect_error("a pinned device without the pack is refused up front",
+             lambda: build(on_device(clip="cuda:1")),
+             "ComfyUI-MultiGPU")
+expect_error("...naming the device that was asked for",
+             lambda: build(on_device(clip="cuda:1")),
+             "cuda:1")
+
+
+class _FakeMultiGPU:
+    """Stands in for one of the pack's wrappers. Only `INPUT_TYPES` matters —
+    `models.device_options` reads the device list back off it rather than
+    importing the pack, the same way `accel.node_defaults` does."""
+
+    FUNCTION = "override"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}, "optional": {"device": (["cpu", "cuda:0", "cuda:1"],
+                                                        {"default": "cuda:0"})}}
+
+
+_restore = dict(comfy_nodes.NODE_CLASS_MAPPINGS)
+for wrapper in ("UNETLoaderMultiGPU", "CLIPLoaderMultiGPU", "VAELoaderMultiGPU"):
+    comfy_nodes.NODE_CLASS_MAPPINGS[wrapper] = _FakeMultiGPU
+try:
+    check("the device list comes from the installed pack",
+          models_mod.device_options(), ["cpu", "cuda:0", "cuda:1"])
+
+    # The real case: the text encoder on the second card, everything else where
+    # ComfyUI would have put it.
+    split = by_class(build(on_device(clip="cuda:1")).expand)
+    check("the pinned field uses the pack's loader", len(split["CLIPLoaderMultiGPU"]), 1)
+    check("...on the device it was pinned to",
+          split["CLIPLoaderMultiGPU"][0][1]["device"], "cuda:1")
+    check("...with the core loader's arguments unchanged",
+          (split["CLIPLoaderMultiGPU"][0][1]["clip_name"], split["CLIPLoaderMultiGPU"][0][1]["type"]),
+          (MODELS["clip"], "minimax"))
+    check("an unpinned field stays on the core loader",
+          "CLIPLoader" in split, False)
+    check("...and so does everything else",
+          sorted(k for k in split if k.endswith("Loader") or k.endswith("MultiGPU")),
+          ["CLIPLoaderMultiGPU", "UNETLoader", "VAELoader"])
+
+    # The two VAEs are separate loaders, so they can sit on separate cards —
+    # which is the only reason they are not one node with two outputs.
+    both = by_class(build(on_device(vae="cuda:0", audio_vae="cpu")).expand)
+    check("each VAE takes its own device",
+          sorted(i["device"] for _, i in both["VAELoaderMultiGPU"]), ["cpu", "cuda:0"])
+finally:
+    comfy_nodes.NODE_CLASS_MAPPINGS.clear()
+    comfy_nodes.NODE_CLASS_MAPPINGS.update(_restore)
+
+check("no device list without the pack", models_mod.device_options(), [])
+
+# ---- the preview override ---------------------------------------------------
+#
+# KJNodes' node is optional in the way the accelerators are optional, except that
+# a missing one is not even a warning: the render is identical and core's own
+# previews still carry this node's id. The harness boots with custom nodes off,
+# so the absent path is the one that runs here unaided.
+
+check("no preview node when the pack is not installed",
+      "ModelPreviewOverrideKJ" in kinds, False)
+check("the sampler reads the segment directly without it",
+      kinds["KSampler"][0][1]["model"][0], segment_id)
+
+
+class _FakePreview:
+    FUNCTION = "execute"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "model": ("MODEL",),
+            "max_resolution": ("INT", {"default": 1024}),
+            "jpeg_quality": ("INT", {"default": 80}),
+            "suppress_default_preview": ("BOOLEAN", {"default": True}),
+            "preview_frames": ("INT", {"default": 1}),
+            "preview_fps": ("INT", {"default": 12}),
+        }}
+
+
+_restore = dict(comfy_nodes.NODE_CLASS_MAPPINGS)
+comfy_nodes.NODE_CLASS_MAPPINGS["ModelPreviewOverrideKJ"] = _FakePreview
+try:
+    preview_kinds = by_class(build().expand)
+    patches = preview_kinds["ModelPreviewOverrideKJ"]
+    check("one preview patch", len(patches), 1)
+    check("it decodes through the chosen tiny VAE", patches[0][1]["tiny_vae"], MODELS["preview"])
+    check("it animates rather than showing one frame", patches[0][1]["preview_frames"], 8)
+    # Read off the installed class rather than carried here, the way accel.py
+    # reads its packs' defaults — a knob the pack retunes must not go stale.
+    check("the pack's own default survives for anything we do not set",
+          patches[0][1]["max_resolution"], 1024)
+    check("the sampler reads the patch",
+          preview_kinds["KSampler"][0][1]["model"][0], patches[0][0])
+
+    # No decoder picked is the same as no pack installed: nothing is emitted.
+    check("no preview node without a decoder to use",
+          "ModelPreviewOverrideKJ" in by_class(build(without("preview")).expand), False)
+finally:
+    comfy_nodes.NODE_CLASS_MAPPINGS.clear()
+    comfy_nodes.NODE_CLASS_MAPPINGS.update(_restore)
+
+# ---- accelerators -----------------------------------------------------------
+
+check("no accelerator nodes by default",
+      [k for k in kinds if k in (tl.accel.BLOCK_CACHE_NODE, tl.accel.SPECTRUM_NODE)], [])
+check("the sampler reads the segment directly when off",
+      sampler["model"][0], segment_id)
+
+expect_error("a missing pack is refused up front",
+             lambda: build(spectrum=True),
+             "xmarre/ComfyUI-Spectrum-MiniMax-H3")
+
+
+class _FakePack:
+    FUNCTION = "apply"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"model": ("MODEL",),
+                             "mode": (["H3 Safe — 0.08", "H3 Fast — 0.10"], {"default": "H3 Fast — 0.10"})}}
+
+
+_restore = dict(comfy_nodes.NODE_CLASS_MAPPINGS)
+comfy_nodes.NODE_CLASS_MAPPINGS[tl.accel.BLOCK_CACHE_NODE] = _FakePack
+try:
+    accel_kinds = by_class(build(block_cache="fast").expand)
+    patches = accel_kinds[tl.accel.BLOCK_CACHE_NODE]
+    accel_segment = accel_kinds["MiniMaxH3TimelineSegment"][0][0]
+    check("one accelerator patch", len(patches), 1)
+    check("the patch reads the segment", patches[0][1]["model"][0], accel_segment)
+    check("the sampler reads the patch",
+          accel_kinds["KSampler"][0][1]["model"][0], patches[0][0])
+    check("conditioning still comes from the segment",
+          accel_kinds["KSampler"][0][1]["positive"][0], accel_segment)
+finally:
+    comfy_nodes.NODE_CLASS_MAPPINGS.clear()
+    comfy_nodes.NODE_CLASS_MAPPINGS.update(_restore)
+
+# ---- the Creator is a one-segment timeline ----------------------------------
+#
+# The claim `render.py` exists for. Both nodes are handed the same request at the
+# same duration and canvas, and must emit the same graph — same node classes,
+# same wiring, same payload. If either grows its own copy of the loop, this is
+# what notices.
+
+timeline_data = json.dumps({
+    "version": 2,
+    "render": "single",
+    "prompt": "",
+    "aspect": "16:9",
+    "short_edge": 768,
+    "models": MODELS,
+    "segments": [{"prompt": "a red room", "assets": [], "loras": [], "duration_s": 6}],
+})
+tl_out = with_id(tl.MiniMaxH3Timeline, NODE_ID, lambda: tl.MiniMaxH3Timeline.execute(
+    timeline_data=timeline_data,
+    seed=100, steps=20, cfg=1.0, sampler_name="res_multistep", scheduler="simple"))
+tl_kinds = by_class(tl_out.expand)
+
+check("both nodes emit the same node classes",
+      sorted(tl_kinds), sorted(kinds))
+check("both emit one of each",
+      {k: len(v) for k, v in sorted(tl_kinds.items())},
+      {k: len(v) for k, v in sorted(kinds.items())})
+
+tl_segment = tl_kinds["MiniMaxH3TimelineSegment"][0][1]
+tl_payload = json.loads(tl_segment["segment_data"])
+
+# Compared after compiling, not before. The two payloads legitimately differ in
+# the raw prompt string — `single_payload` assembles the shot list itself and
+# writes `[Shot 1]` in, where the Creator hands over the bare sentence and
+# `contextir.compose` marks it during the compile. What has to be identical is
+# what the DiT is actually handed, which is downstream of both.
+compiler = importlib.import_module(f"{PACKAGE}.compile")
+media = importlib.import_module(f"{PACKAGE}.media")
+
+creator_compiled = compiler.compile_segment(payload, media.image_size)
+timeline_compiled = compiler.compile_segment(tl_payload, media.image_size)
+for field in ("prompt", "mode", "checkpoint", "frames", "seconds", "width", "height"):
+    check(f"both compile the same {field}",
+          getattr(timeline_compiled, field), getattr(creator_compiled, field))
+def loader_files(kinds):
+    """What each node's expansion actually loads, as filenames rather than ids —
+    the node ids differ between two expansions and the files must not."""
+    return {
+        "unet": sorted(i["unet_name"] for _, i in kinds["UNETLoader"]),
+        "clip": sorted(i["clip_name"] for _, i in kinds["CLIPLoader"]),
+        "vae": sorted(i["vae_name"] for _, i in kinds["VAELoader"]),
+    }
+
+
+check("both build the same loaders", loader_files(tl_kinds), loader_files(kinds))
+check("both sample identically",
+      {k: v for k, v in tl_kinds["KSampler"][0][1].items() if k not in ("model", "positive", "negative", "latent_image")},
+      {k: v for k, v in sampler.items() if k not in ("model", "positive", "negative", "latent_image")})
+
+if FAILURES:
+    print(f"{len(FAILURES)} failure(s):")
+    for failure in FAILURES:
+        print("  -", failure)
+    sys.exit(1)
+print("all creator graph tests passed")

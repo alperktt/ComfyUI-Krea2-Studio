@@ -1,0 +1,378 @@
+// The prompt box: rich text where every @reference is an atomic chip.
+//
+// The chip is the whole point of this UI. H3 addresses references by ordinal
+// label — <Picture 2>, <Video 1> — and getting those right by hand is the real
+// difficulty of prompting the model. Typing "@" and picking a file is how a
+// person says "use *this* one for her face" without ever seeing a label.
+//
+// The DOM is kept deliberately flat: only text nodes and chip spans, never the
+// <div>/<br> soup contenteditable produces on its own. Enter inserts a literal
+// "\n" (the box is white-space: pre-wrap) and paste is forced to plain text, so
+// getValue() is a simple walk and round-trips exactly with what compile.py
+// parses.
+
+import { el, floatAbove } from "./dom.js";
+import { listAssets, viewUrl } from "./api.js";
+import { tagIndex } from "./state.js";
+
+const TRIGGER = /@([\w-]*)$/;
+const MAX_SUGGESTIONS = 40;
+
+export class PromptBox {
+  /**
+   * @param {object} hooks
+   * @param {()=>object} hooks.getState      current creator state
+   * @param {(text:string)=>void} hooks.onInput   prompt text changed
+   * @param {(row:object)=>string|null} hooks.onAttach  attach an input-folder file, -> handle
+   * @param {(kind:string)=>string|null} hooks.attachBlocked  why attaching is impossible, or null
+   */
+  constructor(hooks) {
+    this.hooks = hooks;
+    this.menu = null;
+
+    this.root = el("div", {
+      class: "mmc-prompt",
+      contenteditable: "true",
+      spellcheck: "false",
+      role: "textbox",
+      "aria-multiline": "true",
+      "data-placeholder": "Describe your video, use @ to reference images, videos, audio, or elements",
+    });
+
+    this.root.addEventListener("input", () => this.onEdit());
+    this.root.addEventListener("keydown", (event) => this.onKeyDown(event), true);
+    this.root.addEventListener("paste", (event) => this.onPaste(event));
+    this.root.addEventListener("blur", () => setTimeout(() => this.closeMenu(), 120));
+
+    // The graph canvas swallows keys and drags otherwise.
+    for (const name of ["keyup", "pointerdown", "pointerup", "wheel"]) {
+      this.root.addEventListener(name, (event) => event.stopPropagation());
+    }
+  }
+
+  // ---- value <-> DOM -------------------------------------------------------
+
+  getValue() {
+    let text = "";
+    for (const node of this.root.childNodes) {
+      if (node.nodeType === Node.TEXT_NODE) text += node.nodeValue;
+      else if (node.dataset?.handle) text += `@${node.dataset.handle}`;
+      else if (node.tagName === "BR") text += "\n";
+      else text += node.textContent;
+    }
+    return text;
+  }
+
+  setValue(text) {
+    if (this.getValue() === text) return;
+    this.root.replaceChildren(...this.build(text));
+  }
+
+  /** Text -> [text nodes, chip spans]. Only handles with a live asset become
+   *  chips; the rest stay as plain text so the dangling-handle warning sees them. */
+  build(text) {
+    const known = new Set(this.hooks.getState().assets.map((a) => a.handle));
+    const out = [];
+    let at = 0;
+    const pattern = /@([A-Za-z]+-\d+)/g;
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      if (!known.has(match[1])) continue;
+      if (match.index > at) out.push(document.createTextNode(text.slice(at, match.index)));
+      out.push(this.chip(match[1]));
+      at = match.index + match[0].length;
+    }
+    if (at < text.length) out.push(document.createTextNode(text.slice(at)));
+    return out;
+  }
+
+  chip(handle) {
+    return el("span", {
+      class: `mmc-ref mmc-tag-${tagIndex(handle)}`,
+      contenteditable: "false",
+      "data-handle": handle,
+      text: `@${handle}`,
+    });
+  }
+
+  /**
+   * Dim the box while a rewrite stands in for it.
+   *
+   * `compile.refined_body` replaces this text outright rather than adding to it,
+   * so with a rewrite switched on the sentence in here is not queued at all —
+   * it is only what the rewrite was written from. Nothing on screen said so, and
+   * a full-brightness box in the middle of the panel reads as the thing being
+   * sent. Still editable, because editing it is how you ask for a new one.
+   */
+  setSuperseded(on) {
+    this.root.classList.toggle("superseded", !!on);
+    this.root.title = on
+      ? "Not queued while the rewrite below is on — that is what the model reads. "
+        + "Edit this and refine again, or revert the rewrite, to send it."
+      : "";
+  }
+
+  /** Re-run the text through build(): an asset was added or removed, so some
+   *  chips may need to become plain text or vice versa. Skipped while focused
+   *  so it never yanks the caret mid-sentence. */
+  refresh() {
+    if (document.activeElement === this.root) return;
+    this.root.replaceChildren(...this.build(this.hooks.getState().prompt ?? ""));
+  }
+
+  // ---- editing -------------------------------------------------------------
+
+  onEdit() {
+    this.hooks.onInput(this.getValue());
+    const trigger = this.triggerRange();
+    if (trigger) this.openMenu(trigger.query);
+    else this.closeMenu();
+  }
+
+  onPaste(event) {
+    event.preventDefault();
+    const text = event.clipboardData?.getData("text/plain") ?? "";
+    this.insertText(text.replace(/\r\n?/g, "\n"));
+    this.onEdit();
+  }
+
+  onKeyDown(event) {
+    if (this.menu && ["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(event.key)) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === "Escape") this.closeMenu();
+      else if (event.key === "Enter" || event.key === "Tab") this.choose(this.active);
+      else this.move(event.key === "ArrowDown" ? 1 : -1);
+      return;
+    }
+    event.stopPropagation();
+
+    if (event.key === "Enter") {
+      // Keep the DOM flat: no <div> wrappers from the browser's own handling.
+      event.preventDefault();
+      this.insertText("\n");
+      this.onEdit();
+    }
+  }
+
+  /** The "@query" immediately before the caret, or null. */
+  triggerRange() {
+    const selection = window.getSelection();
+    if (!selection?.rangeCount || !selection.isCollapsed) return null;
+    const range = selection.getRangeAt(0);
+    const node = range.startContainer;
+    if (node.nodeType !== Node.TEXT_NODE || !this.root.contains(node)) return null;
+    const match = TRIGGER.exec(node.nodeValue.slice(0, range.startOffset));
+    if (!match) return null;
+    return { node, start: range.startOffset - match[0].length, end: range.startOffset, query: match[1] };
+  }
+
+  insertText(text) {
+    const selection = window.getSelection();
+    if (!selection?.rangeCount) return;
+    const range = selection.getRangeAt(0);
+    range.deleteContents();
+    const node = document.createTextNode(text);
+    range.insertNode(node);
+    range.setStartAfter(node);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  /** Swap the typed "@query" for a chip, followed by a space. */
+  insertChip(handle) {
+    const trigger = this.triggerRange();
+    const selection = window.getSelection();
+    const range = document.createRange();
+    if (trigger) {
+      range.setStart(trigger.node, trigger.start);
+      range.setEnd(trigger.node, trigger.end);
+      range.deleteContents();
+    } else if (selection?.rangeCount) {
+      range.setStart(selection.getRangeAt(0).startContainer, selection.getRangeAt(0).startOffset);
+      range.collapse(true);
+    } else {
+      this.root.appendChild(this.chip(handle));
+      this.root.appendChild(document.createTextNode(" "));
+      this.hooks.onInput(this.getValue());
+      return;
+    }
+    const chip = this.chip(handle);
+    const space = document.createTextNode(" ");
+    range.insertNode(space);
+    range.insertNode(chip);
+    const after = document.createRange();
+    after.setStart(space, 1);
+    after.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(after);
+    this.hooks.onInput(this.getValue());
+  }
+
+  // ---- suggestion menu -----------------------------------------------------
+
+  async openMenu(query) {
+    this.query = query.toLowerCase();
+    if (!this.menu) {
+      this.menu = el("div", { class: "mmc-mention" });
+      // Above whatever is open: the same prompt box is the node's body and a
+      // timeline segment's editor, and in the second case it is inside a modal.
+      floatAbove(this.menu);
+      document.body.appendChild(this.menu);
+      this.active = 0;
+    }
+    this.place();
+    this.renderMenu();          // attached assets are known immediately
+    try {
+      this.library = await listAssets();
+    } catch {
+      this.library = [];
+    }
+    if (this.menu) this.renderMenu();
+  }
+
+  closeMenu() {
+    this.menu?.remove();
+    this.menu = null;
+    this.active = 0;
+    this.rows = null;
+    this.signature = null;
+  }
+
+  place() {
+    const selection = window.getSelection();
+    if (!selection?.rangeCount || !this.menu) return;
+    const rect = selection.getRangeAt(0).getBoundingClientRect();
+    const anchor = rect.width || rect.height ? rect : this.root.getBoundingClientRect();
+    const box = this.menu.getBoundingClientRect();
+    const height = box.height || 260;
+    const top = anchor.top - height - 8 > 8 ? anchor.top - height - 8 : anchor.bottom + 8;
+    this.menu.style.left = `${Math.max(8, Math.min(anchor.left, window.innerWidth - 340))}px`;
+    this.menu.style.top = `${Math.max(8, Math.min(top, window.innerHeight - height - 8))}px`;
+  }
+
+  /** Attached assets first, then everything else in the input folder. */
+  options() {
+    const state = this.hooks.getState();
+    const attached = state.assets
+      .filter((asset) => !this.query || asset.handle.toLowerCase().includes(this.query)
+        || asset.filename.toLowerCase().includes(this.query))
+      .map((asset) => ({ kind: "attached", handle: asset.handle, path: asset.filename, mediaKind: asset.kind }));
+
+    const used = new Set(state.assets.map((a) => a.filename));
+    const library = (this.library ?? [])
+      .filter((row) => !used.has(row.path))
+      .filter((row) => !this.query || row.path.toLowerCase().includes(this.query))
+      .slice(0, MAX_SUGGESTIONS)
+      .map((row) => ({ kind: "library", path: row.path, mediaKind: row.kind, row }));
+
+    return { attached, library };
+  }
+
+  renderMenu() {
+    if (!this.menu) return;
+    const { attached, library } = this.options();
+    this.flat = [...attached, ...library];
+    if (this.active >= this.flat.length) this.active = Math.max(0, this.flat.length - 1);
+
+    // openMenu() renders once immediately and again when the library resolves,
+    // and every keystroke re-renders too. Rebuilding identical rows would throw
+    // away the highlight and re-fire mouseenter under a stationary pointer, so
+    // only rebuild when the list actually differs.
+    const signature = this.flat.map((option) => option.handle ?? option.path).join("\u0000");
+    if (this.rows?.length && signature === this.signature) return;
+    this.signature = signature;
+
+    this.menu.replaceChildren();
+    this.rows = [];
+    if (!this.flat.length) {
+      this.menu.appendChild(el("div", { class: "mmc-mention-empty", text: "Nothing matches." }));
+      return;
+    }
+
+    let index = 0;
+    const row = (option) => {
+      const here = index++;
+      const thumb = option.mediaKind === "image"
+        ? el("img", { class: "mmc-mention-thumb", src: viewUrl(option.path, { preview: true }), alt: "" })
+        : el("span", { class: "mmc-mention-thumb", text: option.mediaKind === "video" ? "▶" : "♪" });
+
+      // Attached assets are known by their handle; a library file is known by
+      // its name, and only earns a second line when it lives in a subfolder —
+      // repeating the same string twice told the user nothing.
+      const title = option.handle ? `@${option.handle}` : option.path.split("/").pop();
+      const subtitle = option.handle ? option.path : (option.row?.subfolder || "");
+
+      const item = el("button", {
+        class: "mmc-mention-row",
+        "aria-selected": here === this.active,
+        title: option.path,
+        onmouseenter: () => this.highlight(here),
+        onclick: (event) => { event.preventDefault(); this.choose(here); },
+      }, [
+        thumb,
+        el("span", { class: "mmc-mention-text" }, [
+          el("span", {
+            class: `mmc-mention-handle${option.handle ? ` mmc-tag-${tagIndex(option.handle)}` : ""}`,
+            text: title,
+          }),
+          ...(subtitle ? [el("span", { class: "mmc-mention-sub", text: subtitle })] : []),
+        ]),
+      ]);
+      // Keep focus in the box: a blurred contenteditable loses its caret, and
+      // without a caret there is nowhere to insert the chip.
+      item.addEventListener("pointerdown", (event) => event.preventDefault());
+      this.rows.push(item);
+      return item;
+    };
+
+    if (attached.length) {
+      this.menu.appendChild(el("div", { class: "mmc-mention-head", text: "Attached" }));
+      for (const option of attached) this.menu.appendChild(row(option));
+    }
+    if (library.length) {
+      const blocked = this.hooks.attachBlocked("reference");
+      this.menu.appendChild(el("div", {
+        class: "mmc-mention-head",
+        text: blocked ? "Input folder — unavailable while a start/end frame is set" : "Input folder",
+      }));
+      for (const option of library) this.menu.appendChild(row(option));
+    }
+    this.place();
+  }
+
+  /**
+   * Move the highlight without rebuilding the rows.
+   *
+   * Re-rendering here is what broke both arrow keys and clicks: the rebuilt row
+   * under the pointer immediately fired mouseenter and stole the selection
+   * back, and a row replaced between pointerdown and click never fired click at
+   * all.
+   */
+  highlight(index, { scroll = false } = {}) {
+    if (!this.rows?.length) return;
+    this.active = index;
+    this.rows.forEach((row, at) => row.setAttribute("aria-selected", String(at === index)));
+    if (scroll) this.rows[index]?.scrollIntoView({ block: "nearest" });
+  }
+
+  move(delta) {
+    if (!this.flat?.length) return;
+    this.highlight((this.active + delta + this.flat.length) % this.flat.length, { scroll: true });
+  }
+
+  choose(index) {
+    const option = this.flat?.[index];
+    if (!option) return;
+    if (option.kind === "attached") {
+      this.closeMenu();
+      this.insertChip(option.handle);
+      return;
+    }
+    // A library file has no handle yet: attaching it is what creates one.
+    const handle = this.hooks.onAttach(option.row);
+    this.closeMenu();
+    if (handle) this.insertChip(handle);
+  }
+}
