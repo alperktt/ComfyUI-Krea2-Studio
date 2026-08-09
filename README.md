@@ -426,6 +426,12 @@ ComfyUI itself uses, since they import torch through it. The pack is imported
 under whatever name this checkout's directory has, so a clone named per the
 install instructions above needs nothing configured.
 
+## License
+
+[MIT](LICENSE). ComfyUI itself is GPL-3.0 and this pack imports it; if you
+redistribute the two together rather than as a node pack people install
+themselves, that combination is what the GPL has an opinion about.
+
 ---
 
 *The screenshots are this pack running in ComfyUI. The media in them is
