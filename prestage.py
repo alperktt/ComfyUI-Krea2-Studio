@@ -35,7 +35,7 @@ import json
 
 from comfy_api.latest import io
 
-from . import (compile_image, compile_still, media, outputs, render,
+from . import (canvas, compile_image, compile_still, media, outputs, render,
                render_image, render_still)
 
 DEFAULT_DATA = json.dumps({
@@ -45,8 +45,6 @@ DEFAULT_DATA = json.dumps({
     "aspect": compile_image.DEFAULT_ASPECT,
     "short_edge": compile_image.DEFAULT_SHORT_EDGE,
     "init": None,
-    # The end frame, H3 only — the image the sampled clip closes on.
-    "end": None,
     "refs": [],
     "loras": [],
     "turbo": {"on": False, "quality": compile_image.DEFAULT_TURBO_QUALITY, "saved": None},
@@ -54,14 +52,15 @@ DEFAULT_DATA = json.dumps({
     # Where the still lands under output/. Its own default, so the gallery
     # sorts stills apart from finished renders. See `outputs`.
     "output_prefix": outputs.IMAGE_PREFIX,
-    # The H3 branch's own settings: how long the clip it samples is, which of
-    # that clip's latent frames becomes the picture, and which checkpoint it
-    # routes to. See `compile_still`.
+    # The H3 branch: how long a clip it samples and which of that clip's latent
+    # frames becomes the picture, plus the generation itself in the Creator's
+    # own shape — because it is one. See `compile_still`.
     "minimax": {
         "frames": compile_still.DEFAULT_FRAMES,
         "latent_index": compile_still.DEFAULT_LATENT_INDEX,
-        "prompt_mode": compile_still.DEFAULT_PROMPT_MODE,
-        "checkpoint": "auto",
+        "request": {"prompt": "", "assets": [], "loras": [],
+                    "aspect": "16:9", "short_edge": canvas.NATIVE_SHORT_EDGE,
+                    "output_prefix": outputs.IMAGE_PREFIX, "models": {}},
     },
     # Per-arch sub-blocks, so switching the model pill never forgets the other
     # side's files. Empty rather than guessed — the UI fills it from the
@@ -122,16 +121,19 @@ class MiniMaxH3PreStage(io.ComfyNode):
             data = json.loads(prestage_data)
             names = [ref.get("filename") if isinstance(ref, dict) else ref
                      for ref in data.get("refs") or []]
-            for keyframe in ("init", "end"):
-                entry = data.get(keyframe)
-                if isinstance(entry, dict):
-                    names.append(entry.get("filename"))
+            init = data.get("init")
+            if isinstance(init, dict):
+                names.append(init.get("filename"))
+            # The H3 branch keeps its media in a creator-shaped request.
+            still = (data.get("minimax") or {}).get("request") or {}
+            names.extend(asset.get("filename") for asset in still.get("assets") or [])
+            entries = list(data.get("loras") or []) + list(still.get("loras") or [])
             for name in names:
                 try:
                     stamps.append(os.path.getmtime(media.resolve(name or "")))
                 except Exception:
                     stamps.append(None)
-            for entry in data.get("loras", []):
+            for entry in entries:
                 try:
                     stamps.append(os.path.getmtime(lora.resolve(entry.get("name", ""))))
                 except Exception:
@@ -156,13 +158,16 @@ class MiniMaxH3PreStage(io.ComfyNode):
                 plan = compile_still.compile_still(data)
             except compile_image.CompileError as exc:
                 raise ValueError(str(exc)) from exc
+            # The request owns the weights and the output folder, because it is
+            # an ordinary creator request — see `compile_still`.
+            request = plan.passes[0].request
             graph = render_still.emit(
                 plan,
-                render_still.weights_from_blob(data),
+                render_still.weights_from_blob(request),
                 render.Sampling(seed=seed, steps=steps, cfg=cfg,
                                 sampler_name=sampler_name, scheduler=scheduler),
                 cls.hidden.unique_id,
-                filename_prefix=outputs.image(data))
+                filename_prefix=outputs.image(request))
             return render.expanded(graph)
 
         try:

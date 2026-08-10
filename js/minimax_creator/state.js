@@ -2,8 +2,7 @@
 // Mirrors compile.py: it validates here so the user sees the problem while
 // editing rather than at queue time, but compile.py stays authoritative.
 
-import { ASPECT_PRESETS, FPS, MIN_SHORT_EDGE, MAX_SHORT_EDGE, NATIVE_SHORT_EDGE,
-         clampRatio, framesForSeconds, secondsForFrames, resolveCanvas } from "./canvas.js";
+import { ASPECT_PRESETS, FPS, NATIVE_SHORT_EDGE, framesForSeconds, secondsForFrames, resolveCanvas } from "./canvas.js";
 import { VIDEO_PREFIX, IMAGE_PREFIX, cleanPrefix } from "./outputs.js";
 
 export const MAX_REF_IMAGES = 9;
@@ -180,9 +179,8 @@ function serializeModels(models) {
  */
 /** The experimental T=1 image decoder, by name. It is a merged H3 VAE and loads
  *  through the same node as the real one, so nothing downstream can tell them
- *  apart — which is why both the video guess and the video weights popover have
- *  to. In a video workflow it costs multi-frame reconstruction (patch-grid
- *  ghosting, cross-frame mixing); in the pre-stage's H3 branch it is the point. */
+ *  apart — which is why the guess below has to. In a video workflow it costs
+ *  multi-frame reconstruction; on the pre-stage's H3 branch it is the point. */
 export const IMAGE_VAE_RE = /t1[_-]?image|image[_-]vae/i;
 
 const MODEL_HINTS = {
@@ -203,11 +201,6 @@ export function guessModels(models, files) {
       needles.some((needle) => name.toLowerCase().includes(needle)));
     // The two VAEs share a folder and both answer to "minimax": whichever says
     // "audio" is the audio one, and the video VAE is whatever is left.
-    // The VAEs share a folder and all of them answer to "minimax": whichever
-    // says "audio" is the audio one, and the experimental single-image decoder
-    // (`t1_image_vae`) is never the video VAE — picking it here would quietly
-    // regress every render this node makes. See PRESTAGE_HINTS.minimax, which
-    // is where that file *is* the right answer.
     if (field === "vae") {
       matched = matched.filter((name) => !IMAGE_VAE_RE.test(name) && !name.toLowerCase().includes("audio"));
     }
@@ -340,7 +333,10 @@ export const CHECKPOINT_LABEL = { fl2va: "FL2VA", ref2va: "Ref2VA" };
 export const CHECKPOINT_CHOICES = ["auto", ...CHECKPOINTS];
 export const DEFAULT_STRENGTH = 1.0;
 
-export function emptyState() {
+/** A fresh generation. `prefix` is where its renders land when the blob does
+ *  not say — the video default, or the stills folder for the pre-stage's H3
+ *  branch, whose request is one of these too. */
+export function emptyState(prefix = VIDEO_PREFIX) {
   return {
     version: 1,
     prompt: "",
@@ -364,7 +360,7 @@ export function emptyState() {
     // Where the finished clip lands under output/. Owned by the node for the
     // same reason the weights are: a timeline saves one file, so a segment
     // carrying its own would be a second answer to a question that has one.
-    output_prefix: VIDEO_PREFIX,
+    output_prefix: prefix,
     // Which files to load. Owned by the node, not by a segment — a timeline
     // segment inherits the timeline's and never carries its own.
     models: emptyModels(),
@@ -373,11 +369,11 @@ export function emptyState() {
   };
 }
 
-export function parseState(raw) {
+export function parseState(raw, prefix = VIDEO_PREFIX) {
   try {
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object") {
-      const state = { ...emptyState(), ...parsed };
+      const state = { ...emptyState(prefix), ...parsed };
       // Workflows saved before LoRAs existed have no key at all, and a
       // hand-edited blob can have the wrong type in it.
       if (!Array.isArray(state.loras)) state.loras = [];
@@ -387,7 +383,7 @@ export function parseState(raw) {
         if (typeof state[key] !== "string") state[key] = "";
       }
       if (!CHECKPOINT_CHOICES.includes(state.checkpoint)) state.checkpoint = "auto";
-      state.output_prefix = parsePrefix(state.output_prefix, VIDEO_PREFIX);
+      state.output_prefix = parsePrefix(state.output_prefix, prefix);
       state.models = parseModels(state.models);
       state.turbo = parseTurbo(state.turbo);
       normalizeCheckpoint(state);
@@ -405,7 +401,7 @@ export function parseState(raw) {
     // A malformed blob is recoverable: fall back to empty rather than leaving
     // the node unusable. The user's text is gone either way.
   }
-  return emptyState();
+  return emptyState(prefix);
 }
 
 /** A blob's `output_prefix` as the UI holds it: always a string, always one
@@ -516,13 +512,13 @@ function serializeCommon(state) {
   };
 }
 
-export function serializeState(state) {
+export function serializeState(state, prefix = VIDEO_PREFIX) {
   return JSON.stringify({
     version: 1,
     ...serializeCommon(state),
     aspect: state.aspect,
     short_edge: state.short_edge,
-    ...serializePrefix(state.output_prefix, VIDEO_PREFIX),
+    ...serializePrefix(state.output_prefix, prefix),
     // Not in serializeCommon: the weights belong to the node, and a timeline
     // segment goes through that function too. The turbo switch likewise.
     ...serializeModels(state.models),
@@ -753,10 +749,13 @@ export const PRESTAGE_ARCH_LABEL = {
   krea2: "Krea 2", ideogram4: "Ideogram 4", minimax: "MiniMax H3",
 };
 
-/** The H3 branch is the video pipeline with one latent frame decoded, so its
- *  canvas, aspects and references are the video node's rather than the image
- *  models' — `isStill(state)` is the switch every per-arch rule below turns on.
- *  Mirrors compile_still.ARCH. */
+// The third architecture is not an image model, and almost nothing below
+// applies to it. A still from H3 is a *video generation* whose first latent
+// frame is decoded as a picture, so its request is an ordinary creator state —
+// same assets, same LoRAs, same weights block, same routing — and every rule
+// for it is the one already written for the video nodes. It lives in its own
+// sub-block (`state.minimax.request`) and is driven by CreatorEditor.
+
 export const PRESTAGE_STILL_ARCH = "minimax";
 export const isStill = (state) => state?.arch === PRESTAGE_STILL_ARCH;
 
@@ -773,15 +772,64 @@ export const PRESTAGE_PROMPT_MODES = ["context-ir", "plain"];
 export const stillLatentFrames = (frames) =>
   (frames <= 5 ? 2 : Math.floor((frames - 5) / 17) * 5 + 2);
 
-/** H3 takes nine reference images where the Qwen edit encoder takes three. */
-export const PRESTAGE_STILL_MAX_REFS = MAX_REF_IMAGES;
-
 /** What the H3 branch writes into the sampler row: the Creator node's own
- *  defaults, because it is the Creator's sampler. The released checkpoints are
- *  CFG-distilled, which is what the 1.0 is. */
+ *  defaults, because it is the Creator's sampler. */
 export const PRESTAGE_STILL_ROW = {
   steps: 20, cfg: 1.0, sampler_name: "res_multistep", scheduler: "simple",
 };
+
+export function emptyStill() {
+  return {
+    frames: PRESTAGE_STILL_FRAMES,
+    latent_index: PRESTAGE_STILL_INDEX,
+    prompt_mode: "context-ir",
+    // DEV: the sweep. Empty lists mean "just render the settings above"; the
+    // pill fills them to compare lengths, latent frames and decoders in one
+    // queue. Comes out with the dev pill once the numbers are in.
+    dev: { lengths: [], indices: [], vaes: [] },
+    // The generation, in the Creator's own shape — because it is one.
+    request: emptyState(IMAGE_PREFIX),
+  };
+}
+
+export function parseStill(raw) {
+  const out = emptyStill();
+  if (!raw || typeof raw !== "object") return out;
+  const frames = Number(raw.frames);
+  if (Number.isFinite(frames)) out.frames = framesForSeconds(Math.max(1, frames) / FPS);
+  const index = Number(raw.latent_index);
+  if (Number.isFinite(index)) out.latent_index = Math.round(index);
+  if (PRESTAGE_PROMPT_MODES.includes(raw.prompt_mode)) out.prompt_mode = raw.prompt_mode;
+  const dev = raw.dev && typeof raw.dev === "object" ? raw.dev : {};   // DEV
+  for (const [key, cast] of [["lengths", Number], ["indices", Number], ["vaes", String]]) {
+    if (Array.isArray(dev[key])) out.dev[key] = dev[key].map(cast).filter((v) => v === 0 || v);
+  }
+  out.request = parseState(JSON.stringify(raw.request ?? {}), IMAGE_PREFIX);
+  return out;
+}
+
+function serializeStill(still) {
+  const out = {
+    frames: still.frames,
+    latent_index: still.latent_index,
+    request: JSON.parse(serializeState(still.request, IMAGE_PREFIX)),
+  };
+  if (still.prompt_mode !== "context-ir") out.prompt_mode = still.prompt_mode;
+  const dev = {};                                                      // DEV
+  for (const key of ["lengths", "indices", "vaes"]) {
+    if (still.dev?.[key]?.length) dev[key] = [...still.dev[key]];
+  }
+  if (Object.keys(dev).length) out.dev = dev;
+  return out;
+}
+
+/** Whether the dev sweep is on, and how many files it would write. */
+export function stillSweep(still) {                                    // DEV
+  const lengths = still.dev?.lengths?.length || 1;
+  const indices = still.dev?.indices?.length || 1;
+  const vaes = still.dev?.vaes?.length || 1;
+  return { on: lengths * indices * vaes > 1, passes: lengths, images: lengths * indices * vaes };
+}
 
 export const PRESTAGE_CANVAS_MULTIPLE = 16;
 export const PRESTAGE_MIN_EDGE = 512;
@@ -829,10 +877,6 @@ export const PRESTAGE_MIN_DENOISE = 0.05;
 export const PRESTAGE_FIELDS = {
   krea2: ["model", "turbo_model", "clip", "vae"],
   ideogram4: ["model", "uncond_model", "clip", "vae"],
-  // The video node's fields under the video node's names, because the H3
-  // branch loads through `models.Weights` — minus the audio VAE, which a
-  // picture-only render never opens. Mirrors render_still.weights_from_blob.
-  minimax: ["fl2va", "ref2va", "clip", "vae", "audio_vae", "preview"],
 };
 export const PRESTAGE_FIELD_LABEL = {
   model: "Checkpoint",
@@ -840,9 +884,6 @@ export const PRESTAGE_FIELD_LABEL = {
   uncond_model: "Unconditional checkpoint",
   clip: "Text encoder",
   vae: "VAE",
-  fl2va: "FL2VA checkpoint",
-  ref2va: "Ref2VA checkpoint",
-  preview: "Preview decoder",
 };
 export const PRESTAGE_FIELD_HINT = {
   krea2: {
@@ -858,22 +899,6 @@ export const PRESTAGE_FIELD_HINT = {
     clip: "Qwen3-VL 8B, loaded as CLIPLoader type 'ideogram4'.",
     vae: "The Flux 2 VAE.",
   },
-  minimax: {
-    fl2va: "The same FL2VA checkpoint the Creator renders with. Used for a still with "
-         + "no references, and for one that starts from an image.",
-    ref2va: "The same Ref2VA checkpoint the Creator renders with. Used the moment a "
-          + "reference is attached.",
-    clip: "H3's text encoder. Loaded as CLIPLoader type 'minimax'.",
-    vae: "The experimental single-image H3 VAE (minimax_h3_t1_image_vae_*), which "
-       + "decodes one temporal latent into one picture. Its encoder is the stock H3 "
-       + "encoder untouched, so the same file also encodes this render's keyframe and "
-       + "references. Do not select it as the Creator's video VAE.",
-    audio_vae: "Only needed when a reference clip is cited with its soundtrack, or a "
-             + "reference audio file is attached — a still decodes no sound, but it can cite "
-             + "some. Left unloaded otherwise.",
-    preview: "taeh3, from models/vae_approx — the same live preview the video nodes use. "
-           + "It decodes the whole sampled clip, not just the frame that is kept.",
-  },
 };
 
 /** Filename hints for `guessPreStageModels`, per arch per field. */
@@ -883,49 +908,7 @@ const PRESTAGE_HINTS = {
     model: ["ideogram4"], uncond_model: ["ideogram4_unconditional"],
     clip: ["qwen3vl_8b"], vae: ["flux2"],
   },
-  // The checkpoints and text encoder are the video node's files under the video
-  // node's names, so the needles are `MODEL_HINTS`'. The VAE is the one field
-  // that is emphatically *not* the video node's: here the image decoder is the
-  // right answer and the stock H3 VAE is the wrong one.
-  minimax: {
-    fl2va: ["fl2va", "first_last"], ref2va: ["ref2va"],
-    clip: ["minimax"], vae: ["t1_image", "image_vae"],
-    audio_vae: ["audio"], preview: ["taeh3"],
-  },
 };
-
-// ---- per-arch geometry ------------------------------------------------------
-//
-// The image models generate on their own /16 grid up to 2048; the H3 branch
-// generates on the video model's /32 grid at a 768 short edge, because what it
-// produces is a video frame. Every geometry rule below asks which.
-
-/** The ratio pill's options for this arch. H3's envelope is 21:9..9:16 (the six
- *  `canvas.ASPECT_PRESETS`); the image models add 3:2 and 2:3. */
-export function prestageAspects(state) {
-  return isStill(state) ? ASPECT_PRESETS : PRESTAGE_ASPECTS;
-}
-
-/** The resolution slider's bounds and default for this arch. */
-export function prestageEdges(state) {
-  return isStill(state)
-    ? { min: MIN_SHORT_EDGE, max: MAX_SHORT_EDGE, step: 32, default: NATIVE_SHORT_EDGE }
-    : { min: PRESTAGE_MIN_EDGE, max: PRESTAGE_MAX_EDGE, step: PRESTAGE_CANVAS_MULTIPLE,
-        default: PRESTAGE_DEFAULT_EDGE };
-}
-
-export function clampPreStageEdge(state, edge) {
-  const bounds = prestageEdges(state);
-  const value = Math.round(Number(edge));
-  if (!Number.isFinite(value)) return bounds.default;
-  return Math.max(bounds.min, Math.min(bounds.max, value));
-}
-
-/** How many references this arch reads: three image slots on the Qwen edit
- *  encoder, nine on H3's own reference pipeline. */
-export function prestageMaxRefs(state) {
-  return isStill(state) ? PRESTAGE_STILL_MAX_REFS : PRESTAGE_MAX_REFS;
-}
 
 export function emptyPreStage() {
   return {
@@ -934,16 +917,9 @@ export function emptyPreStage() {
     prompt: "",
     aspect: "16:9",
     short_edge: PRESTAGE_DEFAULT_EDGE,
-    // {"filename", "denoise"} for img2img, or null. On the H3 branch it is the
-    // start frame and the denoise is unread — a keyframe is pinned, not partly
-    // denoised.
+    // {"filename", "denoise"} for img2img, or null.
     init: null,
-    // {"filename"} — the end frame, H3 only: the image the sampled clip closes
-    // on. Nothing on the image models takes one.
-    end: null,
-    // [{handle, kind, filename, ...}] — references. Three image slots on Krea 2
-    // (the Qwen edit encoder's), and on H3 the video node's whole reference
-    // pipeline: nine images, three videos, three audio clips.
+    // [{handle, filename}] — style references, Krea 2 only.
     refs: [],
     loras: [],
     // The image turbo is a checkpoint swap, not a LoRA — Krea Turbo *is* a
@@ -952,9 +928,8 @@ export function emptyPreStage() {
     turbo: { on: false, quality: "good", saved: null },
     // Ideogram's speed axis: which official preset shapes the schedule.
     quality: "default",
-    // The H3 branch's own settings. `frames` is the clip that gets sampled and
-    // `latent_index` which of its latent frames becomes the picture; the rest
-    // is the video node's vocabulary. `dev` is the sweep — see prestage.js.
+    // The H3 branch: its own settings, and its generation in the Creator's
+    // shape. Nothing above it applies to that branch — see `emptyStill`.
     minimax: emptyStill(),
     // Where the still lands under output/. Its own default folder, which is
     // what sorts stills apart from finished renders in the gallery.
@@ -967,59 +942,12 @@ export function emptyPreStage() {
 }
 
 export function emptyPreStageModels() {
-  return { krea2: {}, ideogram4: {}, minimax: {}, dtype: "default" };
+  return { krea2: {}, ideogram4: {}, dtype: "default" };
 }
 
-export function emptyStill() {
-  return {
-    frames: PRESTAGE_STILL_FRAMES,
-    latent_index: PRESTAGE_STILL_INDEX,
-    prompt_mode: "context-ir",
-    checkpoint: "auto",
-    // DEV: the sweep. Empty lists mean "just render the settings above"; the
-    // pill fills them to compare lengths, latent frames and decoders in one
-    // queue. Comes out with the dev pill once the numbers are in.
-    dev: { lengths: [], indices: [], vaes: [] },
-  };
-}
-
-/** The H3 sub-block, coerced. Mirrors compile_still's reading of it. */
-export function parseStill(raw) {
-  const out = emptyStill();
-  if (!raw || typeof raw !== "object") return out;
-  const frames = Number(raw.frames);
-  if (Number.isFinite(frames)) out.frames = framesForSeconds(Math.max(1, frames) / FPS);
-  const index = Number(raw.latent_index);
-  if (Number.isFinite(index)) out.latent_index = Math.round(index);
-  if (PRESTAGE_PROMPT_MODES.includes(raw.prompt_mode)) out.prompt_mode = raw.prompt_mode;
-  if (ROUTES.includes(raw.checkpoint)) out.checkpoint = raw.checkpoint;
-  const dev = raw.dev && typeof raw.dev === "object" ? raw.dev : {};   // DEV
-  for (const [key, cast] of [["lengths", Number], ["indices", Number], ["vaes", String]]) {
-    if (Array.isArray(dev[key])) out.dev[key] = dev[key].map(cast).filter((v) => v === 0 || v);
-  }
-  return out;
-}
-
-/** Only what differs from a fresh block, so an untouched still says nothing. */
-function serializeStill(still) {
-  const out = { frames: still.frames, latent_index: still.latent_index };
-  if (still.prompt_mode !== "context-ir") out.prompt_mode = still.prompt_mode;
-  if (still.checkpoint !== "auto") out.checkpoint = still.checkpoint;
-  const dev = {};                                                      // DEV
-  for (const key of ["lengths", "indices", "vaes"]) {
-    if (still.dev?.[key]?.length) dev[key] = [...still.dev[key]];
-  }
-  if (Object.keys(dev).length) out.dev = dev;
-  return out;
-}
-
-/** Whether the dev sweep is on, and how many files it would write. */
-export function stillSweep(still) {                                    // DEV
-  const lengths = still.dev?.lengths?.length || 1;
-  const indices = still.dev?.indices?.length || 1;
-  const vaes = still.dev?.vaes?.length || 1;
-  return { on: lengths * indices * vaes > 1, passes: lengths, images: lengths * indices * vaes };
-}
+/** The two image architectures. The H3 branch keeps its weights inside its own
+ *  request, in `models.Weights`' shape, so it is not one of these. */
+export const PRESTAGE_IMAGE_ARCHES = PRESTAGE_ARCHES.filter((arch) => arch !== PRESTAGE_STILL_ARCH);
 
 export function parsePreStage(raw) {
   try {
@@ -1032,22 +960,7 @@ export function parsePreStage(raw) {
       if (!Array.isArray(state.refs)) state.refs = [];
       state.refs = state.refs
         .filter((ref) => ref && typeof ref.filename === "string")
-        .map((ref) => ({ ...ref, kind: ["image", "video", "audio"].includes(ref.kind) ? ref.kind : "image" }))
-        // Only the image models cap by count alone; H3's limits are per kind
-        // and are `stillRefRoom`'s, enforced where references are added.
-        .slice(0, isStill(state) ? MAX_REF_FILES : prestageMaxRefs(state));
-      if (!state.end || typeof state.end !== "object" || !state.end.filename) state.end = null;
-      state.minimax = parseStill(state.minimax);
-      // Both arches' aspect lists share six labels and the image models add two
-      // of their own; a blob that switched arch by hand can be carrying one the
-      // other side has never heard of.
-      if (!prestageAspects(state).some(([label]) => label === state.aspect)) state.aspect = "16:9";
-      // A blob that never said lands on this arch's own default rather than on
-      // the other's clamped into range — 1024 is the image models' comfortable
-      // size and 768 is what H3 was trained at.
-      state.short_edge = parsed.short_edge === undefined
-        ? prestageEdges(state).default
-        : clampPreStageEdge(state, state.short_edge);
+        .slice(0, PRESTAGE_MAX_REFS);
       if (!Array.isArray(state.loras)) state.loras = [];
       // UI-only, never serialized: the LoRA manager and `promptTriggers` walk
       // the video-state accessors (`checkpoint`, `references`), which want
@@ -1061,6 +974,7 @@ export function parsePreStage(raw) {
           ? Math.min(1, Math.max(PRESTAGE_MIN_DENOISE, denoise)) : PRESTAGE_DEFAULT_DENOISE;
       }
       if (!PRESTAGE_IDEOGRAM_QUALITIES.includes(state.quality)) state.quality = "default";
+      state.minimax = parseStill(state.minimax);
       const turbo = state.turbo && typeof state.turbo === "object" ? state.turbo : {};
       state.turbo = {
         on: turbo.on === true,
@@ -1069,7 +983,7 @@ export function parsePreStage(raw) {
       };
       const models = state.models && typeof state.models === "object" ? state.models : {};
       state.models = emptyPreStageModels();
-      for (const arch of PRESTAGE_ARCHES) {
+      for (const arch of PRESTAGE_IMAGE_ARCHES) {
         const side = models[arch];
         if (!side || typeof side !== "object") continue;
         for (const field of PRESTAGE_FIELDS[arch]) {
@@ -1077,9 +991,6 @@ export function parsePreStage(raw) {
             state.models[arch][field] = side[field].trim();
           }
         }
-        // The standing checkpoint route, the H3 side's alone — the image
-        // architectures have one DiT each and nothing to route between.
-        if (ROUTES.includes(side.route)) state.models[arch].route = side.route;
       }
       if (MODEL_DTYPES.includes(models.dtype)) state.models.dtype = models.dtype;
       return state;
@@ -1092,15 +1003,11 @@ export function parsePreStage(raw) {
 
 export function serializePreStage(state) {
   const models = {};
-  for (const arch of PRESTAGE_ARCHES) {
+  for (const arch of PRESTAGE_IMAGE_ARCHES) {
     const side = {};
     for (const field of PRESTAGE_FIELDS[arch]) {
       if (state.models?.[arch]?.[field]) side[field] = state.models[arch][field];
     }
-    // Absent means "follow the mode", so the common case adds nothing — the
-    // same rule `serializeModels` holds the video blob to.
-    const route = state.models?.[arch]?.route;
-    if (route && route !== "auto") side.route = route;
     if (Object.keys(side).length) models[arch] = side;
   }
   if (state.models?.dtype && state.models.dtype !== "default") models.dtype = state.models.dtype;
@@ -1111,49 +1018,30 @@ export function serializePreStage(state) {
     aspect: state.aspect,
     short_edge: state.short_edge,
     ...(state.init ? { init: { filename: state.init.filename, denoise: round2(state.init.denoise) } } : {}),
-    ...(state.end ? { end: { filename: state.end.filename } } : {}),
-    ...(state.refs.length ? {
-      refs: state.refs.map((r) => ({
-        handle: r.handle, filename: r.filename,
-        ...(r.kind && r.kind !== "image" ? { kind: r.kind } : {}),
-        ...(r.track && r.track !== DEFAULT_TRACK ? { track: r.track } : {}),
-        ...(r.ref_size ? { ref_size: r.ref_size } : {}),
-        ...(r.takes && r.takes !== "full" ? { takes: r.takes } : {}),
-        ...(r.trim ? { trim: r.trim } : {}),
-      })),
-    } : {}),
+    ...(state.refs.length ? { refs: state.refs.map((r) => ({ handle: r.handle, filename: r.filename })) } : {}),
     loras: serializeLoras(state.loras),
     ...(state.turbo.on || state.turbo.saved
       ? { turbo: { on: state.turbo.on, quality: state.turbo.quality,
                    ...(state.turbo.saved ? { saved: { ...state.turbo.saved } } : {}) } }
       : {}),
     ...(state.quality !== "default" ? { quality: state.quality } : {}),
-    ...(isStill(state) || state.minimax?.dev?.lengths?.length
-      ? { minimax: serializeStill(parseStill(state.minimax)) } : {}),
+    minimax: serializeStill(state.minimax),
     ...serializePrefix(state.output_prefix, IMAGE_PREFIX),
     ...(Object.keys(models).length ? { models } : {}),
     ...(state.peer != null ? { peer: state.peer } : {}),
   }, null, 2);
 }
 
-/** Which directory each pre-stage weight field browses. Mirrors
- *  `render_image.FOLDERS` plus the video fields the H3 branch reuses. */
-export function prestageFileLists(byFolder) {
-  const dits = byFolder?.diffusion_models ?? [];
-  return {
-    model: dits, turbo_model: dits, uncond_model: dits, fl2va: dits, ref2va: dits,
-    clip: byFolder?.text_encoders ?? [],
-    vae: byFolder?.vae ?? [],
-    preview: byFolder?.vae_approx ?? [],
-  };
-}
-
 /** Fill empty weight fields from unambiguous filename matches — the same
  *  service `guessModels` does for the video nodes, for the same first-run. */
 export function guessPreStageModels(models, byFolder) {
-  const lists = prestageFileLists(byFolder);
+  const lists = {
+    model: byFolder?.diffusion_models ?? [], turbo_model: byFolder?.diffusion_models ?? [],
+    uncond_model: byFolder?.diffusion_models ?? [],
+    clip: byFolder?.text_encoders ?? [], vae: byFolder?.vae ?? [],
+  };
   let changed = false;
-  for (const arch of PRESTAGE_ARCHES) {
+  for (const arch of PRESTAGE_IMAGE_ARCHES) {
     for (const field of PRESTAGE_FIELDS[arch]) {
       if (models[arch][field]) continue;
       const needles = PRESTAGE_HINTS[arch][field];
@@ -1175,19 +1063,11 @@ export function guessPreStageModels(models, byFolder) {
 /** The resolved image canvas, mirroring compile_image.resolve_canvas: /16 grid,
  *  2048² area cap, and the aspect taken from the init image when there is one. */
 export function resolvedPreStage(state, initSize = null) {
-  let ratio = prestageAspects(state).find(([label]) => label === state.aspect)?.[1] ?? 16 / 9;
+  let ratio = PRESTAGE_ASPECTS.find(([label]) => label === state.aspect)?.[1] ?? 16 / 9;
   let fromImage = false;
   if (state.init && initSize?.width && initSize?.height) {
     ratio = initSize.width / initSize.height;
     fromImage = true;
-  }
-  // The H3 branch generates a video frame, so its geometry is the video
-  // canvas's — same /32 grid, same 768*1344 area cap that scales with the
-  // slider, same envelope. canvas.js owns it; this only routes to it.
-  if (isStill(state)) {
-    const [clamped] = clampRatio(ratio);
-    const [width, height] = resolveCanvas(clamped, clampPreStageEdge(state, state.short_edge));
-    return { width, height, ratio: clamped, fromImage };
   }
   ratio = Math.min(PRESTAGE_MAX_RATIO, Math.max(PRESTAGE_MIN_RATIO, ratio));
   const edge = Math.max(PRESTAGE_MIN_EDGE, Math.min(PRESTAGE_MAX_EDGE, Math.round(state.short_edge)));
@@ -1218,14 +1098,12 @@ export function resolvedPreStage(state, initSize = null) {
   return { width, height, ratio, fromImage };
 }
 
-/** Next free ref handle: img-1, vid-1, aud-1, ... — the same identity scheme the
- *  video assets use, so the tag hues carry over and a prompt cites a still's
- *  references with the handles it would cite a shot's with. */
-export function nextPreStageHandle(state, kind = "image") {
-  const prefix = PREFIX[kind] ?? "img";
+/** Next free ref handle: img-1, img-2, ... — the same identity scheme the video
+ *  assets use, so the tag hues carry over. */
+export function nextPreStageHandle(state) {
   const taken = new Set(state.refs.map((r) => r.handle));
   for (let n = 1; ; n += 1) {
-    const handle = `${prefix}-${n}`;
+    const handle = `img-${n}`;
     if (!taken.has(handle)) return handle;
   }
 }
@@ -1234,92 +1112,9 @@ export function nextPreStageHandle(state, kind = "image") {
  *  warning — clip, vae and whichever DiT the turbo pill selects. */
 export function missingPreStageModels(state) {
   const side = state.models[state.arch] ?? {};
-  if (isStill(state)) {
-    // Only the checkpoint this still routes to, the same way the video node
-    // only asks for the one its mode reaches for, and the audio VAE only when
-    // something attached cites sound. The preview decoder is never required:
-    // without it the body previews in latent2rgb.
-    return [stillCheckpoint(state), "clip", "vae",
-            ...(stillNeedsAudio(state) ? ["audio_vae"] : [])]
-      .filter((field) => !side[field]);
-  }
   const dit = state.arch === "krea2" && state.turbo.on ? "turbo_model" : "model";
   return [dit, "clip", "vae"].filter((field) => !side[field]);
 }
-
-/** Whether anything attached to this still will be encoded as sound — a
- *  reference audio clip, or a reference video taken with its soundtrack. What
- *  decides the audio VAE is required at all. Mirrors compile_still.needs_audio. */
-export function stillNeedsAudio(state) {
-  return counts(stillAssets(state)).audio > 0;
-}
-
-/** A still's references in the shape the video-side accessors read.
- *
- *  The pre-stage keeps references in `refs` and keyframes in fields of their
- *  own, where the Creator keeps one flat `assets` list. Rather than a second
- *  implementation of the slot arithmetic, the H3 branch hands that list through
- *  this view — so `counts`, `capacity` and `overflow` answer for a still with
- *  the numbers they answer for a shot with. */
-export const stillAssets = (state) => ({
-  assets: (state.refs ?? []).map((ref) => ({ role: "reference", kind: "image", ...ref })),
-});
-
-/** How many slots a kind has left on a still, for the picker's counters. */
-export const stillCapacity = (state, kind) => capacity(stillAssets(state), kind);
-
-/** Why a still's references would not compile, or null. */
-export const stillOverflow = (state) => overflow(stillAssets(state));
-
-/** Why an attachment is refused on a still, in the video node's own words —
- *  the rule is the video node's rule: frames run on FL2VA, references on
- *  Ref2VA, and one generation runs on one checkpoint. */
-export function stillBlockedReason(state, action) {
-  if (action === "reference" && (state.init || state.end)) {
-    return "Remove the start/end frame first — references use the Ref2VA checkpoint, frames use FL2VA.";
-  }
-  if ((action === "first_frame" || action === "last_frame") && (state.refs ?? []).length) {
-    return "Remove the references first — start/end frames use the FL2VA checkpoint, references use Ref2VA.";
-  }
-  return null;
-}
-
-/** Which H3 mode a still compiles to, for the badge. The same derivation
- *  `compile._derive_mode` makes, read off the pre-stage's own two keyframe
- *  fields — a still is one of these requests, so it is one of these modes. */
-export function stillMode(state) {
-  if ((state.refs ?? []).length) return "REF2VA";
-  if (state.init && state.end) return "FL2VA";
-  if (state.init) return "I2VA";
-  if (state.end) return "L2VA";
-  return "T2VA";
-}
-
-/** Which H3 checkpoint a still routes to. Mirrors `compile_still._checkpoint`:
- *  references need Ref2VA, everything else runs on FL2VA, and an explicit pin
- *  wins where it is legal. */
-export function stillCheckpoint(state) {
-  // The standing route wins where it is set — it is the same instruction
-  // `models.Weights.routed` stamps onto the request, said once for the node
-  // rather than once per generation. Then the per-request pin, then the mode.
-  const route = stillRoute(state);
-  if (route !== "auto") return route;
-  const pin = state.minimax?.checkpoint ?? "auto";
-  if (pin !== "auto") return pin;
-  return state.refs.length ? "ref2va" : "fl2va";
-}
-
-/** The still's standing checkpoint route: "auto", "fl2va" or "ref2va". Worth
- *  having for exactly the reason the video nodes have it — the two are one
- *  architecture trained twice, and Ref2VA takes the text-only and keyframe
- *  payloads FL2VA was trained for perfectly well. */
-export const stillRoute = (state) => state.models?.minimax?.route ?? "auto";
-
-/** Whether the route as set cannot run: FL2VA has nothing to attend a
- *  reference with, so forcing it on a reference generation is refused at
- *  compile time. Said in the badge instead of at queue time. */
-export const stillRouteImpossible = (state) =>
-  stillRoute(state) === "fl2va" && (state.refs ?? []).length > 0;
 
 /** Which of the eight identity hues (--mmc-tag-0..7) a handle wears, everywhere
  *  it appears — asset bar, prompt chip, mention menu. Derived from the handle

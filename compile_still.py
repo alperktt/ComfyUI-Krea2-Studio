@@ -130,105 +130,39 @@ class StillPlan:
         return sum(len(one.decodes) for one in self.passes)
 
 
-# What a reference entry may carry beyond its handle, kind and filename. These
-# are `compile._parse_assets`'s own fields, passed through rather than re-read:
-# a still cites a face, a clip's motion or a soundtrack exactly as a shot does.
-REF_FIELDS = ("track", "ref_size", "takes", "trim")
+def _checkpoint(request):
+    """Which H3 checkpoint this still will route to.
 
-
-def _assets(data):
-    """The pre-stage's keyframes and references, as video-side asset dicts.
-
-    The pre-stage keeps its keyframes in two fields of their own where the
-    Creator keeps one flat list; this is where the two vocabularies meet, and it
-    is the only difference between them. Everything a shot can attach, a still
-    can attach: nine reference images, three reference videos, three audio
-    clips, a start frame, an end frame. The limits, the ordering and the
-    `<Picture N>` / `<Video N>` / `<Audio N>` numbering are all
-    `compile.compile_request`'s, because a still *is* one of those requests.
-
-    An init image is a start frame rather than an img2img source: H3's image
-    conditioning is a keyframe, pinned and re-injected every step, and it has no
-    denoise to trade against.
+    The same derivation `compile._resolve_checkpoint` makes, needed here only so
+    the plain-prompt branch can collect the trigger words of the LoRAs that will
+    actually be patched on. The authoritative answer is still the compiled
+    request's, which is what the render path reads.
     """
-    assets = []
-
-    # Keyframes take img-N handles rather than a scheme of their own, so a
-    # prompt cites them the way a Creator prompt does. Numbered around whatever
-    # the references already hold: H3 refuses keyframes and references in one
-    # generation, and that refusal is worth hearing instead of a handle clash.
-    taken = {item.get("handle") for item in data.get("refs") or [] if isinstance(item, dict)}
-
-    def free_handle():
-        for n in range(1, 100):
-            if f"img-{n}" not in taken:
-                taken.add(f"img-{n}")
-                return f"img-{n}"
-        raise CompileError("too many attachments to name")
-
-    for field, role in (("init", "first_frame"), ("end", "last_frame")):
-        entry = data.get(field)
-        if entry is None:
-            continue
-        if not isinstance(entry, dict) or not entry.get("filename"):
-            raise CompileError(f"the {role.replace('_', ' ')} entry must carry a filename")
-        assets.append({"handle": entry.get("handle") or free_handle(), "kind": "image",
-                       "role": role, "filename": entry["filename"]})
-
-    for item in data.get("refs") or []:
-        filename = item.get("filename") if isinstance(item, dict) else item
-        if not filename or not isinstance(filename, str):
-            raise CompileError("every reference must carry a filename")
-        item = item if isinstance(item, dict) else {}
-        kind = item.get("kind") or "image"
-        entry = {"handle": item.get("handle") or f"{kind[:3]}-{len(assets) + 1}",
-                 "kind": kind, "role": "reference", "filename": filename}
-        for key in REF_FIELDS:
-            if item.get(key) is not None:
-                entry[key] = item[key]
-        assets.append(entry)
-
-    return assets
+    route = ((request.get("models") or {}).get("route")) or "auto"
+    if route in CHECKPOINTS:
+        return route
+    pin = request.get("checkpoint") or "auto"
+    if pin in CHECKPOINTS:
+        return pin
+    refs = [a for a in request.get("assets") or [] if a.get("role", "reference") == "reference"]
+    return "ref2va" if refs else "fl2va"
 
 
-def needs_audio(assets):
+def needs_audio(request):
     """Whether this still will reach for the audio VAE.
 
     A reference audio clip, or a reference video cited for its soundtrack. Most
     stills touch neither, and a loader in the graph is a file loaded whether or
-    not anything reads it — so this is what decides that the audio VAE is
-    required at all.
+    not anything reads it — so this is what decides the audio VAE is required.
     """
-    for asset in assets:
-        if asset.get("role") != "reference":
+    for asset in request.get("assets") or []:
+        if asset.get("role", "reference") != "reference":
             continue
         if asset.get("kind") == "audio":
             return True
         if asset.get("kind") == "video" and asset.get("track") in ("picture+sound", "sound"):
             return True
     return False
-
-
-def _pin(block):
-    """The user's checkpoint pin, or "auto". `compile._resolve_checkpoint` owns
-    which pins are legal against which mode; this only refuses a typo."""
-    pin = block.get("checkpoint") or "auto"
-    if pin != "auto" and pin not in CHECKPOINTS:
-        raise CompileError(f"unknown checkpoint pin {pin!r}")
-    return pin
-
-
-def _checkpoint(pin, assets):
-    """Which H3 checkpoint this still will route to.
-
-    The same derivation `_resolve_checkpoint` makes, needed here only so the
-    plain-prompt branch can collect the trigger words of the LoRAs that will
-    actually be patched on. The authoritative answer is still the compiled
-    request's, which is what the render path reads.
-    """
-    if pin != "auto":
-        return pin
-    return "ref2va" if any(a["role"] == "reference" for a in assets) else "fl2va"
 
 
 def _frames(raw):
@@ -245,36 +179,30 @@ def _block(data):
     return block if isinstance(block, dict) else {}
 
 
-def _request(data, assets, pin, frames):
-    """The creator-shaped request one pass generates from."""
-    aspect = data.get("aspect", "16:9")
-    if aspect not in canvas.ASPECT_PRESETS:
-        raise CompileError(f"unknown aspect ratio {aspect!r}")
+def _request(block, frames):
+    """The request one pass generates from: the still's own, at this length.
 
-    request = {
-        "prompt": str(data.get("prompt") or "").strip(),
-        "assets": assets,
-        "loras": data.get("loras") or [],
-        # The duration the video side speaks in. Snapped already, so
-        # `frames_for_seconds` inside `compile_request` lands back on `frames`.
-        "duration_s": canvas.seconds_for_frames(frames),
-        "aspect": aspect,
-        "short_edge": data.get("short_edge", canvas.NATIVE_SHORT_EDGE),
-    }
-    if pin != "auto":
-        request["checkpoint"] = pin
+    A copy rather than the stored dict, because the sweep runs the same request
+    at several lengths and each pass has to say which it is.
+    """
+    request = dict(block.get("request") or {})
+    if not isinstance(request, dict):
+        raise CompileError("the still's request must be a JSON object")
+    # The duration the video side speaks in. `frames` is already snapped, so
+    # `frames_for_seconds` inside `compile_request` lands back on it exactly.
+    request["duration_s"] = canvas.seconds_for_frames(frames)
     return request
 
 
-def _plain_prompt(data, assets, checkpoint):
+def _plain_prompt(request, checkpoint):
     """The typed sentence, trigger words in front, and nothing composed.
 
     Same construction as the video body's prefix — a word only counts if its
     LoRA is actually in this run — because that is the one part of the composed
     prompt an override would otherwise drop on the floor.
     """
-    prompt = str(data.get("prompt") or "").strip()
-    triggers = collect_triggers(active_loras(data.get("loras"), checkpoint))
+    prompt = str(request.get("prompt") or "").strip()
+    triggers = collect_triggers(active_loras(request.get("loras"), checkpoint))
     if triggers:
         prompt = f"{', '.join(triggers)}, {prompt}" if prompt else ", ".join(triggers)
     return prompt
@@ -331,26 +259,26 @@ def _label(frames, index, vae):
 def compile_still(data):
     """A pre-stage blob (arch 'minimax') -> `StillPlan`.
 
-    Deep validation is deliberately not repeated here: the segment node compiles
-    the request it is handed, exactly as it does for a Creator render, so the
-    canvas, the mode and the reference plan are worked out in one place. What
-    this refuses is what would otherwise fail late or silently — an empty
-    prompt, a reference kind a still cannot use, an impossible latent index.
+    The request inside the blob is already in `compile.compile_request`'s shape —
+    the pre-stage's H3 branch is driven by the Creator's own editor, which writes
+    the Creator's own state — so this settles only what is the *still's*: how
+    long a clip to sample, which of its latent frames to keep, and how the prompt
+    reaches the DiT. Everything else is validated where it is for a shot, by the
+    segment node compiling the request it is handed.
     """
     if not isinstance(data, dict):
         raise CompileError("prestage_data must be a JSON object")
-    if not str(data.get("prompt") or "").strip():
-        raise CompileError("describe the image first — the prompt is empty")
 
     block = _block(data)
-    assets = _assets(data)
-    pin = _pin(block)
-    checkpoint = _checkpoint(pin, assets)
+    request = _request(block, DEFAULT_FRAMES)
+    if not str(request.get("prompt") or "").strip() and not (
+            (request.get("refined") or {}).get("body") or "").strip():
+        raise CompileError("describe the still first — the prompt is empty")
 
     mode = block.get("prompt_mode", DEFAULT_PROMPT_MODE)
     if mode not in PROMPT_MODES:
         raise CompileError(f"unknown prompt mode {mode!r}")
-    override = _plain_prompt(data, assets, checkpoint) if mode == "plain" else None
+    override = _plain_prompt(request, _checkpoint(request)) if mode == "plain" else None
 
     frames = _frames(block.get("frames", DEFAULT_FRAMES))
     index = block.get("latent_index", DEFAULT_LATENT_INDEX)
@@ -385,8 +313,8 @@ def compile_still(data):
                     label=_label(length, one, vae) if sweeping else ""))
         passes.append(StillPass(
             frames=length,
-            request=_request(data, assets, pin, length),
+            request=_request(block, length),
             prompt_override=override,
             decodes=tuple(decodes)))
 
-    return StillPlan(passes=tuple(passes), audio=needs_audio(assets), sweeping=sweeping)
+    return StillPlan(passes=tuple(passes), audio=needs_audio(request), sweeping=sweeping)

@@ -6,7 +6,7 @@ import { app } from "../../scripts/app.js";
 import { installStyles } from "./minimax_creator/styles.js";
 import { CreatorEditor } from "./minimax_creator/editor.js";
 import { TimelineBody } from "./minimax_creator/timeline.js";
-import { PreStageEditor } from "./minimax_creator/prestage.js";
+import { PreStageBody } from "./minimax_creator/prestage.js";
 import { Satellite } from "./minimax_creator/satellite.js";
 import { SAMPLING_WIDGETS } from "./minimax_creator/sampling.js";
 import * as S from "./minimax_creator/state.js";
@@ -309,11 +309,11 @@ app.registerExtension({
     } else if (node.comfyClass === PRESTAGE) {
       node.mmcBody = attach(node, (widget) => {
         const state = S.parsePreStage(widget.value);
-        let editor;
-        editor = new PreStageEditor({
+        let body;
+        body = new PreStageBody({
           state,
           onCommit: () => {
-            widget.value = S.serializePreStage(editor.state);
+            widget.value = S.serializePreStage(body.state);
             node.graph?.setDirtyCanvas(true, true);
           },
           samplingWidgets: collectSampling(node),
@@ -321,7 +321,7 @@ app.registerExtension({
           nodeId: () => node.id,
           peer: peerOf(node),
         });
-        return editor;
+        return body;
       });
       // Deleting the node by hand is closing it too: mirror the blob into the
       // mother's stash on the way out, same as the pill. Guarded — during a

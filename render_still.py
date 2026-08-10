@@ -37,25 +37,14 @@ FILENAME_PREFIX = outputs.IMAGE_PREFIX
 
 
 def weights_from_blob(data):
-    """`models.Weights` for the pre-stage's MiniMax sub-block.
+    """`models.Weights` for the still's request.
 
-    The pre-stage keeps one sub-block per architecture so switching the model
-    pill never forgets the other side's files, and the H3 side's fields are the
-    video node's fields under the video node's names — so this lifts the
-    sub-block into the shape `models.Weights.from_blob` already reads rather
-    than teaching it a second one.
+    Nothing to lift: the pre-stage's H3 branch is driven by the Creator's own
+    editor, so the request carries a weights block in exactly the shape the
+    video nodes' does — checkpoints, text encoder, VAEs, precision, devices, and
+    the standing route.
     """
-    block = (data or {}).get("models")
-    if not isinstance(block, dict):
-        block = {}
-    side = block.get("minimax")
-    if not isinstance(side, dict):
-        side = {}
-    lifted = dict(side)
-    for shared in ("dtype", "devices"):
-        if block.get(shared) is not None and lifted.get(shared) is None:
-            lifted[shared] = block[shared]
-    return models.Weights.from_blob({"models": lifted})
+    return models.Weights.from_blob(data)
 
 
 def _label(index, total):

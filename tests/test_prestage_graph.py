@@ -413,10 +413,19 @@ H3_MODELS = {
 }
 
 
-def still_blob(**overrides):
-    data = {"version": 1, "arch": "minimax", "prompt": "a red room",
-            "aspect": "16:9", "short_edge": 768,
-            "models": {"minimax": dict(H3_MODELS)}}
+def still_blob(request=None, **overrides):
+    """A pre-stage blob on the H3 branch.
+
+    The generation lives in `minimax.request` in exactly the Creator's shape —
+    the branch is driven by the Creator's own editor — so the weights, the
+    assets and the canvas are all in there, under the video nodes' own keys.
+    """
+    inner = {"prompt": "a red room", "assets": [], "loras": [],
+             "aspect": "16:9", "short_edge": 768, "models": dict(H3_MODELS)}
+    inner.update(request or {})
+    block = {"frames": 5, "latent_index": 0, "request": inner}
+    block.update(overrides.pop("minimax", {}))
+    data = {"version": 1, "arch": "minimax", "minimax": block}
     data.update(overrides)
     return json.dumps(data)
 
@@ -471,26 +480,27 @@ check("it lands in the pre-stage folder",
 # The standing route, the video nodes' own control: Ref2VA takes the text-only
 # payload FL2VA was trained for, so a t2i still can be made by the reference
 # weights — and then FL2VA is neither loaded nor required.
-routed = by_class(still(still_blob(
-    models={"minimax": {**{k: v for k, v in H3_MODELS.items() if k != "fl2va"},
-                        "route": "ref2va"}})).expand)
+routed = by_class(still(still_blob(request={
+    "models": {**{k: v for k, v in H3_MODELS.items() if k != "fl2va"}, "route": "ref2va"}})).expand)
 check("a forced route loads that checkpoint and no other",
       [i["unet_name"] for _, i in routed["UNETLoader"]], [H3_MODELS["ref2va"]])
 check("and it reaches the segment node as the request's own pin",
       json.loads(routed["MiniMaxH3TimelineSegment"][0][1]["segment_data"])["request"]["checkpoint"],
       "ref2va")
 expect_error("forcing FL2VA on a still with references is refused",
-             lambda: still(still_blob(
-                 refs=[{"handle": "img-1", "kind": "image", "filename": "face.png"}],
-                 models={"minimax": {**H3_MODELS, "route": "fl2va"}})),
+             lambda: still(still_blob(request={
+                 "assets": [{"handle": "img-1", "kind": "image", "role": "reference",
+                             "filename": "face.png"}],
+                 "models": {**H3_MODELS, "route": "fl2va"}})),
              "cannot be run through FL2VA")
 
 # References route to Ref2VA and are the video node's own — including a clip
 # taken with its soundtrack, which is the one thing that loads the audio VAE.
-refs = by_class(still(still_blob(refs=[
-    {"handle": "img-1", "kind": "image", "filename": "face.png"},
-    {"handle": "vid-1", "kind": "video", "filename": "clip.mp4", "track": "picture+sound"},
-])).expand)
+refs = by_class(still(still_blob(request={"assets": [
+    {"handle": "img-1", "kind": "image", "role": "reference", "filename": "face.png"},
+    {"handle": "vid-1", "kind": "video", "role": "reference", "filename": "clip.mp4",
+     "track": "picture+sound"},
+]})).expand)
 check("references route to Ref2VA",
       [i["unet_name"] for _, i in refs["UNETLoader"]], [H3_MODELS["ref2va"]])
 check("a cited soundtrack loads the audio VAE",
@@ -499,9 +509,9 @@ check("a cited soundtrack loads the audio VAE",
 check("and hands it to the segment node",
       "audio_vae" in refs["MiniMaxH3TimelineSegment"][0][1], True)
 
-silent = by_class(still(still_blob(refs=[
-    {"handle": "vid-1", "kind": "video", "filename": "clip.mp4"},
-])).expand)
+silent = by_class(still(still_blob(request={"assets": [
+    {"handle": "vid-1", "kind": "video", "role": "reference", "filename": "clip.mp4"},
+]})).expand)
 check("a clip cited for its picture alone loads no audio VAE",
       [i["vae_name"] for _, i in silent["VAELoader"]], [H3_MODELS["vae"]])
 
@@ -513,8 +523,10 @@ media = importlib.import_module(f"{PACKAGE}.media")
 real_image_size = media.image_size
 media.image_size = lambda filename: (1920, 1080)
 try:
-    frames = by_class(still(still_blob(init={"filename": "open.png"},
-                                       end={"filename": "close.png"})).expand)
+    frames = by_class(still(still_blob(request={"assets": [
+        {"handle": "img-1", "kind": "image", "role": "first_frame", "filename": "open.png"},
+        {"handle": "img-2", "kind": "image", "role": "last_frame", "filename": "close.png"},
+    ]})).expand)
 finally:
     media.image_size = real_image_size
 frames_payload = json.loads(frames["MiniMaxH3TimelineSegment"][0][1]["segment_data"])
@@ -524,7 +536,7 @@ check("both keyframes reach the request",
 
 # The preview is the video node's, patched on the model the segment hands out.
 preview = by_class(still(still_blob(
-    models={"minimax": {**H3_MODELS, "preview": "taeh3.safetensors"}})).expand)
+    request={"models": {**H3_MODELS, "preview": "taeh3.safetensors"}})).expand)
 check("taeh3 previews the still",
       "ModelPreviewOverrideKJ" in preview or comfy_nodes.NODE_CLASS_MAPPINGS.get(
           "ModelPreviewOverrideKJ") is None, True)
@@ -535,7 +547,6 @@ check("taeh3 previews the still",
 # out with `compile_still`'s DEV block.
 
 sweep = by_class(still(still_blob(minimax={
-    "frames": 5, "latent_index": 0,
     "dev": {"lengths": [5, 22], "indices": [0, -1], "vaes": ["stock_h3_vae.safetensors"]},
 })).expand)
 check("one sampler pass per length", len(sweep["KSampler"]), 2)
@@ -554,16 +565,17 @@ check("both passes share a seed, so the lengths are comparable",
 # ---- refusals ----------------------------------------------------------------
 
 expect_error("a latent frame the clip does not have is refused",
-             lambda: still(still_blob(minimax={"frames": 5, "latent_index": 4})),
+             lambda: still(still_blob(minimax={"latent_index": 4})),
              "2 latent frames")
 expect_error("a still with no VAE is refused, naming the folder",
-             lambda: still(still_blob(
-                 models={"minimax": {k: v for k, v in H3_MODELS.items() if k != "vae"}})),
+             lambda: still(still_blob(request={
+                 "models": {k: v for k, v in H3_MODELS.items() if k != "vae"}})),
              "models/vae")
 expect_error("keyframes and references together are refused",
-             lambda: still(still_blob(init={"filename": "open.png"},
-                                      refs=[{"handle": "img-1", "kind": "image",
-                                             "filename": "face.png"}])),
+             lambda: still(still_blob(request={"assets": [
+                 {"handle": "img-1", "kind": "image", "role": "first_frame", "filename": "open.png"},
+                 {"handle": "img-2", "kind": "image", "role": "reference", "filename": "face.png"},
+             ]})),
              "cannot be combined")
 
 if FAILURES:

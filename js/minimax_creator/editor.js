@@ -70,11 +70,35 @@ export class CreatorEditor {
    *   PreStage currently claims this node, and spawning/removing one. The state
    *   is derived by scan on every render, never stored — see minimax_creator.js.
    */
+  /**
+   * @param {boolean} [options.durationPill]  false where the generation's length
+   *   is not the user's seconds — the pre-stage's H3 branch samples the shortest
+   *   clip it can and keeps one frame, so it puts its own length pill in
+   *   `extraPills` instead.
+   * @param {() => Element[]} [options.extraPills]  pills for the row, in the
+   *   duration pill's place. What a caller that is *not* rendering a video
+   *   needs to say about the generation.
+   * @param {() => Element[]} [options.extraTools]  extra rail tools, after the
+   *   gallery.
+   * @param {{fallback: string, extension: string}} [options.output]  where this
+   *   body's renders land when the blob does not say, and what they are. The
+   *   video default when absent.
+   * @param {Stage} [options.stage]  a stage to use instead of building one.
+   *   Supplied by an owner that outlives this editor — the pre-stage rebuilds
+   *   its body when the architecture changes, and the satellite floating the
+   *   stage beside the node was bound once, to the owner's.
+   */
   constructor({ state, onCommit, canvasPills = true, continuePill = false,
                 refineTarget = null, onRefined = null, onReverted = null,
                 samplingWidgets = null, onWidgetChange = null, nodeId = null,
-                routeOf = null, setRoute = null, preStage = null }) {
+                routeOf = null, setRoute = null, preStage = null,
+                durationPill = true, extraPills = null, extraTools = null,
+                output = null, stage = null }) {
     this.preStage = preStage;
+    this.durationPill = durationPill;
+    this.extraPills = extraPills;
+    this.extraTools = extraTools;
+    this.output = output ?? { fallback: VIDEO_PREFIX, extension: "mp4" };
     this.state = state;
     // Where the standing checkpoint route is read from and written to. A node
     // body owns its own; a timeline segment editor reads the timeline's and
@@ -133,10 +157,13 @@ export class CreatorEditor {
     // be two answers to one question. Not mounted here: attach() hands it to a
     // Satellite, which floats it beside the node, so the body's layout never
     // changes when a render lands.
-    this.stage = this.nodeId ? new Stage({
+    this.stage = stage ?? (this.nodeId ? new Stage({
       nodeId: this.nodeId,
       onGallery: () => this.openGallery(),
-    }) : null;
+    }) : null);
+    // An injected stage belongs to whoever injected it, and outlives this
+    // editor — so `destroy` leaves it alone.
+    this.ownsStage = !stage;
 
     this.root = el("div", { class: "mmc-root" }, [
       this.railHost,
@@ -158,7 +185,7 @@ export class CreatorEditor {
 
   /** Called when the node body goes away. */
   destroy() {
-    this.stage?.destroy();
+    if (this.ownsStage) this.stage?.destroy();
   }
 
   /**
@@ -528,6 +555,7 @@ export class CreatorEditor {
         title: "Browse, organize and attach finished renders and pre-stage stills",
         onclick: () => this.openGallery(),
       }, [el("span", { class: "mmc-tool-icon" }, [icon("gallery")]), el("span", { text: "Gallery" })]),
+      ...(this.extraTools?.() ?? []),
       // Last in the rail because it is the step after everything else: the
       // rewrite is written against the references and the duration, so it wants
       // them settled first.
@@ -746,7 +774,7 @@ export class CreatorEditor {
     // Where the finished clip lands. The pill wears the *folder*, not the whole
     // prefix: the folder is what you check at a glance ("is this going in the
     // client's folder?"), and the filename stem is a detail of the popover.
-    const prefix = this.state.output_prefix || VIDEO_PREFIX;
+    const prefix = this.state.output_prefix || this.output.fallback;
     const folder = folderOf(prefix);
     const outputPill = el("button", {
       class: "mmc-pill",
@@ -764,7 +792,10 @@ export class CreatorEditor {
       ...(this.continuePill ? [this.renderContinue()] : []),
       framePill("first_frame", "Start frame", "frameIn"),
       framePill("last_frame", "End frame", "frameOut"),
-      duration,
+      // A body that is not making a video says how long it runs in its own
+      // terms, or not at all — see `extraPills`.
+      ...(this.durationPill ? [duration] : []),
+      ...(this.extraPills?.() ?? []),
       // In a timeline the canvas belongs to the timeline, not to one shot: the
       // segments are concatenated at the end and have to come out the same size.
       // The output folder is the timeline's for the same reason — one file.
@@ -918,7 +949,6 @@ export class CreatorEditor {
   }
 
   openOutput(anchor) {
-    openOutputPopover(anchor, this.state, () => this.commit(),
-                      { fallback: VIDEO_PREFIX, extension: "mp4" });
+    openOutputPopover(anchor, this.state, () => this.commit(), this.output);
   }
 }

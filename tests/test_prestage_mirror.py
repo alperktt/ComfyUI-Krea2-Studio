@@ -48,6 +48,7 @@ for (const name of ["PRESTAGE_CANVAS_MULTIPLE", "PRESTAGE_MIN_EDGE", "PRESTAGE_M
   out.constants[name] = s[name];
 }
 out.arches = [...s.PRESTAGE_ARCHES];
+out.image_arches = [...s.PRESTAGE_IMAGE_ARCHES];
 out.presets = s.PRESTAGE_ASPECTS.map(([label]) => label).sort();
 for (const [label] of s.PRESTAGE_ASPECTS) {
   for (const edge of [512, 768, 1024, 1536, 2048]) {
@@ -64,15 +65,8 @@ out.still = {
   index: s.PRESTAGE_STILL_INDEX,
   prompt_modes: [...s.PRESTAGE_PROMPT_MODES],
   latents: {},
-  canvases: {},
 };
 for (const n of s.PRESTAGE_STILL_LENGTHS) out.still.latents[n] = s.stillLatentFrames(n);
-for (const [label] of s.prestageAspects({ arch: "minimax" })) {
-  for (const edge of [384, 512, 768, 896]) {
-    const g = s.resolvedPreStage({ arch: "minimax", aspect: label, short_edge: edge, init: null, refs: [] });
-    out.still.canvases[label + "@" + edge] = [g.width, g.height];
-  }
-}
 console.log(JSON.stringify(out));
 """
 
@@ -108,18 +102,16 @@ for name, value in mirror["constants"].items():
 # The pill offers the two image architectures `compile_image` owns plus the H3
 # branch, which is a video generation and is compiled by `compile_still`.
 check("arches", mirror["arches"], [*ci.ARCHES, cs.ARCH])
+check("image arches", mirror["image_arches"], list(ci.ARCHES))
 check("still lengths", mirror["still"]["lengths"], list(cs.STILL_LENGTHS))
 check("still default length", mirror["still"]["frames"], cs.DEFAULT_FRAMES)
 check("still default latent frame", mirror["still"]["index"], cs.DEFAULT_LATENT_INDEX)
 check("still prompt modes", mirror["still"]["prompt_modes"], list(cs.PROMPT_MODES))
 check("still latent frames", mirror["still"]["latents"],
       {str(n): cs.latent_frames(n) for n in cs.STILL_LENGTHS})
-# The H3 branch generates a video frame, so its canvas is canvas.py's — the same
-# numbers the video pills resolve, reached through the pre-stage's own state.
-check("still canvases", mirror["still"]["canvases"],
-      {f"{label}@{edge}": list(cv.resolve_canvas(ratio, edge))
-       for label, ratio in cv.ASPECT_PRESETS.items()
-       for edge in (384, 512, 768, 896)})
+# No canvas check for the H3 branch: its request is an ordinary creator state,
+# so the geometry it resolves through is the video nodes' own — which
+# `test_canvas_mirror.py` already holds `canvas.js` to.
 check("aspect presets", mirror["presets"], sorted(ci.ASPECT_PRESETS))
 
 for key, size in mirror["canvases"].items():
