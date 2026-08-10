@@ -53,6 +53,7 @@ except Exception as exc:  # noqa: BLE001
     sys.exit(0)
 
 tl = importlib.import_module(f"{PACKAGE}.timeline")
+outputs_mod = importlib.import_module(f"{PACKAGE}.outputs")
 
 FAILURES = []
 
@@ -219,6 +220,16 @@ check("it saves the tail of the join fold",
       graph[save_inputs["images"][0]]["class_type"], "MiniMaxH3TimelineJoin")
 check("...and takes its sound from the same node",
       save_inputs["audio"][0], save_inputs["images"][0])
+check("it lands in the render folder — the same one a Creator render lands in",
+      save_inputs["filename_prefix"], outputs_mod.VIDEO_PREFIX)
+# One prefix for the whole timeline, because a timeline is one file: the
+# segments are joined before the save node, so there is nothing per-segment to
+# put anywhere else.
+retargeted = build(json.dumps({**json.loads(DATA), "output_prefix": "film/reel-1"})).expand
+check("a blob's own prefix is used instead",
+      [n["inputs"]["filename_prefix"] for n in retargeted.values()
+       if n["class_type"] == "MiniMaxH3Save"],
+      ["film/reel-1"])
 
 # Two continuations in a row. Worth its own case: with only one, the "previous
 # segment's images" and "everything joined so far" are the same node, so a chain

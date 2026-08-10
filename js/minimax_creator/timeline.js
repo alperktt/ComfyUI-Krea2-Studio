@@ -11,7 +11,8 @@ import { el, icon, mountOverlay } from "./dom.js";
 import { CreatorEditor } from "./editor.js";
 import { openLoras } from "./loras.js";
 import { openPicker } from "./picker.js";
-import { openAspectPopover, openResolutionPopover, openChoicePopover, stepperPill, aspectGlyph, PILL_GLYPH } from "./pills.js";
+import { openAspectPopover, openResolutionPopover, openOutputPopover, openChoicePopover, stepperPill, aspectGlyph, PILL_GLYPH } from "./pills.js";
+import { VIDEO_PREFIX, folderOf } from "./outputs.js";
 import { refine, refineButton, chosenModel as refineModel } from "./refine.js";
 import { samplingBar } from "./sampling.js";
 import { Stage } from "./stage.js";
@@ -167,6 +168,19 @@ class Timeline {
    * is whether they are rendered one after another and joined, or compiled into
    * one description with cut times in it and generated at once.
    */
+  /** Where the joined clip lands. Same control the Creator's pill opens, over
+   *  the timeline's own field. */
+  renderOutputPill() {
+    const folder = folderOf(this.timeline.output_prefix || VIDEO_PREFIX);
+    return el("button", {
+      class: "mmc-pill",
+      title: `The finished timeline lands in output/${folder ? `${folder}/` : ""} — click to change it.`,
+      onclick: (event) => openOutputPopover(
+        event.currentTarget, this.timeline, () => this.commit(),
+        { fallback: VIDEO_PREFIX, extension: "mp4" }),
+    }, [icon("folder", 16), el("span", { text: folder ? folder.split("/").pop() : "output" })]);
+  }
+
   renderMode() {
     const single = S.isSingle(this.timeline);
     const option = (mode, label, title) => el("button", {
@@ -229,6 +243,10 @@ class Timeline {
         el("span", { text: `${this.timeline.short_edge}p` }),
         el("span", { class: "mmc-pill-sub", text: `${width} × ${height}` }),
       ]),
+      // On the bar rather than in a segment for the same reason the canvas is:
+      // however many segments went in, a timeline saves exactly one file, so
+      // there is one place it can land.
+      this.renderOutputPill(),
       // Global LoRAs sit on the bar with the canvas rather than inside a
       // segment, because that is what they are: patched onto every segment,
       // which is the whole reason to have them separately from a segment's own.

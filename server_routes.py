@@ -74,6 +74,18 @@ def _scan(root, annotation=""):
             if kind is None:
                 continue
             path = os.path.join(directory, filename)
+            # A symlink pointing outside the root is a file this pack cannot
+            # open: `get_annotated_filepath` resolves the link and then refuses
+            # it for leaving the folder, so listing it would offer a thumbnail
+            # that fails at execute time with "not in the input folder any
+            # more" — about a file that is plainly sitting right there.
+            #
+            # Not worked around: the containment check is core's and is the
+            # thing standing between a crafted filename and the rest of the
+            # disk. Symlinking media into input/ does not work; the flag that
+            # does is `--input-directory`, and the README says so.
+            if os.path.islink(path) and not folder_paths.is_within_directory(root, path):
+                continue
             subfolder = os.path.relpath(directory, root)
             subfolder = "" if subfolder == "." else subfolder.replace(os.sep, "/")
             try:
@@ -589,7 +601,7 @@ async def list_assets(request):
 
 
 def _clean_subfolder(raw):
-    """A user-typed shelf name as a safe input-relative directory, or None.
+    """A user-typed shelf name as a safe root-relative directory, or None.
 
     Rejects rather than sanitizes: a name that needs rewriting to be safe is a
     name the user should see refused, not silently changed.
@@ -603,51 +615,91 @@ def _clean_subfolder(raw):
     return "/".join(parts)
 
 
+def _rooted(filename):
+    """A picker path -> `(root, relative, annotation)`, or None if it is not ours.
+
+    The ` [output]` suffix a gallery path carries is what says which folder it
+    came out of, so the two organize routes take their root from the file rather
+    than from a separate parameter that could disagree with it. An unannotated
+    path is an input path, which is the shape every caller used before the
+    gallery could be organized at all.
+    """
+    name, base = folder_paths.annotated_filepath(str(filename))
+    if base is None:
+        base, annotation = folder_paths.get_input_directory(), ""
+    else:
+        # Only the two roots the picker browses. `[temp]` is a real annotation
+        # core would resolve, and nothing in this pack should be rearranging it.
+        if os.path.realpath(base) != os.path.realpath(folder_paths.get_output_directory()):
+            return None
+        annotation = " [output]"
+    return os.path.realpath(base), name, annotation
+
+
 @PromptServer.instance.routes.post("/minimax_creator/move")
 async def move_asset(request):
-    """Move one input file into another input subfolder — the picker's
-    drag-a-thumbnail-onto-a-shelf. Input only: renders organize themselves.
+    """Move one file into another subfolder of the root it already lives in —
+    the picker's drag-a-thumbnail-onto-a-shelf.
+
+    Renders organize the same way input files do. They *arrive* sorted, because
+    the output prefix decides where a render lands (see `outputs.py`), but where
+    a file was written is not where it has to stay: a keeper gets dragged out of
+    the dated folder it landed in and onto a shelf of its own.
     """
     body = await request.json()
-    filename = str(body.get("filename", ""))
     subfolder = _clean_subfolder(body.get("subfolder", ""))
     if subfolder is None:
         return web.json_response({"error": "bad folder name"}, status=400)
+    rooted = _rooted(body.get("filename", ""))
+    if rooted is None:
+        return web.json_response({"error": "that file is not in a folder the picker browses"},
+                                 status=400)
+    root, filename, annotation = rooted
 
-    root = os.path.realpath(folder_paths.get_input_directory())
     source = os.path.realpath(os.path.join(root, filename))
-    if not source.startswith(root + os.sep) or not os.path.isfile(source):
-        return web.json_response({"error": "no such input file"}, status=404)
+    if not folder_paths.is_within_directory(root, source) or not os.path.isfile(source):
+        return web.json_response({"error": "no such file"}, status=404)
 
     target_dir = os.path.realpath(os.path.join(root, subfolder)) if subfolder else root
-    if target_dir != root and not target_dir.startswith(root + os.sep):
+    if target_dir != root and not folder_paths.is_within_directory(root, target_dir):
         return web.json_response({"error": "bad folder name"}, status=400)
     target = os.path.join(target_dir, os.path.basename(source))
     if os.path.realpath(target) == source:
-        return web.json_response({"path": filename})  # already there
+        return web.json_response({"path": filename + annotation})  # already there
     if os.path.exists(target):
         return web.json_response({"error": "a file with that name is already there"}, status=409)
 
     os.makedirs(target_dir, exist_ok=True)
     os.rename(source, target)
     relative = os.path.relpath(target, root).replace(os.sep, "/")
-    return web.json_response({"path": relative})
+    # Annotated on the way back out, so the moved file is still addressable as
+    # the same kind of thing it was: an attached render has to keep saying
+    # `[output]` or `media.resolve` would look for it under input/.
+    return web.json_response({"path": relative + annotation})
 
 
 @PromptServer.instance.routes.post("/minimax_creator/delete")
 async def delete_asset(request):
-    """Delete one input file — organize mode's other action. Files only, never
+    """Delete one file — organize mode's other action. Files only, never
     directories: a shelf whose last file goes simply drops out of the listing.
 
     A workflow that still references the file will fail at execute time with
     media.resolve's "not in the input folder any more", which is the honest
     answer — the picker cannot know what every saved workflow points at.
+
+    Deleting a *render* is the case worth pausing on, and it is deliberate: a
+    gallery you cannot throw anything out of stops being a gallery after a
+    week's rendering. The picker asks first, and there is no undo, which is the
+    same deal the input folder has always had.
     """
     body = await request.json()
-    filename = str(body.get("filename", ""))
-    root = os.path.realpath(folder_paths.get_input_directory())
+    rooted = _rooted(body.get("filename", ""))
+    if rooted is None:
+        return web.json_response({"error": "that file is not in a folder the picker browses"},
+                                 status=400)
+    root, filename, _ = rooted
     path = os.path.realpath(os.path.join(root, filename))
-    if not path.startswith(root + os.sep) or not os.path.isfile(path):
-        return web.json_response({"error": "no such input file"}, status=404)
+    if not folder_paths.is_within_directory(root, path) or not os.path.isfile(path):
+        return web.json_response({"error": "no such file"}, status=404)
     os.remove(path)
     return web.json_response({"ok": True})

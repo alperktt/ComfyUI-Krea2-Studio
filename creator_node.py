@@ -41,7 +41,8 @@ import json
 
 from comfy_api.latest import ComfyExtension, io
 
-from . import accel, canvas, lora, media, models, prestage, render, timeline
+from . import (accel, canvas, lora, media, models, outputs, prestage, render,
+               timeline)
 
 DEFAULT_DATA = json.dumps({
     "version": 1,
@@ -52,6 +53,8 @@ DEFAULT_DATA = json.dumps({
     "aspect": "16:9",
     "short_edge": canvas.NATIVE_SHORT_EDGE,
     "checkpoint": "auto",
+    # Where the finished clip lands under output/. See `outputs`.
+    "output_prefix": outputs.VIDEO_PREFIX,
     # Which files to load. Empty here rather than guessed: a fresh node has no
     # idea what is on this machine, and the UI fills it from the listing route.
     "models": {},
@@ -165,7 +168,12 @@ class MiniMaxH3Creator(io.ComfyNode):
                             sampler_name=sampler_name, scheduler=scheduler),
             accel.Settings(block_cache=block_cache, spectrum=spectrum,
                            spectrum_blend=spectrum_blend),
-            cls.hidden.unique_id)
+            cls.hidden.unique_id,
+            # Resolved here rather than inside the save node: a prefix that
+            # cannot be used should stop the queue before anything is sampled,
+            # not after — `get_save_image_path` raising at the end of a render
+            # costs the user the render.
+            filename_prefix=outputs.video(data))
         return render.expanded(graph)
 
 

@@ -49,7 +49,7 @@ import torch
 from comfy_api.latest import io
 
 from . import (accel, canvas, compile as compiler, encode as encoder, lora,
-               media, models, payload as payload_repair, render)
+               media, models, outputs, payload as payload_repair, render)
 
 DEFAULT_DATA = json.dumps({
     "version": 2,
@@ -60,6 +60,8 @@ DEFAULT_DATA = json.dumps({
     "aspect": "16:9",
     "short_edge": 768,
     "loras": [],
+    # Where the finished clip lands under output/. See `outputs`.
+    "output_prefix": outputs.VIDEO_PREFIX,
     # Which files to load. Empty here rather than guessed: a fresh node has no
     # idea what is on this machine, and the UI fills it from the listing route.
     "models": {},
@@ -195,7 +197,9 @@ class MiniMaxH3Timeline(io.ComfyNode):
             accel.Settings(block_cache=block_cache, spectrum=spectrum,
                            spectrum_blend=spectrum_blend),
             cls.hidden.unique_id,
-            tail_s=compiler.audio_tail_seconds(data.get("audio_tail_s")))
+            tail_s=compiler.audio_tail_seconds(data.get("audio_tail_s")),
+            # Refused before anything is sampled — see MiniMaxH3Creator.execute.
+            filename_prefix=outputs.video(data))
         return render.expanded(graph)
 
 

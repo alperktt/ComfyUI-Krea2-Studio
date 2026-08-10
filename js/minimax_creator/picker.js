@@ -9,6 +9,14 @@ import { openTrim, trimLabel } from "./trim.js";
 // "renders" is a tab, not a kind: it browses the output folder instead of a
 // slice of the input one, and the files under it keep their own kinds — a
 // picked render is attached as the video it is.
+//
+// Everything else about it is the same folder: shelves, stars, organize mode,
+// drag-to-move and delete all work there exactly as they do on the input tabs,
+// because a finished render needs filing more than an uploaded clip does. The
+// only thing the gallery cannot do is take an upload, since renders arrive by
+// being rendered. `activeAssets` is what keeps that one implementation: it is
+// the list the current tab is looking at, and every organize path goes through
+// it rather than reaching for `this.assets`.
 const KIND_LABEL = { image: "Image", video: "Video", audio: "Audio", renders: "Renders" };
 const ACCEPT = { image: "image/*", video: "video/*", audio: "audio/*" };
 // What a configured video cell says about itself, short enough for the badge.
@@ -97,10 +105,7 @@ class Picker {
     ]);
     this.uploadButton = this.modal.querySelector(".mmc-upload");
     this.organizeButton = this.modal.querySelector(".mmc-organize");
-    if (this.kind === "renders") {
-      this.uploadButton.style.display = "none";
-      this.organizeButton.style.display = "none";
-    }
+    if (this.kind === "renders") this.uploadButton.style.display = "none";
     this.modal.style.position = "relative";
 
     this.overlay = el("div", {
@@ -123,7 +128,7 @@ class Picker {
       }
       this.prefs = await loadPickerPrefs();
       // A mark on a file the listing no longer has is a mark on nothing.
-      this.marked = this.marked.filter((p) => this.assets.some((a) => a.path === p));
+      this.marked = this.marked.filter((p) => this.activeAssets().some((a) => a.path === p));
       this.loaded = true;
     } catch (error) {
       this.assets = [];
@@ -137,16 +142,22 @@ class Picker {
 
   selectTab(kind) {
     if (kind === this.kind) return;
+    const previous = this.kind;
     this.kind = kind;
     // Selections do not survive a tab change: they go into different slots.
     this.selected = [];
     for (const tab of this.tabs) tab.setAttribute("aria-selected", String(tab.textContent === KIND_LABEL[kind]));
     // Nothing uploads into the output folder: renders arrive by being rendered.
-    // Nor does it organize: rendered files name themselves.
+    // Organizing them is another matter — see the note at the top of the file.
     this.uploadButton.style.display = kind === "renders" ? "none" : "";
-    this.organizeButton.style.display = kind === "renders" ? "none" : "";
     if (kind !== "renders") this.uploadButton.textContent = `+  Upload ${KIND_LABEL[kind].toLowerCase()}`;
-    else if (this.organize) this.setOrganize(false);
+    // Shelves are shared between the input tabs — a folder is a place, not a
+    // kind — but the output folder is a different place, so crossing that line
+    // drops back to "all" rather than selecting a shelf that is not there.
+    if ((kind === "renders") !== (previous === "renders")) {
+      this.shelf = "all";
+      this.marked = [];
+    }
     this.renderShelves();
     this.renderGrid();
     this.renderFoot();
@@ -168,12 +179,28 @@ class Picker {
     this.renderGrid();
   }
 
+  /** The listing the current tab is browsing. The one place that knows the
+   *  renders tab reads a different folder; everything organize-related goes
+   *  through it, which is why there is only one implementation of any of it. */
+  activeAssets() {
+    return this.kind === "renders" ? this.renders : this.assets;
+  }
+
+  /** Which hand-made shelf names belong to the folder being browsed. Two lists
+   *  because they are two folders: a shelf typed while filing renders should
+   *  not appear as an empty chip over the input folder, where nothing can ever
+   *  land on it. `folders` keeps its name so prefs saved before the gallery
+   *  could be organized load unchanged. */
+  folderKey() {
+    return this.kind === "renders" ? "renderFolders" : "folders";
+  }
+
   /** Every place a file can live: real subfolders seen in the listing (any
    *  kind — a folder is shared) plus shelves made by hand that are still
    *  empty. Sorted; nested paths are simply their own shelves. */
   folders() {
-    const seen = new Set(this.prefs.folders);
-    for (const asset of this.assets) if (asset.subfolder) seen.add(asset.subfolder);
+    const seen = new Set(this.prefs[this.folderKey()]);
+    for (const asset of this.activeAssets()) if (asset.subfolder) seen.add(asset.subfolder);
     return [...seen].sort((a, b) => a.localeCompare(b));
   }
 
@@ -184,14 +211,18 @@ class Picker {
   }
 
   renderShelves() {
-    // The output folder organizes itself: no shelves on the renders tab.
-    if (this.kind === "renders" || !this.loaded || this.loadError) {
+    if (!this.loaded || this.loadError) {
       this.shelfRow.style.display = "none";
       return;
     }
     this.shelfRow.style.display = "";
-    const ofKind = this.assets.filter((a) => a.kind === this.kind);
-    const count = (test) => ofKind.filter(test).length;
+    // The renders tab is not a kind, so it counts everything the output folder
+    // holds; an input tab counts only its own kind, because that is the slice
+    // its grid is showing.
+    const scoped = this.kind === "renders"
+      ? this.renders
+      : this.assets.filter((a) => a.kind === this.kind);
+    const count = (test) => scoped.filter(test).length;
 
     const chip = ({ key, label, iconName, n, droppable }) => {
       const node = el("button", {
@@ -244,8 +275,9 @@ class Picker {
           if (event.key !== "Enter") return;
           const name = field.value.trim().replace(/^\/+|\/+$/g, "");
           if (!name || /(^|\/)\.|\\/.test(name)) { this.warn("Shelf names cannot start with a dot."); return; }
-          if (!this.prefs.folders.includes(name)) {
-            this.prefs = { ...this.prefs, folders: [...this.prefs.folders, name] };
+          const key = this.folderKey();
+          if (!this.prefs[key].includes(name)) {
+            this.prefs = { ...this.prefs, [key]: [...this.prefs[key], name] };
             savePickerPrefs(this.prefs);
           }
           this.setShelf(name);
@@ -264,14 +296,15 @@ class Picker {
   async moveTo(folder) {
     const dragged = this.dragging;
     this.dragging = null;
-    if (!dragged || this.kind === "renders") return;
+    if (!dragged) return;
     const batch = this.organize && this.marked.includes(dragged.path)
-      ? this.assets.filter((asset) => this.marked.includes(asset.path))
+      ? this.activeAssets().filter((asset) => this.marked.includes(asset.path))
       : [dragged];
     await this.moveMany(batch, folder === "all" ? "" : folder);
   }
 
-  /** Move files into an input subfolder ("" is the root), carrying each one's
+  /** Move files into a subfolder of the folder they are in ("" is its root),
+   *  carrying each one's
    *  star, segment settings, mark and selection over to its new path. Per-file
    *  failures (a name collision, say) skip that file rather than the batch. */
   async moveMany(batch, target) {
@@ -323,7 +356,7 @@ class Picker {
   }
 
   markedAssets() {
-    return this.assets.filter((asset) => this.marked.includes(asset.path));
+    return this.activeAssets().filter((asset) => this.marked.includes(asset.path));
   }
 
   /** The Move to… popover: every shelf, the root, and a field for a new one.
@@ -332,7 +365,8 @@ class Picker {
     const menu = el("div", { class: "mmc-move-menu" });
     const go = (target) => { close(); this.moveMany(this.markedAssets(), target); };
     menu.appendChild(el("button", { class: "mmc-move-opt", onclick: () => go("") },
-      [icon("image", 13), el("span", { text: "Input folder (root)" })]));
+      [icon("image", 13), el("span", {
+        text: this.kind === "renders" ? "Output folder (root)" : "Input folder (root)" })]));
     for (const folder of this.folders()) {
       menu.appendChild(el("button", { class: "mmc-move-opt", onclick: () => go(folder) },
         [icon("folder", 13), el("span", { text: folder })]));
@@ -393,15 +427,14 @@ class Picker {
   }
 
   visible() {
-    if (this.kind === "renders") {
-      return this.renders.filter((asset) =>
-        (!this.query || asset.path.toLowerCase().includes(this.query)));
-    }
     const onShelf = this.shelf === "all" ? () => true
       : this.shelf === "fav" ? (asset) => this.isFav(asset.path)
         : (asset) => asset.subfolder === this.shelf;
-    return this.assets.filter((asset) =>
-      asset.kind === this.kind && onShelf(asset)
+    // "renders" is a tab and not a kind, so it shows every kind the output
+    // folder holds — a still and the clip it seeded are both renders.
+    const onKind = this.kind === "renders" ? () => true : (asset) => asset.kind === this.kind;
+    return this.activeAssets().filter((asset) =>
+      onKind(asset) && onShelf(asset)
       && (!this.query || asset.path.toLowerCase().includes(this.query)));
   }
 
@@ -449,12 +482,14 @@ class Picker {
         class: "mmc-empty",
         text: this.query
           ? `No ${this.kind === "renders" ? "renders" : `${this.kind} files`} matching “${this.query}”.`
-          : this.kind === "renders"
-            ? "Nothing in the output folder yet — queue a render."
-            : this.shelf === "fav"
-              ? "No favorites yet — hover a file and hit the star."
-              : this.shelf !== "all"
-                ? "Nothing on this shelf yet — drag files here, or upload while it is open."
+          : this.shelf === "fav"
+            ? "No favorites yet — hover a file and hit the star."
+            : this.shelf !== "all"
+              ? this.kind === "renders"
+                ? "Nothing on this shelf yet — drag renders here, or point a node's output folder at it."
+                : "Nothing on this shelf yet — drag files here, or upload while it is open."
+              : this.kind === "renders"
+                ? "Nothing in the output folder yet — queue a render."
                 : `No ${this.kind} files in the input folder yet — upload one.`,
       }));
       return;
@@ -524,34 +559,36 @@ class Picker {
     if (asset.kind !== "image" && !this.organize) cell.appendChild(this.badge(asset));
     if (asset.kind !== "audio") cell.appendChild(el("div", { class: "mmc-cell-name", text: asset.name }));
 
-    if (this.kind !== "renders") {
-      const starred = this.isFav(asset.path);
-      cell.appendChild(el("button", {
-        class: `mmc-cell-star${starred ? " on" : ""}`,
-        title: starred ? "Remove from favorites" : "Add to favorites",
-        onclick: (event) => { event.stopPropagation(); this.toggleFav(asset); },
-      }, [icon("star", 13)]));
+    // Stars and dragging on every tab, renders included: a finished clip is the
+    // thing most worth starring, and where a render was *written* is not where
+    // it has to stay — the keeper gets dragged out of the dated folder it
+    // landed in and onto a shelf of its own.
+    const starred = this.isFav(asset.path);
+    cell.appendChild(el("button", {
+      class: `mmc-cell-star${starred ? " on" : ""}`,
+      title: starred ? "Remove from favorites" : "Add to favorites",
+      onclick: (event) => { event.stopPropagation(); this.toggleFav(asset); },
+    }, [icon("star", 13)]));
 
-      // On the All shelf a file's home is worth a caption; on its own shelf
-      // the chip above already says it.
-      if (this.shelf === "all" && asset.subfolder) {
-        cell.appendChild(el("div", { class: "mmc-cell-home", text: asset.subfolder }));
-      }
-
-      // Organizing is dragging: the cell rides to a shelf chip. The chips take
-      // it from `this.dragging` — dataTransfer only carries strings.
-      cell.draggable = true;
-      cell.addEventListener("dragstart", (event) => {
-        this.dragging = asset;
-        event.dataTransfer.effectAllowed = "move";
-        event.dataTransfer.setData("text/plain", asset.path);
-        this.modal.classList.add("dragging");
-      });
-      cell.addEventListener("dragend", () => {
-        this.dragging = null;
-        this.modal.classList.remove("dragging");
-      });
+    // On the All shelf a file's home is worth a caption; on its own shelf
+    // the chip above already says it.
+    if (this.shelf === "all" && asset.subfolder) {
+      cell.appendChild(el("div", { class: "mmc-cell-home", text: asset.subfolder }));
     }
+
+    // Organizing is dragging: the cell rides to a shelf chip. The chips take
+    // it from `this.dragging` — dataTransfer only carries strings.
+    cell.draggable = true;
+    cell.addEventListener("dragstart", (event) => {
+      this.dragging = asset;
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", asset.path);
+      this.modal.classList.add("dragging");
+    });
+    cell.addEventListener("dragend", () => {
+      this.dragging = null;
+      this.modal.classList.remove("dragging");
+    });
     return cell;
   }
 

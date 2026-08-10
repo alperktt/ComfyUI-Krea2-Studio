@@ -1,11 +1,13 @@
-// The two canvas popovers — aspect ratio and short edge.
+// The pill popovers — aspect ratio, short edge, and the output folder.
 //
-// They live here rather than on CreatorEditor because the canvas is a property
-// of a *generation* in the Creator node and a property of the *timeline* in the
-// Timeline node, and both need the same two controls over the same two fields.
+// They live here rather than on CreatorEditor because each is a property of a
+// *generation* in the Creator node and of the *timeline* in the Timeline node,
+// and both need the same controls over the same fields. The PreStage uses the
+// output one too, over its own default.
 
 import { el, icon, dismissable, placeNear } from "./dom.js";
 import { ASPECT_PRESETS, MIN_SHORT_EDGE, MAX_SHORT_EDGE, NATIVE_SHORT_EDGE, CANVAS_MULTIPLE } from "./canvas.js";
+import { TOKENS, cleanPrefix, folderOf, stemOf, examplePath } from "./outputs.js";
 
 /**
  * A −/value/+ pill. The same shape as the duration control, because a number
@@ -228,4 +230,114 @@ export function openResolutionPopover(anchor, target, geometry, commit) {
   document.body.appendChild(pop);
   placeNear(pop, anchor);
   dismissable(pop);
+}
+
+/**
+ * The output-folder popover: where this node's files land under ComfyUI/output.
+ *
+ * A text field rather than a folder browser, because the value is not a folder
+ * — it is core's `filename_prefix`, whose last segment names the *files* and
+ * whose `%year%`-style tokens are expanded per render. A browser would have to
+ * hide both, and both are the reason anyone opens this.
+ *
+ * Nothing is committed until the value parses. `outputs.py` refuses the same
+ * strings when the node is queued, so a field left in an error state cannot
+ * reach a render — but it is refused here first, where it can still be fixed
+ * without losing a queue slot.
+ *
+ * @param {HTMLElement} anchor
+ * @param {object} target        anything with an `output_prefix` field
+ * @param {() => void} commit
+ * @param {object} spec
+ * @param {string} spec.fallback     the node's default, used when the field is empty
+ * @param {string} spec.extension    what the files are, for the example line
+ */
+export function openOutputPopover(anchor, target, commit, { fallback, extension }) {
+  const field = el("input", {
+    class: "mmc-out-field",
+    type: "text",
+    value: target.output_prefix ?? fallback,
+    placeholder: fallback,
+    spellcheck: false,
+    "aria-label": "Output folder and filename prefix",
+    // The graph canvas reads a pointerdown on the node as the start of a node
+    // drag and would carry the whole node off; keydown would reach the canvas's
+    // shortcuts and delete the node on Backspace.
+    onpointerdown: (event) => event.stopPropagation(),
+    onkeydown: (event) => {
+      event.stopPropagation();
+      if (event.key === "Enter") close();
+    },
+  });
+  const example = el("div", { class: "mmc-out-example" });
+  const problem = el("div", { class: "mmc-out-problem" });
+
+  const paint = () => {
+    const { prefix, error } = cleanPrefix(field.value, fallback);
+    field.classList.toggle("bad", Boolean(error));
+    problem.textContent = error ?? "";
+    problem.style.display = error ? "" : "none";
+    if (error) {
+      example.textContent = "";
+      return;
+    }
+    // The folder is shown separately from the file because they are the two
+    // halves nobody expects: "minimax/renders/H3" is a *file* called H3 in a
+    // folder called renders, not a folder called H3.
+    const folder = folderOf(prefix);
+    example.replaceChildren(
+      el("div", { class: "mmc-out-line" }, [
+        el("span", { class: "mmc-out-key", text: "folder" }),
+        el("span", { text: folder ? `output/${folder}/` : "output/" }),
+      ]),
+      el("div", { class: "mmc-out-line" }, [
+        el("span", { class: "mmc-out-key", text: "first file" }),
+        el("span", { text: examplePath(stemOf(prefix), { extension }) }),
+      ]),
+    );
+    target.output_prefix = prefix;
+  };
+
+  // Tokens are core's, expanded per render. Offered as buttons because nobody
+  // guesses the spelling of `%year%` and a dated folder per shoot is the single
+  // most useful thing this field does.
+  const tokenRow = el("div", { class: "mmc-out-tokens" },
+    TOKENS.map((token) => el("button", {
+      class: "mmc-out-token",
+      text: token,
+      title: `Insert ${token} — expanded when the file is written`,
+      onclick: () => {
+        const at = field.selectionStart ?? field.value.length;
+        field.value = field.value.slice(0, at) + token + field.value.slice(field.selectionEnd ?? at);
+        field.focus();
+        field.setSelectionRange(at + token.length, at + token.length);
+        paint();
+      },
+    })));
+
+  field.addEventListener("input", paint);
+
+  const pop = el("div", { class: "mmc-pop mmc-out-pop" }, [
+    el("div", { class: "mmc-pop-title", text: "Output folder" }),
+    field,
+    problem,
+    example,
+    tokenRow,
+    el("div", { class: "mmc-out-note" }, [
+      el("span", { text: "Relative to ComfyUI's output folder. Start ComfyUI with " }),
+      el("code", { text: "--output-directory" }),
+      el("span", { text: " to move that folder itself." }),
+    ]),
+  ]);
+  document.body.appendChild(pop);
+  placeNear(pop, anchor);
+  const close = dismissable(pop, () => {
+    // Only a value that parses is kept — an abandoned half-typed folder leaves
+    // the node writing where it wrote before rather than refusing to queue.
+    const { prefix } = cleanPrefix(field.value, fallback);
+    if (prefix) target.output_prefix = prefix;
+    commit();
+  });
+  paint();
+  setTimeout(() => field.focus(), 20);
 }

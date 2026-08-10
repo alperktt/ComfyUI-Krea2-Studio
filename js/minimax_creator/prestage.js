@@ -17,7 +17,8 @@ import { el, icon, ICONS, svg, dismissable, placeNear } from "./dom.js";
 import { openPicker } from "./picker.js";
 import { openLoras } from "./loras.js";
 import { openFrameGrab } from "./framegrab.js";
-import { openChoicePopover, stepperPill, aspectGlyph, edgeSlider, PILL_GLYPH } from "./pills.js";
+import { openChoicePopover, openOutputPopover, stepperPill, aspectGlyph, edgeSlider, PILL_GLYPH } from "./pills.js";
+import { IMAGE_PREFIX, folderOf } from "./outputs.js";
 import { samplingBar } from "./sampling.js";
 import { Stage } from "./stage.js";
 import { loadCatalog, catalogByFolder } from "./models.js";
@@ -434,7 +435,19 @@ export class PreStageEditor {
       el("span", { class: "mmc-pill-sub", text: `${geometry.width} × ${geometry.height}` }),
     ]);
 
-    const pills = [archPill, aspectPill, resPill];
+    // Where the still lands. Its own default folder, apart from the video
+    // node's, which is what sorts the gallery into stills and finished renders
+    // without the picker having to know the difference between them.
+    const outFolder = folderOf(state.output_prefix || IMAGE_PREFIX);
+    const outputPill = el("button", {
+      class: "mmc-pill",
+      title: `Stills land in output/${outFolder ? `${outFolder}/` : ""} — click to change it.`,
+      onclick: (event) => openOutputPopover(
+        event.currentTarget, state, () => this.commit(),
+        { fallback: IMAGE_PREFIX, extension: "png" }),
+    }, [icon("folder", 16), el("span", { text: outFolder ? outFolder.split("/").pop() : "output" })]);
+
+    const pills = [archPill, aspectPill, resPill, outputPill];
 
     if (state.arch === "ideogram4") {
       // Ideogram's speed axis. The preset owns the schedule shape as well as

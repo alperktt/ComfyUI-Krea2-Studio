@@ -59,6 +59,12 @@ made can go straight back in as a reference.
 
 ![The Renders tab](docs/img/render_gallery.png)
 
+**Gallery** on the rail opens straight onto that tab. It is the same picker, so
+renders organize exactly like input files do: make a shelf, drag thumbnails onto
+it, star the keepers, and use **Organize** to move or delete in bulk. Stills and
+finished clips arrive on separate shelves, because the two nodes write to
+separate folders — see below.
+
 Every attachment gets a colour and its chip in the sentence wears the same one, so
 you can match a reference in the prose to a picture without reading.
 
@@ -173,6 +179,51 @@ count:
 The resolution slider sets the **short edge** (384–896, native 768); both axes snap
 to 32. In the image modes the aspect comes from the keyframe.
 
+## Where files go
+
+Renders are saved by the node itself, under ComfyUI's output folder. The **folder
+pill** on the Creator, the Timeline and the PreStage sets where — click it and
+type a path:
+
+| | default | lands in |
+|---|---|---|
+| Creator / Timeline | `minimax/renders/H3` | `output/minimax/renders/H3_00001_.mp4` |
+| PreStage | `minimax/stills/prestage` | `output/minimax/stills/prestage_00001_.png` |
+
+The last segment names the **files**, not a folder: `client-a/hero` writes
+`hero_00001_.mp4` into `output/client-a/`. Ending with a slash keeps the default
+filename, so `client-a/` is usually what you want.
+
+`%year%`, `%month%`, `%day%`, `%hour%`, `%minute%`, `%second%`, `%width%` and
+`%height%` are filled in as each file is written, in a folder as readily as in a
+filename — `minimax/%year%-%month%-%day%/H3` gives you a folder per day. The
+popover has a button per token and shows the exact path the next file will take.
+
+The value is saved in the workflow, so a `.json` shared with someone else renders
+into the same structure on their machine.
+
+### Moving the input and output folders themselves
+
+The pill is relative to ComfyUI's output folder and cannot climb out of it. To
+move the folders themselves, use ComfyUI's own flags — this pack reads every path
+through `folder_paths`, so they work here with nothing to configure:
+
+```bash
+python main.py --input-directory /Volumes/Media/comfy-in \
+               --output-directory /Volumes/Media/comfy-out
+# or --base-directory to move input, output, temp, user and models together
+```
+
+Two things worth knowing:
+
+- `extra_model_paths.yaml` **cannot** do this. It only adds model search paths;
+  input and output are not model folders.
+- **Symlinking a folder into `input/` does not work**, and the picker will not
+  list files that resolve outside the folder they appear in. ComfyUI resolves
+  symlinks before checking that a path stays inside the input directory, and that
+  check is what stops a crafted filename reaching the rest of your disk — so it is
+  not something this pack works around. Use `--input-directory` instead.
+
 ## Thanks
 
 This pack is glue. The work underneath it belongs to other people:
@@ -200,11 +251,13 @@ matching pills light up.
 ```
 python3 tests/test_compile.py         # canvas math, modes, limits, ordering
 python3 tests/test_refine.py
+python3 tests/test_outputs.py         # what an output prefix may be
 python3 tests/test_canvas_mirror.py   # canvas.js against canvas.py
 python3 tests/test_prestage_mirror.py
+python3 tests/test_outputs_mirror.py  # outputs.js against outputs.py
 ```
 
-Those need neither torch nor ComfyUI. The graph tests do, and skip themselves with a
+Those need neither torch nor ComfyUI (the mirror tests need `node`). The graph tests do, and skip themselves with a
 message when it is not importable:
 
 ```

@@ -3,6 +3,7 @@
 // editing rather than at queue time, but compile.py stays authoritative.
 
 import { ASPECT_PRESETS, NATIVE_SHORT_EDGE, framesForSeconds, secondsForFrames, resolveCanvas } from "./canvas.js";
+import { VIDEO_PREFIX, IMAGE_PREFIX, cleanPrefix } from "./outputs.js";
 
 export const MAX_REF_IMAGES = 9;
 export const MAX_REF_VIDEOS = 3;
@@ -345,6 +346,10 @@ export function emptyState() {
     // "auto" follows the mode. Pinning it runs the same payload on the other
     // weights; compile.py decides which pins it will accept.
     checkpoint: "auto",
+    // Where the finished clip lands under output/. Owned by the node for the
+    // same reason the weights are: a timeline saves one file, so a segment
+    // carrying its own would be a second answer to a question that has one.
+    output_prefix: VIDEO_PREFIX,
     // Which files to load. Owned by the node, not by a segment — a timeline
     // segment inherits the timeline's and never carries its own.
     models: emptyModels(),
@@ -367,6 +372,7 @@ export function parseState(raw) {
         if (typeof state[key] !== "string") state[key] = "";
       }
       if (!CHECKPOINT_CHOICES.includes(state.checkpoint)) state.checkpoint = "auto";
+      state.output_prefix = parsePrefix(state.output_prefix, VIDEO_PREFIX);
       state.models = parseModels(state.models);
       state.turbo = parseTurbo(state.turbo);
       normalizeCheckpoint(state);
@@ -385,6 +391,26 @@ export function parseState(raw) {
     // the node unusable. The user's text is gone either way.
   }
   return emptyState();
+}
+
+/** A blob's `output_prefix` as the UI holds it: always a string, always one
+ *  `outputs.py` would accept.
+ *
+ *  A blob saved before this field existed has no key, and one hand-edited to
+ *  something unusable has to leave the node editable — so both fall back to the
+ *  node's default rather than being carried into the field as an error the user
+ *  never typed. The queue refuses the blob's own value either way: this is the
+ *  *editor's* copy, not the one that gets rendered with. */
+function parsePrefix(raw, fallback) {
+  if (raw === undefined || raw === null) return fallback;
+  return cleanPrefix(raw, fallback).prefix ?? fallback;
+}
+
+/** …and back out, but only when it departs from the node's default — so a blob
+ *  nobody retargeted round-trips exactly as it did before the field existed. */
+function serializePrefix(prefix, fallback) {
+  const clean = cleanPrefix(prefix, fallback).prefix ?? fallback;
+  return clean === fallback ? {} : { output_prefix: clean };
 }
 
 /** LoRA entries, stripped to what compile.py reads. Shared by a segment's own
@@ -481,6 +507,7 @@ export function serializeState(state) {
     ...serializeCommon(state),
     aspect: state.aspect,
     short_edge: state.short_edge,
+    ...serializePrefix(state.output_prefix, VIDEO_PREFIX),
     // Not in serializeCommon: the weights belong to the node, and a timeline
     // segment goes through that function too. The turbo switch likewise.
     ...serializeModels(state.models),
@@ -549,6 +576,9 @@ export function emptyTimeline() {
     // How much of the previous segment's sound a continuing seam inherits.
     // Mirrors compile.DEFAULT_AUDIO_TAIL_S.
     audio_tail_s: DEFAULT_AUDIO_TAIL_S,
+    // Where the finished clip lands under output/. One prefix, because a
+    // timeline is one file however many segments went into it.
+    output_prefix: VIDEO_PREFIX,
     // One set of weights for the whole clip. Chained or not, the segments are
     // concatenated at the end and cannot come from different checkpoints of the
     // same name any more than they can come out different sizes.
@@ -595,6 +625,7 @@ export function parseTimeline(raw) {
         if (typeof timeline[key] !== "string") timeline[key] = "";
       }
       if (!timeline.refined || typeof timeline.refined !== "object") timeline.refined = null;
+      timeline.output_prefix = parsePrefix(timeline.output_prefix, VIDEO_PREFIX);
       timeline.models = parseModels(timeline.models);
       timeline.turbo = parseTurbo(timeline.turbo);
       const segments = Array.isArray(parsed.segments) ? parsed.segments : [];
@@ -634,6 +665,7 @@ export function serializeTimeline(timeline) {
     short_edge: timeline.short_edge,
     loras: serializeLoras(timeline.loras ?? []),
     audio_tail_s: clampTail(timeline.audio_tail_s),
+    ...serializePrefix(timeline.output_prefix, VIDEO_PREFIX),
     ...serializeModels(timeline.models),
     ...serializeTurbo(timeline.turbo),
     segments: timeline.segments.map((segment, index) => {
@@ -801,6 +833,9 @@ export function emptyPreStage() {
     turbo: { on: false, quality: "good", saved: null },
     // Ideogram's speed axis: which official preset shapes the schedule.
     quality: "default",
+    // Where the still lands under output/. Its own default folder, which is
+    // what sorts stills apart from finished renders in the gallery.
+    output_prefix: IMAGE_PREFIX,
     models: emptyPreStageModels(),
     // A hint for peer discovery, never authoritative — ids renumber on paste,
     // so the pre-stage pill re-derives the pairing by scan.
@@ -819,6 +854,7 @@ export function parsePreStage(raw) {
       const state = { ...emptyPreStage(), ...parsed };
       if (!PRESTAGE_ARCHES.includes(state.arch)) state.arch = "krea2";
       if (typeof state.prompt !== "string") state.prompt = "";
+      state.output_prefix = parsePrefix(state.output_prefix, IMAGE_PREFIX);
       if (!Array.isArray(state.refs)) state.refs = [];
       state.refs = state.refs
         .filter((ref) => ref && typeof ref.filename === "string")
@@ -886,6 +922,7 @@ export function serializePreStage(state) {
                    ...(state.turbo.saved ? { saved: { ...state.turbo.saved } } : {}) } }
       : {}),
     ...(state.quality !== "default" ? { quality: state.quality } : {}),
+    ...serializePrefix(state.output_prefix, IMAGE_PREFIX),
     ...(Object.keys(models).length ? { models } : {}),
     ...(state.peer != null ? { peer: state.peer } : {}),
   }, null, 2);

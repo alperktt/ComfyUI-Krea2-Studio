@@ -360,6 +360,46 @@ button.mmc-mode:hover { background: var(--mmc-surface-2); border-color: var(--mm
   box-shadow: 0 18px 48px rgba(0,0,0,.6);
 }
 .mmc-pop-title { color: var(--mmc-dim); font-size: 12px; padding: 6px 10px 8px; }
+
+/* The output-folder popover. Fixed width for the same reason the slider's is:
+   the example line changes length on every keystroke, and a popover that
+   resized under the caret would be unusable to type in. */
+.mmc-out-pop { width: 320px; }
+.mmc-out-field {
+  width: 100%; box-sizing: border-box; padding: 8px 10px;
+  background: var(--mmc-surface); border: 1px solid var(--mmc-line);
+  border-radius: 10px; color: var(--mmc-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+}
+.mmc-out-field:focus { outline: none; border-color: var(--mmc-blue); }
+.mmc-out-field.bad { border-color: #e0743c; }
+.mmc-out-problem { color: #e0743c; font-size: 11.5px; line-height: 1.45; padding: 6px 2px 0; }
+.mmc-out-example {
+  padding: 8px 2px 2px; font-size: 11.5px; line-height: 1.6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--mmc-text);
+  /* A long dated folder must not widen the popover — see above. */
+  overflow-wrap: anywhere;
+}
+.mmc-out-line { display: flex; gap: 8px; }
+.mmc-out-key {
+  color: var(--mmc-off); flex: none; width: 62px; text-align: right;
+  font-family: inherit;
+}
+.mmc-out-tokens { display: flex; flex-wrap: wrap; gap: 4px; padding: 8px 2px 2px; }
+.mmc-out-token {
+  padding: 3px 7px; background: var(--mmc-surface-2); border: 0; border-radius: 7px;
+  color: var(--mmc-dim); font-size: 11px; font-family: ui-monospace, Menlo, monospace;
+  cursor: pointer;
+}
+.mmc-out-token:hover { background: var(--mmc-surface-3); color: var(--mmc-text); }
+.mmc-out-note {
+  color: var(--mmc-off); font-size: 11px; line-height: 1.5; padding: 8px 2px 2px;
+  border-top: 1px solid var(--mmc-line); margin-top: 8px;
+}
+.mmc-out-note code {
+  font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; color: var(--mmc-dim);
+}
 .mmc-opt {
   display: flex; align-items: center; justify-content: space-between; width: 100%;
   padding: 9px 10px; background: none; border: 0; border-radius: 10px;

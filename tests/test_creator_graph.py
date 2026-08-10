@@ -57,6 +57,7 @@ except Exception as exc:  # noqa: BLE001
 
 cn = importlib.import_module(f"{PACKAGE}.creator_node")
 tl = importlib.import_module(f"{PACKAGE}.timeline")
+outputs_mod = importlib.import_module(f"{PACKAGE}.outputs")
 
 FAILURES = []
 
@@ -209,6 +210,35 @@ check("both decode the same sampler",
       graph[save_inputs["images"][0]]["inputs"]["samples"][0],
       graph[save_inputs["audio"][0]]["inputs"]["samples"][0])
 check("at the rate the frame count was snapped to", save_inputs["fps"], 24.0)
+check("it lands in the render folder, which is not the stills folder",
+      save_inputs["filename_prefix"], outputs_mod.VIDEO_PREFIX)
+
+
+def save_prefix(**overrides):
+    """Where a blob's finished clip would land."""
+    return by_class(build(json.dumps({**json.loads(DATA), **overrides})).expand
+                    )["MiniMaxH3Save"][0][1]["filename_prefix"]
+
+
+# The output-structure control. Before it the prefix was a module constant, so
+# every install wrote every render it ever made into one folder.
+check("a blob's own prefix is used instead",
+      save_prefix(output_prefix="my-project/scene-a/take"), "my-project/scene-a/take")
+check("a trailing slash means a folder, and keeps the default's stem",
+      save_prefix(output_prefix="my-project/"), "my-project/H3")
+# Core expands these in `get_save_image_path`; they pass through untouched,
+# which is what makes a dated folder per render a thing you can just type.
+check("date tokens are core's to expand, not ours to eat",
+      save_prefix(output_prefix="minimax/%year%-%month%-%day%/H3"),
+      "minimax/%year%-%month%-%day%/H3")
+# Refused while the graph is built, not by get_save_image_path once the clip has
+# already been sampled — that failure costs the user the whole render.
+expect_error("a prefix that climbs out of the output folder",
+             lambda: save_prefix(output_prefix="../../../H3"),
+             "'.' and '..' are not allowed")
+expect_error("an absolute prefix, pointed at the flag that does work",
+             lambda: save_prefix(output_prefix="/mnt/big/renders"),
+             "--output-directory")
 
 # The payload is a segment payload with nothing in front of it.
 payload = json.loads(segment_inputs["segment_data"])
@@ -432,9 +462,29 @@ try:
     patches = preview_kinds["ModelPreviewOverrideKJ"]
     check("one preview patch", len(patches), 1)
     check("it decodes through the chosen tiny VAE", patches[0][1]["tiny_vae"], MODELS["preview"])
-    check("it animates rather than showing one frame", patches[0][1]["preview_frames"], 8)
+    # Asking for more frames than the latent can hold is what puts KJNodes on its
+    # full-clip decode path — see models.PREVIEW_FRAMES. A smaller number does not
+    # preview less of the clip, it previews the opening of it on a loop, so this
+    # is the difference between watching the video and watching its first moment.
+    check("it decodes the whole clip rather than the head of it",
+          patches[0][1]["preview_frames"], models_mod.PREVIEW_FRAMES)
+    check("it plays at the render's own rate", patches[0][1]["preview_fps"], models_mod.PREVIEW_FPS)
+    # The decision behind that number, rather than the number: the full-clip path
+    # only opens if the count clears the *latent's* length, which is roughly five
+    # rows per seventeen frames and not the frame count itself. The longest legal
+    # generation is what it has to clear. Written as the bound so that retuning
+    # either end shows up as a real failure rather than as a literal nobody
+    # remembered to change — which is exactly how this check came to be here.
+    from comfy_extras.nodes_minimax_h3 import video_latent_t
+
+    from Minimax_creator import canvas as canvas_mod
+    longest = video_latent_t(max(canvas_mod.legal_frame_counts()))
+    check("and asks for enough to cover the longest generation's latent",
+          models_mod.PREVIEW_FRAMES >= longest, True)
     # Read off the installed class rather than carried here, the way accel.py
     # reads its packs' defaults — a knob the pack retunes must not go stale.
+    # (1024 here is the fake pack's own default, and only coincidentally the same
+    # number as PREVIEW_FRAMES above.)
     check("the pack's own default survives for anything we do not set",
           patches[0][1]["max_resolution"], 1024)
     check("the sampler reads the patch",

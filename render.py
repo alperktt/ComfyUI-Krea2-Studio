@@ -45,7 +45,7 @@ from typing import Any, Optional
 from comfy_api.latest import io
 from comfy_execution.graph_utils import GraphBuilder
 
-from . import accel, canvas, compile as compiler, media, models
+from . import accel, canvas, compile as compiler, media, models, outputs
 
 SEGMENT_NODE = "MiniMaxH3TimelineSegment"
 LAST_FRAME_NODE = "MiniMaxH3LastFrame"
@@ -53,10 +53,11 @@ AUDIO_TAIL_NODE = "MiniMaxH3AudioTail"
 JOIN_NODE = "MiniMaxH3TimelineJoin"
 SAVE_NODE = "MiniMaxH3Save"
 
-# Where a render lands. Under a folder of its own, because the node writes one
-# every queue now and mixing them into the root of output/ would bury whatever
-# else is in there.
-FILENAME_PREFIX = "minimax/H3"
+# Where a render lands when the blob does not say. Under a folder of its own,
+# because the node writes one every queue now and mixing them into the root of
+# output/ would bury whatever else is in there. `outputs` owns the value and
+# what a typed one is allowed to be.
+FILENAME_PREFIX = outputs.VIDEO_PREFIX
 
 
 @dataclass(frozen=True)
@@ -127,13 +128,15 @@ def routed(compiled, labels):
 
 
 def emit(payloads, labels, weights, sampling, acceleration, unique_id,
-         tail_s=compiler.DEFAULT_AUDIO_TAIL_S):
+         tail_s=compiler.DEFAULT_AUDIO_TAIL_S, filename_prefix=FILENAME_PREFIX):
     """-> the graph, which the caller finalizes. Nothing comes back out of it.
 
     `labels[i]` names payload i in any error raised about it — "Segment 2", or
     "This generation" where there is only one of them. `unique_id` is the calling
     node's, and is stamped on the save node so the finished video is reported
-    against the node the user is looking at.
+    against the node the user is looking at. `filename_prefix` is where the
+    result lands under output/; the callers get it from `outputs.video`, which
+    has already refused anything unusable.
     """
     # All three of these raise, and all three are cheap: an accelerator whose
     # pack is not installed, a request that cannot compile, or weights that were
@@ -222,11 +225,11 @@ def emit(payloads, labels, weights, sampling, acceleration, unique_id,
                               images_b=images, audio_b=audio)
             joined = (pair.out(0), pair.out(1))
 
-    emit_tail(graph, joined[0], joined[1], unique_id)
+    emit_tail(graph, joined[0], joined[1], unique_id, filename_prefix)
     return graph
 
 
-def emit_tail(graph, images, audio, unique_id):
+def emit_tail(graph, images, audio, unique_id, filename_prefix=FILENAME_PREFIX):
     """Mux the frames and the sound into a file, and report it against `unique_id`.
 
     H3 generates picture and sound together and they should leave together, which
@@ -244,7 +247,7 @@ def emit_tail(graph, images, audio, unique_id):
     see the module docstring.
     """
     save = graph.node(SAVE_NODE, images=images, audio=audio,
-                      fps=float(canvas.FPS), filename_prefix=FILENAME_PREFIX)
+                      fps=float(canvas.FPS), filename_prefix=filename_prefix)
     save.set_override_display_id(unique_id)
     return save
 

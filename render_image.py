@@ -34,11 +34,14 @@ keeps both video checkpoints.
 
 from dataclasses import dataclass, field
 
+from . import outputs
 from .compile import CompileError
 from .compile_image import IDEOGRAM_CFG_LATE
 
 SAVE_NODE = "MiniMaxH3SaveImage"
-FILENAME_PREFIX = "minimax/prestage"
+# Where a still lands when the blob does not say — see `outputs`, which owns
+# both defaults and what a typed prefix is allowed to be.
+FILENAME_PREFIX = outputs.IMAGE_PREFIX
 
 # Which directory each pickable field browses — ComfyUI's own folder keys, and
 # the listing route hands the same map to the frontend.
@@ -157,7 +160,7 @@ def _require_arch(arch):
             )
 
 
-def emit(payload, weights, sampling, unique_id):
+def emit(payload, weights, sampling, unique_id, filename_prefix=FILENAME_PREFIX):
     """-> the graph, which the caller finalizes with `render.expanded`.
 
     `sampling` is a `render.Sampling` — the same widget names as the video
@@ -186,9 +189,10 @@ def emit(payload, weights, sampling, unique_id):
                            strength_model=entry["strength"]).out(0)
 
     if payload.arch == "krea2":
-        _emit_krea2(graph, payload, sampling, clip, vae, model, unique_id)
+        _emit_krea2(graph, payload, sampling, clip, vae, model, unique_id, filename_prefix)
     else:
-        _emit_ideogram4(graph, payload, sampling, weights, clip, vae, model, unique_id)
+        _emit_ideogram4(graph, payload, sampling, weights, clip, vae, model, unique_id,
+                        filename_prefix)
     return graph
 
 
@@ -211,7 +215,7 @@ def _latent(graph, payload, vae, empty_node):
     return encoded, payload.init["denoise"]
 
 
-def _emit_krea2(graph, payload, sampling, clip, vae, model, unique_id):
+def _emit_krea2(graph, payload, sampling, clip, vae, model, unique_id, filename_prefix):
     if payload.refs:
         # The Qwen-edit encoder reads up to three references: it feeds them to
         # the text encoder as vision tokens *and* VAE-encodes them into the
@@ -243,10 +247,11 @@ def _emit_krea2(graph, payload, sampling, clip, vae, model, unique_id):
         cfg=sampling.cfg, sampler_name=sampling.sampler_name,
         scheduler=sampling.scheduler, denoise=denoise,
     )
-    _emit_tail(graph, sampled.out(0), vae, unique_id)
+    _emit_tail(graph, sampled.out(0), vae, unique_id, filename_prefix)
 
 
-def _emit_ideogram4(graph, payload, sampling, weights, clip, vae, model, unique_id):
+def _emit_ideogram4(graph, payload, sampling, weights, clip, vae, model, unique_id,
+                    filename_prefix):
     positive = graph.node("CLIPTextEncode", clip=clip, text=payload.prompt).out(0)
     negative = graph.node("ConditioningZeroOut", conditioning=positive).out(0)
 
@@ -280,10 +285,10 @@ def _emit_ideogram4(graph, payload, sampling, weights, clip, vae, model, unique_
         sampler=graph.node("KSamplerSelect", sampler_name=sampling.sampler_name).out(0),
         sigmas=sigmas, latent_image=latent,
     )
-    _emit_tail(graph, sampled.out(0), vae, unique_id)
+    _emit_tail(graph, sampled.out(0), vae, unique_id, filename_prefix)
 
 
-def _emit_tail(graph, samples, vae, unique_id):
+def _emit_tail(graph, samples, vae, unique_id, filename_prefix):
     """Decode and save, reported against the node the user is looking at.
 
     The display-id stamp is the same mechanism `render.emit_tail` uses and
@@ -292,6 +297,6 @@ def _emit_tail(graph, samples, vae, unique_id):
     PreStage node so the stage card can show what it just made.
     """
     image = graph.node("VAEDecode", samples=samples, vae=vae).out(0)
-    save = graph.node(SAVE_NODE, images=image, filename_prefix=FILENAME_PREFIX)
+    save = graph.node(SAVE_NODE, images=image, filename_prefix=filename_prefix)
     save.set_override_display_id(unique_id)
     return save

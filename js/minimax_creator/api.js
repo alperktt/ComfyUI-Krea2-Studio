@@ -22,8 +22,13 @@ export function invalidate() {
   cache.clear();
 }
 
-/** Move one input file into another input subfolder — the picker's
- *  drag-onto-a-shelf. Resolves to the file's new path. */
+/** Move one file into another subfolder of the root it already lives in — the
+ *  picker's drag-onto-a-shelf. Resolves to the file's new path, annotated as it
+ *  came in, so a moved render is still addressable as a render.
+ *
+ *  Which root is not a parameter: `filename` carries its own ` [output]` when
+ *  it is a gallery path, and the server reads the root off that rather than
+ *  trusting a second field that could disagree with it. */
 export async function moveAsset(filename, subfolder) {
   const response = await api.fetchApi("/minimax_creator/move", {
     method: "POST",
@@ -36,7 +41,8 @@ export async function moveAsset(filename, subfolder) {
   return body.path;
 }
 
-/** Delete one input file — organize mode's other action. */
+/** Delete one file, from whichever of the two folders it names. Organize
+ *  mode's other action, and the only irreversible one in the picker. */
 export async function deleteAsset(filename) {
   const response = await api.fetchApi("/minimax_creator/delete", {
     method: "POST",
@@ -52,16 +58,25 @@ export async function deleteAsset(filename) {
 //
 // Favorites and hand-made shelves. Stored per ComfyUI user via the userdata
 // API, so they follow the user across browsers; localStorage is the fallback
-// for frontends without it. One object: {favorites: [path], folders: [name]}.
+// for frontends without it. One object: {favorites: [path], folders: [name],
+// renderFolders: [name]}.
+//
+// Two folder lists because the picker browses two folders — `folders` is the
+// input one and keeps its name so prefs written before the gallery could be
+// organized load unchanged. Favorites need no such split: a gallery path
+// carries its ` [output]` annotation, so the two roots cannot collide.
 
 const PREFS_FILE = "minimax_creator.picker.json";
 const PREFS_KEY = "mmc-picker-prefs";
 let prefsCache = null;
 
+const names = (value) => (Array.isArray(value) ? value.filter((p) => typeof p === "string") : []);
+
 function normalizePrefs(raw) {
   return {
-    favorites: Array.isArray(raw?.favorites) ? raw.favorites.filter((p) => typeof p === "string") : [],
-    folders: Array.isArray(raw?.folders) ? raw.folders.filter((p) => typeof p === "string") : [],
+    favorites: names(raw?.favorites),
+    folders: names(raw?.folders),
+    renderFolders: names(raw?.renderFolders),
   };
 }
 

@@ -27,7 +27,7 @@ import json
 
 from comfy_api.latest import io
 
-from . import compile_image, media, render, render_image
+from . import compile_image, media, outputs, render, render_image
 
 DEFAULT_DATA = json.dumps({
     "version": 1,
@@ -40,6 +40,9 @@ DEFAULT_DATA = json.dumps({
     "loras": [],
     "turbo": {"on": False, "quality": compile_image.DEFAULT_TURBO_QUALITY, "saved": None},
     "quality": compile_image.DEFAULT_IDEOGRAM_QUALITY,
+    # Where the still lands under output/. Its own default, so the gallery
+    # sorts stills apart from finished renders. See `outputs`.
+    "output_prefix": outputs.IMAGE_PREFIX,
     # Per-arch sub-blocks, so switching the model pill never forgets the other
     # side's files. Empty rather than guessed — the UI fills it from the
     # listing route, exactly as the Creator's block is filled.
@@ -133,7 +136,9 @@ class MiniMaxH3PreStage(io.ComfyNode):
             render_image.ImageWeights.from_blob(data),
             render.Sampling(seed=seed, steps=steps, cfg=cfg,
                             sampler_name=sampler_name, scheduler=scheduler),
-            cls.hidden.unique_id)
+            cls.hidden.unique_id,
+            # Refused before anything is sampled — see MiniMaxH3Creator.execute.
+            filename_prefix=outputs.image(data))
         return render.expanded(graph)
 
 

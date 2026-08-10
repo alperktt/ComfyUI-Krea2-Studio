@@ -17,7 +17,8 @@ import { openLoras } from "./loras.js";
 import { openTrim, trimLabel } from "./trim.js";
 import { PromptBox } from "./prompt.js";
 import { RefinePanel, refineButton, refine } from "./refine.js";
-import { openAspectPopover, openResolutionPopover, aspectGlyph, PILL_GLYPH } from "./pills.js";
+import { openAspectPopover, openResolutionPopover, openOutputPopover, aspectGlyph, PILL_GLYPH } from "./pills.js";
+import { VIDEO_PREFIX, folderOf } from "./outputs.js";
 import { samplingBar } from "./sampling.js";
 import { Stage } from "./stage.js";
 import { weightsPill, loadCatalog, catalogFiles } from "./models.js";
@@ -517,6 +518,16 @@ export class CreatorEditor {
         title: "Manage the LoRAs patched onto the routed checkpoint",
         onclick: () => this.manageLoras(),
       }, [el("span", { class: "mmc-tool-icon" }, [icon("effect")]), el("span", { text: "Add LoRA" })]),
+      // Also ungated, and here rather than only on the stage: the stage grows a
+      // Gallery chip when a render finishes, which is exactly the moment you do
+      // not need one — before the first render of a session there was no way
+      // into the output folder at all, and organizing what is already there is
+      // not something you should have to queue a render to reach.
+      el("button", {
+        class: "mmc-tool",
+        title: "Browse, organize and attach finished renders and pre-stage stills",
+        onclick: () => this.openGallery(),
+      }, [el("span", { class: "mmc-tool-icon" }, [icon("gallery")]), el("span", { text: "Gallery" })]),
       // Last in the rail because it is the step after everything else: the
       // rewrite is written against the references and the duration, so it wants
       // them settled first.
@@ -732,6 +743,23 @@ export class CreatorEditor {
       el("span", { class: "mmc-pill-sub", text: `${geometry.width} × ${geometry.height}` }),
     ]);
 
+    // Where the finished clip lands. The pill wears the *folder*, not the whole
+    // prefix: the folder is what you check at a glance ("is this going in the
+    // client's folder?"), and the filename stem is a detail of the popover.
+    const prefix = this.state.output_prefix || VIDEO_PREFIX;
+    const folder = folderOf(prefix);
+    const outputPill = el("button", {
+      class: "mmc-pill",
+      title: `Renders land in output/${folder ? `${folder}/` : ""} — click to change the folder, `
+           + "the filename, or add a date token.",
+      onclick: (event) => this.openOutput(event.currentTarget),
+    }, [
+      icon("folder", 16),
+      // The last folder only: a nested path would widen the pill past its
+      // neighbours, and the popover shows the whole thing anyway.
+      el("span", { text: folder ? folder.split("/").pop() : "output" }),
+    ]);
+
     return el("div", { class: "mmc-pills" }, [
       ...(this.continuePill ? [this.renderContinue()] : []),
       framePill("first_frame", "Start frame", "frameIn"),
@@ -739,7 +767,8 @@ export class CreatorEditor {
       duration,
       // In a timeline the canvas belongs to the timeline, not to one shot: the
       // segments are concatenated at the end and have to come out the same size.
-      ...(this.canvasPills ? [aspectPill, resPill] : []),
+      // The output folder is the timeline's for the same reason — one file.
+      ...(this.canvasPills ? [aspectPill, resPill, outputPill] : []),
       this.renderRouting(currentMode),
       ...(this.preStage ? [this.renderPreStagePill()] : []),
     ]);
@@ -886,5 +915,10 @@ export class CreatorEditor {
       const asset = S.frameAsset(this.state, "first_frame") || S.frameAsset(this.state, "last_frame");
       return S.resolved(this.state, asset ? this.sizes.get(asset.filename) : null);
     }, () => this.commit());
+  }
+
+  openOutput(anchor) {
+    openOutputPopover(anchor, this.state, () => this.commit(),
+                      { fallback: VIDEO_PREFIX, extension: "mp4" });
   }
 }
