@@ -1264,6 +1264,30 @@ export const stillCapacity = (state, kind) => capacity(stillAssets(state), kind)
 /** Why a still's references would not compile, or null. */
 export const stillOverflow = (state) => overflow(stillAssets(state));
 
+/** Why an attachment is refused on a still, in the video node's own words —
+ *  the rule is the video node's rule: frames run on FL2VA, references on
+ *  Ref2VA, and one generation runs on one checkpoint. */
+export function stillBlockedReason(state, action) {
+  if (action === "reference" && (state.init || state.end)) {
+    return "Remove the start/end frame first — references use the Ref2VA checkpoint, frames use FL2VA.";
+  }
+  if ((action === "first_frame" || action === "last_frame") && (state.refs ?? []).length) {
+    return "Remove the references first — start/end frames use the FL2VA checkpoint, references use Ref2VA.";
+  }
+  return null;
+}
+
+/** Which H3 mode a still compiles to, for the badge. The same derivation
+ *  `compile._derive_mode` makes, read off the pre-stage's own two keyframe
+ *  fields — a still is one of these requests, so it is one of these modes. */
+export function stillMode(state) {
+  if ((state.refs ?? []).length) return "REF2VA";
+  if (state.init && state.end) return "FL2VA";
+  if (state.init) return "I2VA";
+  if (state.end) return "L2VA";
+  return "T2VA";
+}
+
 /** Which H3 checkpoint a still routes to. Mirrors `compile_still._checkpoint`:
  *  references need Ref2VA, everything else runs on FL2VA, and an explicit pin
  *  wins where it is legal. */

@@ -263,11 +263,17 @@ export class PreStageEditor {
    *  is the one a shot builds. A clip brings its own trim and track through the
    *  picker's segment editor; both ride into the request untouched.
    */
-  async addStillRefs() {
+  async addStillRefs(kind = "image") {
+    const blocked = S.stillBlockedReason(this.state, "reference");
+    if (blocked) return this.flash(blocked);
     const chosen = await openPicker({
-      kinds: ["image", "video", "audio", "renders"],
-      kind: "image",
-      capacity: (kind) => S.stillCapacity(this.state, kind),
+      // Every tab is offered whichever button opened the picker — the button
+      // decides which one it lands on, the same way the Creator's do.
+      kinds: kind === "renders"
+        ? ["renders", "image", "video", "audio"]
+        : ["image", "video", "audio", "renders"],
+      kind,
+      capacity: (bucket) => S.stillCapacity(this.state, bucket),
     });
     if (!chosen) return;
     for (const asset of chosen) {
@@ -396,34 +402,59 @@ export class PreStageEditor {
       class: "mmc-tool", title, onclick,
     }, [el("span", { class: "mmc-tool-icon" }, [icon(iconName)]), el("span", { text: label })]);
 
-    const still = S.isStill(this.state);
+    // On H3 the rail is the Creator's rail, because the references are the
+    // Creator's references: one button per kind, gated together when a keyframe
+    // is attached, plus the gallery. The keyframes themselves move to pills at
+    // the bottom, exactly as they are on a Creator — a still is set up the way
+    // a shot is or it is a second thing to learn.
+    if (S.isStill(this.state)) return this.renderStillRail(tool);
+
     return el("div", { class: "mmc-rail" }, [
-      tool(still ? "Start frame" : "Init image", "frameIn",
-           still
-             ? "Open on this image — H3's keyframe conditioning, the same one a video render "
-             + "uses. There is no strength: a keyframe is pinned, not partly denoised."
-             : "Start from an image instead of noise — img2img. The strength pill says how much of it survives.",
+      tool("Init image", "frameIn",
+           "Start from an image instead of noise — img2img. The strength pill says how much of it survives.",
            () => this.setInit(false)),
-      tool(still ? "References" : "Style refs", "image",
+      tool("Style refs", "image",
            this.state.arch === "ideogram4"
              ? "Ideogram 4.0 has no local reference conditioning — style references are a Krea 2 feature."
-             : still
-               ? "H3's whole reference pipeline, on a still: nine images, three clips, three "
-               + "sounds. Cited in the prompt as @img-1 / @vid-1 / @aud-1, exactly as in a "
-               + "shot. Runs on Ref2VA."
-               : "Up to three images whose look this render should carry. Encoded through the Qwen edit "
-               + "path Krea 2 was post-trained against; the krea2_style_reference LoRA strengthens it.",
+             : "Up to three images whose look this render should carry. Encoded through the Qwen edit "
+             + "path Krea 2 was post-trained against; the krea2_style_reference LoRA strengthens it.",
            () => this.addRefs(false)),
-      ...(still ? [tool("End frame", "frameOut",
-           "Close on this image — the other half of H3's keyframe pair. The sampled clip ends "
-         + "here, so the frame you keep is the one leading into it.",
-           () => this.setEnd())] : []),
       tool("From video", "video",
            "Pull a single frame off a video's playhead — as the init image, saved as a PNG in the input folder.",
            () => this.setInit(true)),
       tool("Add LoRA", "effect",
            "Manage the LoRAs patched onto the image model. Krea LoRAs train on RAW and apply on Turbo too.",
            () => this.manageLoras()),
+    ]);
+  }
+
+  renderStillRail(tool) {
+    const blocked = S.stillBlockedReason(this.state, "reference");
+    const kindTool = (kind, label, iconName) => el("button", {
+      class: "mmc-tool",
+      disabled: blocked || undefined,
+      title: blocked || `Attach a reference ${kind} — cited in the prompt as @${
+        { image: "img", video: "vid", audio: "aud" }[kind]}-1, exactly as in a shot`,
+      onclick: () => this.addStillRefs(kind),
+    }, [el("span", { class: "mmc-tool-icon" }, [icon(iconName)]), el("span", { text: label })]);
+
+    return el("div", { class: "mmc-rail" }, [
+      kindTool("image", "Add image", "image"),
+      kindTool("video", "Add video", "video"),
+      kindTool("audio", "Add audio", "audio"),
+      // Ungated, like the Creator's: a LoRA sits on the checkpoint rather than
+      // in a reference slot, so it is the one thing frames and references share.
+      tool("Add LoRA", "effect",
+           "Manage the LoRAs patched onto the routed H3 checkpoint.",
+           () => this.manageLoras()),
+      tool("Gallery", "gallery",
+           "Browse, organize and attach finished renders and pre-stage stills.",
+           () => this.addStillRefs("renders")),
+      // Not on the Creator's rail, because the Creator has this node. Here it
+      // is the only way to turn a moment of a clip into a keyframe.
+      tool("From video", "video",
+           "Pull a single frame off a video's playhead and open on it — saved as a PNG in the input folder.",
+           () => this.setInit(true)),
     ]);
   }
 
@@ -615,7 +646,11 @@ export class PreStageEditor {
         { fallback: IMAGE_PREFIX, extension: "png" }),
     }, [icon("folder", 16), el("span", { text: outFolder ? outFolder.split("/").pop() : "output" })]);
 
-    const pills = [archPill, aspectPill, resPill, outputPill];
+    // The Creator's order — what is attached, then how big, then how long, then
+    // where it lands — because a still is set up the way a shot is.
+    const pills = S.isStill(state)
+      ? [archPill, ...this.renderStillFramePills(), aspectPill, resPill, outputPill]
+      : [archPill, aspectPill, resPill, outputPill];
 
     if (state.arch === "ideogram4") {
       // Ideogram's speed axis. The preset owns the schedule shape as well as
@@ -660,6 +695,29 @@ export class PreStageEditor {
    * starts at 124 frames, so the cheap end of this pill is deliberately off
    * distribution and the dev sweep exists to find out how far down it holds up.
    */
+  /** The keyframe pair, in the Creator's own idiom: a pill each, disabled with
+   *  the reason when references have taken the generation to Ref2VA. The chip
+   *  above the prompt is what removes one, exactly as on a Creator. */
+  renderStillFramePills() {
+    const pill = (role, field, label, iconName, setter) => {
+      const blocked = S.stillBlockedReason(this.state, role);
+      const attached = this.state[field];
+      return el("button", {
+        class: "mmc-pill",
+        disabled: blocked ? true : undefined,
+        title: blocked || (attached
+          ? `${label}: ${attached.filename}. Click to replace it; the chip above removes it.`
+          : `Choose the ${label.toLowerCase()}`),
+        onclick: blocked ? undefined : setter,
+      }, [icon(iconName, 16), el("span", { text: attached ? label.toLowerCase() : label })]);
+    };
+
+    return [
+      pill("first_frame", "init", "Start frame", "frameIn", () => this.setInit(false)),
+      pill("last_frame", "end", "End frame", "frameOut", () => this.setEnd()),
+    ];
+  }
+
   renderStillPills() {
     const still = this.state.minimax;
     const latents = S.stillLatentFrames(still.frames);
@@ -696,15 +754,20 @@ export class PreStageEditor {
       onChange: (next) => { still.latent_index = Math.round(next); this.commit(); },
     }));
 
-    if (this.state.refs.length || this.state.init) {
-      pills.push(el("span", {
-        class: "mmc-pill mmc-pill-static",
-        title: "Which H3 checkpoint this still routes to — references need Ref2VA, a start "
-             + "frame or a bare prompt runs on FL2VA. The same routing a video render does.",
-      }, [icon("model", 16), el("span", { text: S.stillCheckpoint(this.state) })]));
-    }
-
     pills.push(this.renderDevPill());   // DEV
+
+    // The Creator's routing badge, read-only: what this compiles to and which
+    // checkpoint it will load. Same derivation, same words, same place on the
+    // row — the routing is not different here, so it should not look different.
+    const badge = el("span", {
+      class: "mmc-mode",
+      title: "What this still compiles to, and the checkpoint it loads. References are encoded "
+           + "for Ref2VA; keyframes and bare prompts run on FL2VA. The same routing a video "
+           + "render does, because this is one.",
+    });
+    badge.appendChild(el("b", { text: S.stillMode(this.state) }));
+    badge.appendChild(document.createTextNode(` → ${S.CHECKPOINT_LABEL[S.stillCheckpoint(this.state)]}`));
+    pills.push(badge);
     return pills;
   }
 
