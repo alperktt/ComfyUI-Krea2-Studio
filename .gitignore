@@ -7,6 +7,9 @@ __pycache__/
 # Local Claude Code permissions, not shared config
 .claude/settings.local.json
 
+# Screen recordings the README GIFs are cut from — big, and the GIF is what ships
+docs/vid/
+
 # Editors / OS
 .DS_Store
 .idea/
