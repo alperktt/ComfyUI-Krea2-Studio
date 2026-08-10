@@ -287,15 +287,19 @@ def available():
     }
 
 
-def check(weights, checkpoints, where):
+def check(weights, checkpoints, where, audio=True):
     """Refuse now if a file this render needs was never picked.
 
     `checkpoints` is the set the compiled payloads actually route to, so a
     text-only render never asks for the reference weights. `where[checkpoint]`
     names the first generation that reached for one, the same way
     `render.compile_all` labels a segment.
+
+    `audio=False` is the PreStage's still branch, which decodes picture only —
+    asking it for an audio VAE would be demanding a file the render will never
+    open.
     """
-    needed = ["clip", "vae", "audio_vae", *sorted(checkpoints)]
+    needed = ["clip", "vae", *(["audio_vae"] if audio else []), *sorted(checkpoints)]
     for name in needed:
         if weights.get(name):
             continue
@@ -309,7 +313,7 @@ def check(weights, checkpoints, where):
         )
 
 
-def emit_links(graph, weights, checkpoints):
+def emit_links(graph, weights, checkpoints, audio=True):
     """Build the loaders inside `graph` and return them as a `render.Links`.
 
     One `UNETLoader` per checkpoint this render reaches for and no more, which is
@@ -319,6 +323,10 @@ def emit_links(graph, weights, checkpoints):
     Each loader is emitted on the device its field was pinned to, which on a
     two-card machine is the difference between the text encoder sharing VRAM with
     the DiT and not. Nothing pinned is the core loader unchanged.
+
+    `audio=False` leaves the audio VAE unbuilt, for the same reason `check`
+    takes the flag: a still decodes no sound, and a loader in the graph is a
+    file loaded whether or not anything reads it.
     """
     from .render import Links
 
@@ -334,7 +342,7 @@ def emit_links(graph, weights, checkpoints):
     return Links(
         clip=loader("clip", "CLIPLoader", clip_name=weights.clip, type=CLIP_TYPE),
         vae=loader("vae", "VAELoader", vae_name=weights.vae),
-        audio_vae=loader("audio_vae", "VAELoader", vae_name=weights.audio_vae),
+        audio_vae=loader("audio_vae", "VAELoader", vae_name=weights.audio_vae) if audio else None,
         model_fl2va=models.get("fl2va"),
         model_ref2va=models.get("ref2va"),
     )

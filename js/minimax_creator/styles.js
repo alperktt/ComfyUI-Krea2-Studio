@@ -1077,6 +1077,14 @@ button.mmc-mode:hover { background: var(--mmc-surface-2); border-color: var(--mm
    without reading the pill. */
 .mmc-pill.accel-on { border-color: rgba(110,190,255,.45); color: #6ebeff; }
 .mmc-pill.accel-on:hover:not(:disabled) { border-color: rgba(110,190,255,.7); }
+/* An architecture that is not settled yet. Dashed rather than coloured: this
+   says "the output may not be good", which is a different statement from the
+   accelerator blue's "this render is not native". */
+.mmc-pill.mmc-experimental { border-style: dashed; border-color: rgba(255,196,110,.5); }
+.mmc-pill.mmc-experimental:hover:not(:disabled) { border-color: rgba(255,196,110,.8); }
+/* A sweep choice inside the dev popover: the same on/off reading as the turbo
+   stops, on ordinary pills because the lists are of no fixed length. */
+.mmc-pill[aria-pressed="true"] { border-color: rgba(110,190,255,.45); color: #6ebeff; }
 /* The turbo switch: the seed pill's shape — one pill, a big half that throws
    it and a small half that picks what it throws. Both inherit the group's
    colour so the accelerator blue lights the whole pill, chevron included. */

@@ -88,6 +88,38 @@ for you. Everything else in this package exists to support that one gesture.
   Timeline; stills land back as start/end frames or references through chips on
   its result card. Same body architecture, same picker, same LoRA manager.
 
+- [ ] **7 — H3 stills (experimental, on a branch).** `compile_still.py`,
+  `render_still.py`, `MiniMaxH3StillLatent`, a third arch on the pre-stage's
+  model pill. A still made by the *video* model: the pre-stage compiles a
+  request in exactly the Creator's shape, emits the same
+  `MiniMaxH3TimelineSegment` → `KSampler` line, then takes one temporal slice of
+  the sampled latent and decodes it with the experimental single-image H3 VAE
+  (`minimax_h3_t1_image_vae_*`, a merged checkpoint that loads through the
+  ordinary `VAELoader`).
+
+  Why it earns a branch: no second model family is loaded, the still lands on
+  the exact canvas the shot will render at, and everything a shot can attach a
+  still can attach — nine reference images, three clips, three sounds, a start
+  frame, an end frame, LoRAs, the taeh3 preview. The only pre-stage control it
+  does not use is the img2img denoise, because H3's image conditioning is a
+  pinned keyframe rather than a partly-denoised latent.
+
+  Why it is a *slice*: the H3 VAE is causal on the 17k+5 ↔ 5k+2 grid, so latent
+  frame 0 is a function of pixel frame 0 alone, and that is exactly the tensor
+  encoding a single image produces — the one the T=1 decoder was fitted to.
+  Core already handles the round trip (`comfy/sd.py` returns 1 latent frame for
+  1 image and special-cases `frames == 1` in the memory estimate).
+
+  **What is not known yet.** The DiT's trained range is 124–362 frames, so
+  sampling 5 is far off distribution temporally even though the latent is in
+  distribution spatially. Three open questions — how short the clip can be, which
+  latent frame reads best, and whether the image decoder beats the stock H3 VAE
+  on that frame — are what the `dev` block in `compile_still.py` exists to
+  answer: it widens one queue into a sweep over lengths × latent indices × VAE
+  files, sharing the seed so the passes are comparable and naming each file with
+  its coordinate. Every line of it is marked `DEV` and comes out, with the sweep
+  pill, once the numbers are in.
+
 ## Known rough edges in a chained timeline
 
 Diagnosed, not yet fixed, and worth knowing before blaming the prompt. All four

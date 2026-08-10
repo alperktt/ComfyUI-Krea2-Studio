@@ -54,6 +54,7 @@ except Exception as exc:  # noqa: BLE001
 
 ps = importlib.import_module(f"{PACKAGE}.prestage")
 ci = importlib.import_module(f"{PACKAGE}.compile_image")
+cs = importlib.import_module(f"{PACKAGE}.compile_still")
 outputs = importlib.import_module(f"{PACKAGE}.outputs")
 
 FAILURES = []
@@ -396,6 +397,157 @@ check("turbo does not require the RAW file",
                models={**MODELS, "krea2": {k: v for k, v in MODELS["krea2"].items()
                                            if k != "model"}}),
           steps=8, cfg=1.0).expand), True)
+
+# ---- MiniMax H3: a still from the video model ---------------------------------
+#
+# The branch that is not an image model. What matters here is that it is the
+# *video* path: the video segment node, the video checkpoints, the video canvas
+# — with one latent frame taken out of the sampled clip and decoded.
+
+H3_MODELS = {
+    "fl2va": "minimax_h3_fl2va_fp8.safetensors",
+    "ref2va": "minimax_h3_ref2va_fp8.safetensors",
+    "clip": "minimax_qwen3vl_32b.safetensors",
+    "vae": "minimax_h3_t1_image_vae_step1597.safetensors",
+    "audio_vae": "minimax_h3_audio_vae.safetensors",
+}
+
+
+def still_blob(**overrides):
+    data = {"version": 1, "arch": "minimax", "prompt": "a red room",
+            "aspect": "16:9", "short_edge": 768,
+            "models": {"minimax": dict(H3_MODELS)}}
+    data.update(overrides)
+    return json.dumps(data)
+
+
+def still(data=None, **overrides):
+    kwargs = dict(seed=7, steps=20, cfg=1.0, sampler_name="res_multistep", scheduler="simple")
+    kwargs.update(overrides)
+    return build(data if data is not None else still_blob(), **kwargs)
+
+
+h3_graph = still().expand
+h3 = by_class(h3_graph)
+
+check("it samples once", len(h3["KSampler"]), 1)
+check("through the video segment node", len(h3["MiniMaxH3TimelineSegment"]), 1)
+check("and keeps one latent frame", len(h3["MiniMaxH3StillLatent"]), 1)
+check("decoded once, saved once",
+      (len(h3["VAEDecode"]), len(h3["MiniMaxH3SaveImage"])), (1, 1))
+check("the first latent frame by default", h3["MiniMaxH3StillLatent"][0][1]["index"], 0)
+check("the still is what gets decoded",
+      h3_graph[h3["VAEDecode"][0][1]["samples"][0]]["class_type"], "MiniMaxH3StillLatent")
+check("no audio is decoded", "VAEDecodeAudio" in h3, False)
+check("and no video is written", "MiniMaxH3Save" in h3, False)
+
+# Only the routed checkpoint is loaded, exactly as on a video render — and the
+# audio VAE is not loaded at all, because nothing here cites sound.
+check("a bare prompt loads FL2VA and nothing else",
+      [i["unet_name"] for _, i in h3["UNETLoader"]], [H3_MODELS["fl2va"]])
+check("one VAE, the single-image one",
+      [i["vae_name"] for _, i in h3["VAELoader"]], [H3_MODELS["vae"]])
+check("the text encoder is loaded as H3's",
+      (h3["CLIPLoader"][0][1]["clip_name"], h3["CLIPLoader"][0][1]["type"]),
+      (H3_MODELS["clip"], "minimax"))
+check("the segment node gets no audio VAE",
+      "audio_vae" in h3["MiniMaxH3TimelineSegment"][0][1], False)
+
+sampler = h3["KSampler"][0][1]
+check("the sampler settings arrive verbatim",
+      (sampler["seed"], sampler["steps"], sampler["cfg"], sampler["sampler_name"],
+       sampler["denoise"]),
+      (7, 20, 1.0, "res_multistep", 1.0))
+
+# The shortest legal clip, and the canvas a video render would use.
+payload = json.loads(h3["MiniMaxH3TimelineSegment"][0][1]["segment_data"])
+check("it samples the shortest legal clip",
+      cs.latent_frames(round(payload["request"]["duration_s"] * 24)), 2)
+check("on H3's own canvas",
+      (payload["request"]["short_edge"], payload["request"]["aspect"]), (768, "16:9"))
+check("it lands in the pre-stage folder",
+      h3["MiniMaxH3SaveImage"][0][1]["filename_prefix"], outputs.IMAGE_PREFIX)
+
+# References route to Ref2VA and are the video node's own — including a clip
+# taken with its soundtrack, which is the one thing that loads the audio VAE.
+refs = by_class(still(still_blob(refs=[
+    {"handle": "img-1", "kind": "image", "filename": "face.png"},
+    {"handle": "vid-1", "kind": "video", "filename": "clip.mp4", "track": "picture+sound"},
+])).expand)
+check("references route to Ref2VA",
+      [i["unet_name"] for _, i in refs["UNETLoader"]], [H3_MODELS["ref2va"]])
+check("a cited soundtrack loads the audio VAE",
+      sorted(i["vae_name"] for _, i in refs["VAELoader"]),
+      sorted([H3_MODELS["vae"], H3_MODELS["audio_vae"]]))
+check("and hands it to the segment node",
+      "audio_vae" in refs["MiniMaxH3TimelineSegment"][0][1], True)
+
+silent = by_class(still(still_blob(refs=[
+    {"handle": "vid-1", "kind": "video", "filename": "clip.mp4"},
+])).expand)
+check("a clip cited for its picture alone loads no audio VAE",
+      [i["vae_name"] for _, i in silent["VAELoader"]], [H3_MODELS["vae"]])
+
+# Keyframes are the video node's too: a start frame and an end frame, with the
+# canvas adapting to the start frame exactly as a shot's does. The size lookup
+# is stubbed because these two files are not on this machine — it is the only
+# thing on this path that touches the disk.
+media = importlib.import_module(f"{PACKAGE}.media")
+real_image_size = media.image_size
+media.image_size = lambda filename: (1920, 1080)
+try:
+    frames = by_class(still(still_blob(init={"filename": "open.png"},
+                                       end={"filename": "close.png"})).expand)
+finally:
+    media.image_size = real_image_size
+frames_payload = json.loads(frames["MiniMaxH3TimelineSegment"][0][1]["segment_data"])
+check("both keyframes reach the request",
+      sorted((a["role"], a["filename"]) for a in frames_payload["request"]["assets"]),
+      [("first_frame", "open.png"), ("last_frame", "close.png")])
+
+# The preview is the video node's, patched on the model the segment hands out.
+preview = by_class(still(still_blob(
+    models={"minimax": {**H3_MODELS, "preview": "taeh3.safetensors"}})).expand)
+check("taeh3 previews the still",
+      "ModelPreviewOverrideKJ" in preview or comfy_nodes.NODE_CLASS_MAPPINGS.get(
+          "ModelPreviewOverrideKJ") is None, True)
+
+# ---- the dev sweep -----------------------------------------------------------
+#
+# DEV: one queue, every combination, each file named with its coordinate. Comes
+# out with `compile_still`'s DEV block.
+
+sweep = by_class(still(still_blob(minimax={
+    "frames": 5, "latent_index": 0,
+    "dev": {"lengths": [5, 22], "indices": [0, -1], "vaes": ["stock_h3_vae.safetensors"]},
+})).expand)
+check("one sampler pass per length", len(sweep["KSampler"]), 2)
+check("one picture per combination",
+      (len(sweep["MiniMaxH3StillLatent"]), len(sweep["MiniMaxH3SaveImage"])), (4, 4))
+check("the swept decoder is loaded once, alongside the picked one",
+      sorted(i["vae_name"] for _, i in sweep["VAELoader"]),
+      sorted([H3_MODELS["vae"], "stock_h3_vae.safetensors"]))
+check("every file carries its coordinate",
+      sorted(i["filename_prefix"].rsplit("/", 1)[-1] for _, i in sweep["MiniMaxH3SaveImage"]),
+      sorted([f"prestage_L{length}_i{index}_stock_h3_vae"
+              for length in (5, 22) for index in (0, -1)]))
+check("both passes share a seed, so the lengths are comparable",
+      len({i["seed"] for _, i in sweep["KSampler"]}), 1)
+
+# ---- refusals ----------------------------------------------------------------
+
+expect_error("a latent frame the clip does not have is refused",
+             lambda: still(still_blob(minimax={"frames": 5, "latent_index": 4})),
+             "2 latent frames")
+expect_error("a still with no VAE is refused, naming the folder",
+             lambda: still(still_blob(
+                 models={"minimax": {k: v for k, v in H3_MODELS.items() if k != "vae"}})),
+             "models/vae")
+expect_error("keyframes and references together are refused",
+             lambda: still(still_blob(init={"filename": "open.png"},
+                                      refs=[{"handle": "img-1", "kind": "image",
+                                             "filename": "face.png"}])),
+             "cannot be combined")
 
 if FAILURES:
     print(f"{len(FAILURES)} failure(s):")

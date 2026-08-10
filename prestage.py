@@ -2,9 +2,17 @@
 
 The Creator consumes images — a start frame, an end frame, references, style
 sheets — and until this node existed it had no way to make one. The PreStage
-generates them locally with either Krea 2 or Ideogram 4.0 (both open weights,
-both native in core) and saves them where the picker already looks, so a
-finished still is one chip away from being the next render's keyframe.
+generates them locally with Krea 2, Ideogram 4.0 (both open weights, both native
+in core) or MiniMax H3 itself, and saves them where the picker already looks, so
+a finished still is one chip away from being the next render's keyframe.
+
+The third of those is a different animal and lives in `compile_still.py` /
+`render_still.py`: H3 is a video model, so a still from it is a video generation
+whose first latent frame is decoded as a picture, through an experimental T=1
+image VAE. It reuses the video pipeline outright — the same segment node, the
+same checkpoints, the same canvas — which is the point of having it: no second
+model family loaded, and a keyframe made by the weights that will render the
+shot it opens.
 
 It is built exactly like the Creator, because it is driven exactly like the
 Creator: zero sockets, one JSON blob the UI owns, weights named by filename,
@@ -27,7 +35,8 @@ import json
 
 from comfy_api.latest import io
 
-from . import compile_image, media, outputs, render, render_image
+from . import (compile_image, compile_still, media, outputs, render,
+               render_image, render_still)
 
 DEFAULT_DATA = json.dumps({
     "version": 1,
@@ -36,6 +45,8 @@ DEFAULT_DATA = json.dumps({
     "aspect": compile_image.DEFAULT_ASPECT,
     "short_edge": compile_image.DEFAULT_SHORT_EDGE,
     "init": None,
+    # The end frame, H3 only — the image the sampled clip closes on.
+    "end": None,
     "refs": [],
     "loras": [],
     "turbo": {"on": False, "quality": compile_image.DEFAULT_TURBO_QUALITY, "saved": None},
@@ -43,10 +54,19 @@ DEFAULT_DATA = json.dumps({
     # Where the still lands under output/. Its own default, so the gallery
     # sorts stills apart from finished renders. See `outputs`.
     "output_prefix": outputs.IMAGE_PREFIX,
+    # The H3 branch's own settings: how long the clip it samples is, which of
+    # that clip's latent frames becomes the picture, and which checkpoint it
+    # routes to. See `compile_still`.
+    "minimax": {
+        "frames": compile_still.DEFAULT_FRAMES,
+        "latent_index": compile_still.DEFAULT_LATENT_INDEX,
+        "prompt_mode": compile_still.DEFAULT_PROMPT_MODE,
+        "checkpoint": "auto",
+    },
     # Per-arch sub-blocks, so switching the model pill never forgets the other
     # side's files. Empty rather than guessed — the UI fills it from the
     # listing route, exactly as the Creator's block is filled.
-    "models": {"krea2": {}, "ideogram4": {}},
+    "models": {"krea2": {}, "ideogram4": {}, "minimax": {}},
     # A hint for the frontend's peer discovery, never authoritative: node ids
     # renumber on paste, so the pill re-derives the relationship by scan.
     "peer": None,
@@ -63,9 +83,9 @@ class MiniMaxH3PreStage(io.ComfyNode):
             display_name="MiniMax H3 PreStage",
             category="MiniMax",
             description=(
-                "Generate a still with Krea 2 or Ideogram 4.0 for the video "
-                "pipeline — a start or end frame, a reference, a style sheet. "
-                "Spawned from the pre-stage pill on a Creator or Timeline."
+                "Generate a still with Krea 2, Ideogram 4.0 or MiniMax H3 for "
+                "the video pipeline — a start or end frame, a reference, a style "
+                "sheet. Spawned from the pre-stage pill on a Creator or Timeline."
             ),
             enable_expand=True,
             is_output_node=True,
@@ -102,9 +122,10 @@ class MiniMaxH3PreStage(io.ComfyNode):
             data = json.loads(prestage_data)
             names = [ref.get("filename") if isinstance(ref, dict) else ref
                      for ref in data.get("refs") or []]
-            init = data.get("init")
-            if isinstance(init, dict):
-                names.append(init.get("filename"))
+            for keyframe in ("init", "end"):
+                entry = data.get(keyframe)
+                if isinstance(entry, dict):
+                    names.append(entry.get("filename"))
             for name in names:
                 try:
                     stamps.append(os.path.getmtime(media.resolve(name or "")))
@@ -125,6 +146,24 @@ class MiniMaxH3PreStage(io.ComfyNode):
             data = json.loads(prestage_data)
         except json.JSONDecodeError as exc:
             raise ValueError(f"prestage_data is not valid JSON: {exc}") from exc
+
+        # The H3 branch is a video render that keeps one latent frame, so it
+        # compiles and emits through the video path rather than through the
+        # image models' — see `compile_still`. Same widgets, same blob, same
+        # save node; everything between them is the other pipeline.
+        if data.get("arch") == compile_still.ARCH:
+            try:
+                plan = compile_still.compile_still(data)
+            except compile_image.CompileError as exc:
+                raise ValueError(str(exc)) from exc
+            graph = render_still.emit(
+                plan,
+                render_still.weights_from_blob(data),
+                render.Sampling(seed=seed, steps=steps, cfg=cfg,
+                                sampler_name=sampler_name, scheduler=scheduler),
+                cls.hidden.unique_id,
+                filename_prefix=outputs.image(data))
+            return render.expanded(graph)
 
         try:
             payload = compile_image.compile_prestage(data, media.image_size)
@@ -207,4 +246,60 @@ class MiniMaxH3SaveImage(io.ComfyNode):
         return io.NodeOutput(ui={"mmc_image": results})
 
 
-NODES = [MiniMaxH3PreStage, MiniMaxH3SaveImage]
+class MiniMaxH3StillLatent(io.ComfyNode):
+    """One temporal slice of a sampled H3 latent, as an ordinary image latent.
+
+    H3 samples a NestedTensor pair — video `[B,24,T,H/16,W/16]` and audio — and
+    this takes the video half's frame `index` and hands it on as a plain latent
+    of length 1. That is the tensor the experimental T=1 image VAE was fitted
+    to: the H3 VAE is causal on the 17k+5 <-> 5k+2 grid, so latent frame 0 is a
+    function of pixel frame 0 alone and is exactly what encoding a single image
+    produces (core's own `downscale_ratio` returns 1 latent frame for 1 image).
+
+    Negative indexes from the end, so -1 is the clip's last latent frame. The
+    audio half is dropped here rather than never generated: the DiT samples the
+    pair together, and a still simply does not read one of them.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiniMaxH3StillLatent",
+            display_name="MiniMax H3 Still Latent",
+            category="MiniMax/internal",
+            description="Takes one temporal frame of a sampled H3 latent as a single-image latent.",
+            is_dev_only=True,
+            inputs=[
+                io.Latent.Input("samples"),
+                io.Int.Input("index", default=0, min=-4096, max=4096,
+                             tooltip="Which latent frame becomes the picture. 0 is the causal first frame — the slice the image VAE was trained on. Negative counts from the end."),
+            ],
+            outputs=[io.Latent.Output()],
+        )
+
+    @classmethod
+    def execute(cls, samples, index) -> io.NodeOutput:
+        latent = samples["samples"]
+        # The pair arrives nested from the sampler and un-nested from anything
+        # that has already taken it apart; both are worth accepting, because
+        # this node is also the obvious place to point a hand-built graph.
+        video = latent.unbind()[0] if getattr(latent, "is_nested", False) else latent
+        if video.ndim != 5:
+            raise ValueError(
+                f"This is not a video latent — it has {video.ndim} dimensions, and "
+                f"an H3 latent has five [B, 24, T, H/16, W/16]."
+            )
+
+        total = video.shape[2]
+        resolved = index if index >= 0 else total + index
+        if not 0 <= resolved < total:
+            raise ValueError(
+                f"Latent frame {index} does not exist: this clip packs into "
+                f"{total} latent frames (0..{total - 1})."
+            )
+        # Contiguous rather than a view, so nothing downstream holds the whole
+        # sampled clip alive to read one frame of it.
+        return io.NodeOutput({"samples": video[:, :, resolved:resolved + 1].contiguous()})
+
+
+NODES = [MiniMaxH3PreStage, MiniMaxH3SaveImage, MiniMaxH3StillLatent]

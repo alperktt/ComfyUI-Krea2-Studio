@@ -223,7 +223,12 @@ class MiniMaxH3TimelineSegment(io.ComfyNode):
             inputs=[
                 io.Clip.Input("clip"),
                 io.Vae.Input("vae"),
-                io.Vae.Input("audio_vae"),
+                # Optional because the PreStage's still branch emits this node
+                # without one: a still decodes picture only, and nothing on the
+                # encode path touches the audio VAE unless the request carries
+                # reference audio or a sound seam. Both of those raise below if
+                # it is missing rather than reaching a None.
+                io.Vae.Input("audio_vae", optional=True),
                 io.String.Input("segment_data", multiline=True),
                 io.Model.Input("model_fl2va", optional=True),
                 io.Model.Input("model_ref2va", optional=True),
@@ -248,11 +253,22 @@ class MiniMaxH3TimelineSegment(io.ComfyNode):
             return (segment_data, ())
 
     @classmethod
-    def execute(cls, clip, vae, audio_vae, segment_data,
+    def execute(cls, clip, vae, segment_data, audio_vae=None,
                 model_fl2va=None, model_ref2va=None,
                 prev_image=None, prev_audio=None) -> io.NodeOutput:
         payload = _parse(segment_data)
         compiled = compiler.compile_segment(payload, image_size_lookup=media.image_size)
+
+        # Everything that would reach for the audio VAE, named before any of it
+        # runs. A video render always wires one; the still branch never does,
+        # and a hand-built graph should hear which input is missing rather than
+        # meet a None inside the encoder.
+        if audio_vae is None and (compiled.continues_audio or compiled.ref_audios):
+            raise ValueError(
+                "This generation carries sound — reference audio, or a seam "
+                "continuing the previous segment's — so it needs the audio VAE "
+                "on 'audio_vae'."
+            )
 
         # `prompt_override` replaces the composed prompt verbatim, after
         # compiling — routing, canvas and references are all still worked out

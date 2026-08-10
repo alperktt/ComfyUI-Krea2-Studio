@@ -29,12 +29,14 @@ if shutil.which("node") is None:
 package = types.ModuleType("mmcpkg")
 package.__path__ = [ROOT]
 sys.modules["mmcpkg"] = package
-for name in ("compile", "compile_image"):
+for name in ("canvas", "contextir", "compile", "compile_image", "compile_still"):
     spec = importlib.util.spec_from_file_location(f"mmcpkg.{name}", os.path.join(ROOT, f"{name}.py"))
     module = importlib.util.module_from_spec(spec)
     sys.modules[f"mmcpkg.{name}"] = module
     spec.loader.exec_module(module)
 ci = sys.modules["mmcpkg.compile_image"]
+cs = sys.modules["mmcpkg.compile_still"]
+cv = sys.modules["mmcpkg.canvas"]
 
 SCRIPT = """
 const s = await import(process.argv[1]);
@@ -55,6 +57,21 @@ for (const [label] of s.PRESTAGE_ASPECTS) {
 }
 for (const quality of s.PRESTAGE_IDEOGRAM_QUALITIES) {
   out.ideogram[quality] = s.PRESTAGE_IDEOGRAM_STEPS[quality];
+}
+out.still = {
+  lengths: [...s.PRESTAGE_STILL_LENGTHS],
+  frames: s.PRESTAGE_STILL_FRAMES,
+  index: s.PRESTAGE_STILL_INDEX,
+  prompt_modes: [...s.PRESTAGE_PROMPT_MODES],
+  latents: {},
+  canvases: {},
+};
+for (const n of s.PRESTAGE_STILL_LENGTHS) out.still.latents[n] = s.stillLatentFrames(n);
+for (const [label] of s.prestageAspects({ arch: "minimax" })) {
+  for (const edge of [384, 512, 768, 896]) {
+    const g = s.resolvedPreStage({ arch: "minimax", aspect: label, short_edge: edge, init: null, refs: [] });
+    out.still.canvases[label + "@" + edge] = [g.width, g.height];
+  }
 }
 console.log(JSON.stringify(out));
 """
@@ -88,7 +105,21 @@ PY_CONSTANTS = {
 for name, value in mirror["constants"].items():
     check(name, value, PY_CONSTANTS[name])
 
-check("arches", mirror["arches"], list(ci.ARCHES))
+# The pill offers the two image architectures `compile_image` owns plus the H3
+# branch, which is a video generation and is compiled by `compile_still`.
+check("arches", mirror["arches"], [*ci.ARCHES, cs.ARCH])
+check("still lengths", mirror["still"]["lengths"], list(cs.STILL_LENGTHS))
+check("still default length", mirror["still"]["frames"], cs.DEFAULT_FRAMES)
+check("still default latent frame", mirror["still"]["index"], cs.DEFAULT_LATENT_INDEX)
+check("still prompt modes", mirror["still"]["prompt_modes"], list(cs.PROMPT_MODES))
+check("still latent frames", mirror["still"]["latents"],
+      {str(n): cs.latent_frames(n) for n in cs.STILL_LENGTHS})
+# The H3 branch generates a video frame, so its canvas is canvas.py's — the same
+# numbers the video pills resolve, reached through the pre-stage's own state.
+check("still canvases", mirror["still"]["canvases"],
+      {f"{label}@{edge}": list(cv.resolve_canvas(ratio, edge))
+       for label, ratio in cv.ASPECT_PRESETS.items()
+       for edge in (384, 512, 768, 896)})
 check("aspect presets", mirror["presets"], sorted(ci.ASPECT_PRESETS))
 
 for key, size in mirror["canvases"].items():
