@@ -21,7 +21,7 @@ import { openChoicePopover, openOutputPopover, stepperPill, aspectGlyph, edgeSli
 import { IMAGE_PREFIX, folderOf } from "./outputs.js";
 import { samplingBar } from "./sampling.js";
 import { Stage } from "./stage.js";
-import { loadCatalog, catalogByFolder } from "./models.js";
+import { loadCatalog, catalogByFolder, ROUTE_LABEL } from "./models.js";
 import { viewUrl } from "./api.js";
 import * as S from "./state.js";
 
@@ -756,17 +756,32 @@ export class PreStageEditor {
 
     pills.push(this.renderDevPill());   // DEV
 
-    // The Creator's routing badge, read-only: what this compiles to and which
-    // checkpoint it will load. Same derivation, same words, same place on the
-    // row — the routing is not different here, so it should not look different.
-    const badge = el("span", {
-      class: "mmc-mode",
-      title: "What this still compiles to, and the checkpoint it loads. References are encoded "
-           + "for Ref2VA; keyframes and bare prompts run on FL2VA. The same routing a video "
-           + "render does, because this is one.",
+    // The Creator's routing badge, and it cycles here for the same reason it
+    // cycles there: this node owns its route. Forcing Ref2VA is the useful
+    // direction — it takes the text-only and keyframe payloads FL2VA was
+    // trained for, so a t2i still can be made by the reference weights.
+    const route = S.stillRoute(this.state);
+    const forced = route !== "auto";
+    const impossible = S.stillRouteImpossible(this.state);
+    const badge = el("button", {
+      class: `mmc-mode${forced ? " pinned" : ""}${impossible ? " bad" : ""}`,
+      title: impossible
+        ? "This still has references, which are encoded for Ref2VA and cannot be read by "
+          + "FL2VA. It will be refused — change the route to auto or Ref2VA."
+        : forced
+          ? `Every still from this node runs on ${S.CHECKPOINT_LABEL[route]}, whatever the `
+            + "mode derives. Click to change it."
+          : "Following the mode: references go to Ref2VA, everything else to FL2VA. Click to "
+            + "run everything on one checkpoint instead — Ref2VA takes the text-only and "
+            + "keyframe payloads too.",
+      onclick: () => {
+        this.state.models.minimax.route = S.nextRoute(route);
+        this.commit();
+      },
     });
     badge.appendChild(el("b", { text: S.stillMode(this.state) }));
     badge.appendChild(document.createTextNode(` → ${S.CHECKPOINT_LABEL[S.stillCheckpoint(this.state)]}`));
+    if (forced) badge.appendChild(el("span", { class: "mmc-pin", text: "always" }));
     pills.push(badge);
     return pills;
   }
@@ -941,7 +956,36 @@ export class PreStageEditor {
       const side = state.models[state.arch];
       const missing = new Set(S.missingPreStageModels(state));
 
-      const rows = S.PRESTAGE_FIELDS[state.arch].map((field) => el("div", {
+      // Leads the popover on the H3 side, exactly as it does on the video
+      // nodes', because it decides which of the two checkpoints below it is
+      // used at all — and forced, the other is never loaded and never required.
+      const routeRows = S.isStill(state) ? [el("div", { class: "mmc-weight-row" }, [
+        el("span", { class: "mmc-weight-name", text: "Route" }),
+        el("button", {
+          class: `mmc-weight-file${S.stillRoute(state) === "auto" ? "" : " forced"}`,
+          title: "Which checkpoint every still from this node runs on.\n\n"
+               + "auto follows the mode: references go to Ref2VA, everything else to FL2VA.\n"
+               + "Forced, that is ignored and one checkpoint takes the lot — the two are one "
+               + "architecture trained twice, and Ref2VA handles text-only and keyframe "
+               + "payloads perfectly well.\n\n"
+               + "FL2VA cannot take references at all, so forcing it is refused on a still "
+               + "that has any.",
+          text: ROUTE_LABEL[S.stillRoute(state)],
+          onclick: (event) => openChoicePopover(event.currentTarget, {
+            title: "Route",
+            options: S.ROUTES.map((one) => ROUTE_LABEL[one]),
+            value: ROUTE_LABEL[S.stillRoute(state)],
+            onPick: (picked) => {
+              state.models.minimax.route =
+                S.ROUTES.find((one) => ROUTE_LABEL[one] === picked) ?? "auto";
+              this.commit();
+              render();
+            },
+          }),
+        }),
+      ])] : [];
+
+      const rows = [...routeRows, ...S.PRESTAGE_FIELDS[state.arch].map((field) => el("div", {
         class: `mmc-weight-row${missing.has(field) ? " missing" : ""}`,
       }, [
         el("span", { class: "mmc-weight-name", text: S.PRESTAGE_FIELD_LABEL[field] }),
@@ -960,7 +1004,7 @@ export class PreStageEditor {
             },
           }),
         }),
-      ]));
+      ]))];
 
       rows.push(el("div", { class: "mmc-weight-row" }, [
         el("span", { class: "mmc-weight-name", text: "Precision" }),

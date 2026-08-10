@@ -1077,6 +1077,9 @@ export function parsePreStage(raw) {
             state.models[arch][field] = side[field].trim();
           }
         }
+        // The standing checkpoint route, the H3 side's alone — the image
+        // architectures have one DiT each and nothing to route between.
+        if (ROUTES.includes(side.route)) state.models[arch].route = side.route;
       }
       if (MODEL_DTYPES.includes(models.dtype)) state.models.dtype = models.dtype;
       return state;
@@ -1094,6 +1097,10 @@ export function serializePreStage(state) {
     for (const field of PRESTAGE_FIELDS[arch]) {
       if (state.models?.[arch]?.[field]) side[field] = state.models[arch][field];
     }
+    // Absent means "follow the mode", so the common case adds nothing — the
+    // same rule `serializeModels` holds the video blob to.
+    const route = state.models?.[arch]?.route;
+    if (route && route !== "auto") side.route = route;
     if (Object.keys(side).length) models[arch] = side;
   }
   if (state.models?.dtype && state.models.dtype !== "default") models.dtype = state.models.dtype;
@@ -1292,10 +1299,27 @@ export function stillMode(state) {
  *  references need Ref2VA, everything else runs on FL2VA, and an explicit pin
  *  wins where it is legal. */
 export function stillCheckpoint(state) {
+  // The standing route wins where it is set — it is the same instruction
+  // `models.Weights.routed` stamps onto the request, said once for the node
+  // rather than once per generation. Then the per-request pin, then the mode.
+  const route = stillRoute(state);
+  if (route !== "auto") return route;
   const pin = state.minimax?.checkpoint ?? "auto";
   if (pin !== "auto") return pin;
   return state.refs.length ? "ref2va" : "fl2va";
 }
+
+/** The still's standing checkpoint route: "auto", "fl2va" or "ref2va". Worth
+ *  having for exactly the reason the video nodes have it — the two are one
+ *  architecture trained twice, and Ref2VA takes the text-only and keyframe
+ *  payloads FL2VA was trained for perfectly well. */
+export const stillRoute = (state) => state.models?.minimax?.route ?? "auto";
+
+/** Whether the route as set cannot run: FL2VA has nothing to attend a
+ *  reference with, so forcing it on a reference generation is refused at
+ *  compile time. Said in the badge instead of at queue time. */
+export const stillRouteImpossible = (state) =>
+  stillRoute(state) === "fl2va" && (state.refs ?? []).length > 0;
 
 /** Which of the eight identity hues (--mmc-tag-0..7) a handle wears, everywhere
  *  it appears — asset bar, prompt chip, mention menu. Derived from the handle

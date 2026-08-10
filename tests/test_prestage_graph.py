@@ -468,6 +468,23 @@ check("on H3's own canvas",
 check("it lands in the pre-stage folder",
       h3["MiniMaxH3SaveImage"][0][1]["filename_prefix"], outputs.IMAGE_PREFIX)
 
+# The standing route, the video nodes' own control: Ref2VA takes the text-only
+# payload FL2VA was trained for, so a t2i still can be made by the reference
+# weights — and then FL2VA is neither loaded nor required.
+routed = by_class(still(still_blob(
+    models={"minimax": {**{k: v for k, v in H3_MODELS.items() if k != "fl2va"},
+                        "route": "ref2va"}})).expand)
+check("a forced route loads that checkpoint and no other",
+      [i["unet_name"] for _, i in routed["UNETLoader"]], [H3_MODELS["ref2va"]])
+check("and it reaches the segment node as the request's own pin",
+      json.loads(routed["MiniMaxH3TimelineSegment"][0][1]["segment_data"])["request"]["checkpoint"],
+      "ref2va")
+expect_error("forcing FL2VA on a still with references is refused",
+             lambda: still(still_blob(
+                 refs=[{"handle": "img-1", "kind": "image", "filename": "face.png"}],
+                 models={"minimax": {**H3_MODELS, "route": "fl2va"}})),
+             "cannot be run through FL2VA")
+
 # References route to Ref2VA and are the video node's own — including a clip
 # taken with its soundtrack, which is the one thing that loads the audio VAE.
 refs = by_class(still(still_blob(refs=[
