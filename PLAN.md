@@ -89,7 +89,7 @@ for you. Everything else in this package exists to support that one gesture.
   Timeline; stills land back as start/end frames or references through chips on
   its result card. Same body architecture, same picker, same LoRA manager.
 
-- [ ] **7 — H3 stills (experimental, on a branch).** `compile_still.py`,
+- [x] **7 — H3 stills (experimental).** `compile_still.py`,
   `render_still.py`, `MiniMaxH3StillLatent`, a third arch on the pre-stage's
   model pill. A still made by the *video* model: the pre-stage compiles a
   request in exactly the Creator's shape, emits the same
@@ -98,7 +98,7 @@ for you. Everything else in this package exists to support that one gesture.
   (`minimax_h3_t1_image_vae_*`, a merged checkpoint that loads through the
   ordinary `VAELoader`).
 
-  Why it earns a branch: no second model family is loaded, the still lands on
+  Why it earns its place: no second model family is loaded, the still lands on
   the exact canvas the shot will render at, and everything a shot can attach a
   still can attach — nine reference images, three clips, three sounds, a start
   frame, an end frame, LoRAs, the taeh3 preview. The only pre-stage control it
