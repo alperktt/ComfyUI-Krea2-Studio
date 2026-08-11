@@ -58,6 +58,7 @@ except Exception as exc:  # noqa: BLE001
 cn = importlib.import_module(f"{PACKAGE}.creator_node")
 tl = importlib.import_module(f"{PACKAGE}.timeline")
 outputs_mod = importlib.import_module(f"{PACKAGE}.outputs")
+settings_mod = importlib.import_module(f"{PACKAGE}.settings")
 
 FAILURES = []
 
@@ -210,6 +211,11 @@ check("both decode the same sampler",
       graph[save_inputs["images"][0]]["inputs"]["samples"][0],
       graph[save_inputs["audio"][0]]["inputs"]["samples"][0])
 check("at the rate the frame count was snapped to", save_inputs["fps"], 24.0)
+# Read once, here, and carried into the graph as an input — a save node that
+# read the preference itself would be a cache hit on a re-queue and would keep
+# writing the quality it was built with. See `render.emit_tail`.
+check("at the quality this ComfyUI is set to",
+      save_inputs["crf"], settings_mod.video_crf())
 check("it lands in the render folder, which is not the stills folder",
       save_inputs["filename_prefix"], outputs_mod.VIDEO_PREFIX)
 

@@ -102,6 +102,33 @@ export function savePickerPrefs(prefs) {
   try { api.storeUserData(PREFS_FILE, prefsCache, { stringify: true }); } catch { /* offline */ }
 }
 
+// ---- settings ---------------------------------------------------------------
+//
+// Not the userdata API the picker prefs above go through, and the difference
+// matters: these are read by the save node while a prompt executes, which has no
+// request behind it and so no ComfyUI user. `settings.py` owns the one file both
+// ends read, and these two routes are the only way in from here.
+
+/** Every setting, with the keys this build does not know about dropped. */
+export async function loadSettings() {
+  const response = await api.fetchApi("/minimax_creator/settings");
+  if (!response.ok) throw new Error(`settings failed (${response.status})`);
+  return (await response.json()).settings ?? {};
+}
+
+/** Store some settings and resolve to the whole stored object — what the server
+ *  actually wrote, which is what the page then shows. */
+export async function saveSettings(patch) {
+  const response = await api.fetchApi("/minimax_creator/settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || `settings failed (${response.status})`);
+  return body.settings ?? {};
+}
+
 let modelsAt = 0;
 let modelsCache = null;
 let modelsInFlight = null;

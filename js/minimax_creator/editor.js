@@ -14,6 +14,7 @@
 import { el, icon, ICONS, svg } from "./dom.js";
 import { openPicker } from "./picker.js";
 import { openLoras } from "./loras.js";
+import { openSettings } from "./settings.js";
 import { openTrim, trimLabel } from "./trim.js";
 import { PromptBox } from "./prompt.js";
 import { RefinePanel, refineButton, refine } from "./refine.js";
@@ -555,6 +556,15 @@ export class CreatorEditor {
         title: "Browse, organize and attach finished renders and pre-stage stills",
         onclick: () => this.openGallery(),
       }, [el("span", { class: "mmc-tool-icon" }, [icon("gallery")]), el("span", { text: "Gallery" })]),
+      // Beside the Gallery because it is the same kind of thing: neither one
+      // touches this generation. The Gallery is what this ComfyUI has already
+      // made and this is how it writes the next one, and both stay where they
+      // are whatever the prompt says.
+      el("button", {
+        class: "mmc-tool",
+        title: "Preferences for this ComfyUI — output quality. Not saved into the workflow.",
+        onclick: () => openSettings(),
+      }, [el("span", { class: "mmc-tool-icon" }, [icon("gear")]), el("span", { text: "Settings" })]),
       ...(this.extraTools?.() ?? []),
       // Last in the rail because it is the step after everything else: the
       // rewrite is written against the references and the duration, so it wants

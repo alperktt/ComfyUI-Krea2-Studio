@@ -202,6 +202,34 @@ popover has a button per token and shows the exact path the next file will take.
 The value is saved in the workflow, so a `.json` shared with someone else renders
 into the same structure on their machine.
 
+### Output quality
+
+**Settings** in the rail opens the page for preferences that belong to this
+ComfyUI rather than to a workflow. The first of them is what the encoder is
+allowed to throw away when it writes an `.mp4`:
+
+| | crf | |
+|---|---|---|
+| Draft | 28 | About half the size of Standard. Banding in dark gradients. |
+| **Standard** | **23** | libx264's own default — what this pack wrote before the setting existed. |
+| Fine | 18 | About twice the size of Standard. |
+| Archival | 14 | About three times. Keeps grain and fine texture H.264 eats first. |
+
+CRF is libx264's quality target: lower is better and larger, and six points is
+roughly double the file. The container is unchanged either way — MP4, H.264,
+8-bit 4:2:0.
+
+This is **not** saved into the workflow. A `.json` shared with someone else makes
+the same shot at whatever quality their ComfyUI is set to, which is the same
+split as the folder pill above: where a file lands is part of the piece, how many
+megabytes it takes is not. The value lives in `user/minimax_creator.settings.json`
+and applies to the Creator and the Timeline. PreStage stills are PNG and have
+nothing to set.
+
+Needs ComfyUI 0.29 or newer, which is where `crf` reached core's video writer.
+On an older build anything but Standard is refused at save time rather than
+quietly written at the default.
+
 ### Moving the input and output folders themselves
 
 The pill is relative to ComfyUI's output folder and cannot climb out of it. To
@@ -252,6 +280,7 @@ matching pills light up.
 python3 tests/test_compile.py         # canvas math, modes, limits, ordering
 python3 tests/test_refine.py
 python3 tests/test_outputs.py         # what an output prefix may be
+python3 tests/test_settings.py        # what the settings file may hold
 python3 tests/test_canvas_mirror.py   # canvas.js against canvas.py
 python3 tests/test_prestage_mirror.py
 python3 tests/test_outputs_mirror.py  # outputs.js against outputs.py

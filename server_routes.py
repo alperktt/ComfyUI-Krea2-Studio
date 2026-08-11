@@ -11,6 +11,11 @@ wrong thing to hand a 140 px grid cell or a waveform canvas. See preview.py.
 LoRAs need both routes of their own. `/view` only serves input, output and temp,
 so it cannot reach models/loras, and the CiviMeta sidecar next to each file has
 to be read server-side.
+
+The settings pair at the bottom is the one thing here that is not a listing. It
+has to be a route rather than the frontend's userdata API for the reason
+`settings.py` opens with: the save node reads the same file while a prompt runs,
+and only the server can hand both ends the same path.
 """
 
 import asyncio
@@ -23,7 +28,7 @@ from aiohttp import web
 import folder_paths
 from server import PromptServer
 
-from . import models, preview
+from . import models, preview, settings
 
 # A large input folder should not turn the picker into a stall. Newest first,
 # so the cap drops the least interesting files.
@@ -703,3 +708,27 @@ async def delete_asset(request):
         return web.json_response({"error": "no such file"}, status=404)
     os.remove(path)
     return web.json_response({"ok": True})
+
+
+@PromptServer.instance.routes.get("/minimax_creator/settings")
+async def read_settings(request):
+    """What the settings page shows: every key, filled in. See `settings.py`."""
+    return web.json_response({"settings": settings.load()})
+
+
+@PromptServer.instance.routes.post("/minimax_creator/settings")
+async def write_settings(request):
+    """Store what the settings page changed and hand back what was stored.
+
+    The reply is the whole settings object rather than an acknowledgement,
+    because it is what the page then shows: a value the server would not write
+    has to be visibly not written, not left on screen looking chosen.
+    """
+    try:
+        stored = settings.save(await request.json())
+    except ValueError as problem:
+        return web.json_response({"error": str(problem)}, status=400)
+    except OSError as problem:
+        return web.json_response({"error": f"could not write the settings file: {problem}"},
+                                 status=500)
+    return web.json_response({"settings": stored})
