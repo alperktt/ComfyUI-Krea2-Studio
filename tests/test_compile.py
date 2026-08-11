@@ -563,6 +563,37 @@ check("the flag survives compilation", chain[1].continues, True)
 check("a continuation flag on segment 1 is ignored, not refused",
       timeline([segment(**{"continue": True})])[0].mode, "T2VA")
 
+# The seam's named source — 1-based on the segment because that is the number
+# on the card, 0-based on the payload because that is what the emitter joins
+# on. Only a source before the previous segment is worth writing down.
+def payload_sources(segments):
+    return [p.get("continue_from")
+            for p in compiler.timeline_payloads({"segments": segments})]
+
+check("a named source lands on the payload, 0-based",
+      payload_sources([segment(), segment(),
+                       segment(**{"continue": True, "continue_from": 1})]),
+      [None, None, 0])
+check("naming the previous segment is the default, said out loud",
+      payload_sources([segment(), segment(),
+                       segment(**{"continue": True, "continue_from": 2})]),
+      [None, None, None])
+check("an out-of-range source falls back to the previous segment",
+      payload_sources([segment(), segment(**{"continue": True, "continue_from": 7})]),
+      [None, None])
+check("a source without a live seam writes nothing",
+      payload_sources([segment(), segment(), segment(**{"continue_from": 1})]),
+      [None, None, None])
+check("the sound seam names a source the same way",
+      payload_sources([segment(), segment(),
+                       segment(**{"continue_audio": True, "continue_from": 1})]),
+      [None, None, 0])
+check("the source never reaches the request",
+      "continue_from" in compiler.timeline_payloads(
+          {"segments": [segment(), segment(),
+                        segment(**{"continue": True, "continue_from": 1})]})[2]["request"],
+      False)
+
 check("an end frame makes a continuing segment FL2VA",
       timeline([segment(), segment(**{
           "continue": True,

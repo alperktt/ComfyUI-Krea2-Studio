@@ -1326,6 +1326,11 @@ button.mmc-mode:hover { background: var(--mmc-surface-2); border-color: var(--mm
 .mmc-tl-join-sound svg { width: 13px; height: 13px; stroke: currentColor; fill: none;
   stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 
+/* Where the seam inherits from — one line under the two switches, only shown
+   while a seam is live and there is more than one segment to inherit from. */
+.mmc-tl-join-from { padding-top: 0; }
+.mmc-tl-join-from span:first-child { font-size: 10px; }
+
 .mmc-tl-add {
   flex: 0 0 auto; align-self: stretch; width: 108px; margin-left: 12px;
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;

@@ -877,13 +877,27 @@ def timeline_segments(data):
     return segments
 
 
+def _continue_source(raw, index):
+    """`continue_from` off a segment dict -> a 0-based source index, or None.
+
+    None means "the previous segment" — the default seam, and what anything
+    unusable quietly becomes. Only a source strictly before the previous
+    segment is worth recording: naming the previous one is saying nothing.
+    """
+    try:
+        number = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return number - 1 if 1 <= number < index else None
+
+
 def timeline_payloads(data, image_size_lookup=None):
     """`timeline_data` dict -> one self-contained payload per segment, in play order.
 
     A payload is everything one segment needs and nothing the others do: a
     single-generation request with the global prompt already folded in, whether
-    it starts from the previous segment's last frame, and the canvas the whole
-    timeline is held to.
+    it starts from an earlier segment's last frame (the previous one unless the
+    seam names another), and the canvas the whole timeline is held to.
 
     Splitting before compiling is what makes the cache useful. The segments run
     as separate nodes and a node's cache key is its inputs, so handing each one
@@ -900,6 +914,7 @@ def timeline_payloads(data, image_size_lookup=None):
         # the seam in front of this segment, not about the generation.
         request.pop("continue", None)
         request.pop("continue_audio", None)
+        request.pop("continue_from", None)
         request["prompt"] = _join_prompt(global_prompt, segment.get("prompt"))
         request["aspect"] = data.get("aspect", "16:9")
         request["short_edge"] = data.get("short_edge", canvas.NATIVE_SHORT_EDGE)
@@ -928,6 +943,16 @@ def timeline_payloads(data, image_size_lookup=None):
             # sound. Two switches on the seam rather than one with three states.
             "continue_audio": index > 0 and bool(segment.get("continue_audio")),
         })
+        # Which earlier segment the seam inherits from — 1-based in the segment
+        # data because that is the number on the card, 0-based on the payload
+        # because that is the index the emitter joins on. Absent means the
+        # previous segment, which is also what an out-of-range value falls back
+        # to: like the flags above, a stale source is a leftover from
+        # reordering, not a mistake worth refusing a whole timeline over.
+        if payloads[-1]["continue"] or payloads[-1]["continue_audio"]:
+            source = _continue_source(segment.get("continue_from"), index)
+            if source is not None:
+                payloads[-1]["continue_from"] = source
 
     # Resolved the way a lone generation would resolve it — segment 1 may take
     # its aspect from its own keyframe — then imposed on the rest.

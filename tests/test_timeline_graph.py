@@ -264,6 +264,60 @@ for index in (1, 2):
     check(f"segment {index + 1} continues from segment {index}, not from the join",
           source_segment(run, chain[index][1]["prev_image"]), chain[index - 1][0])
 
+# The circular narrative: segment 2 is an unrelated hard cut, and segment 3
+# names segment 1 as its source — so its frame and its sound tail must both
+# trace to segment 1's decodes, not to segment 2's.
+run = build(blob(segments=[
+    {"prompt": "hallway", "duration_s": 5},
+    {"prompt": "dream", "duration_s": 5},
+    {"prompt": "hallway again", "duration_s": 5,
+     "continue": True, "continue_audio": True, "continue_from": 1},
+])).expand
+chain = in_order(
+    [(node_id, n["inputs"]) for node_id, n in run.items()
+     if n["class_type"] == "MiniMaxH3TimelineSegment"],
+    ["hallway", "dream", "hallway again"])
+check("only the returning segment continues",
+      [("prev_image" in i) for _, i in chain], [False, False, True])
+check("segment 3 continues from segment 1, two cards back",
+      source_segment(run, chain[2][1]["prev_image"]), chain[0][0])
+
+
+def audio_source_segment(graph, prev_audio):
+    """Walk audio tail -> audio decode -> sampler -> segment, naming what it hit."""
+    tail = graph[prev_audio[0]]
+    if tail["class_type"] != "MiniMaxH3AudioTail":
+        return f"<MiniMaxH3AudioTail expected, found {tail['class_type']}>"
+    decode = graph[tail["inputs"]["audio"][0]]
+    if decode["class_type"] != "VAEDecodeAudio":
+        return f"<VAEDecodeAudio expected, found {decode['class_type']}>"
+    sampler = graph[decode["inputs"]["samples"][0]]
+    return sampler["inputs"]["model"][0]
+
+
+check("...and its sound tail comes off segment 1 as well",
+      audio_source_segment(run, chain[2][1]["prev_audio"]), chain[0][0])
+# The named source rides the payload — it is part of the segment's cache key,
+# so repointing a seam re-runs that segment and only that segment.
+check("the source is on the payload, and only where one was named",
+      [json.loads(i["segment_data"]).get("continue_from") for _, i in chain],
+      [None, None, 0])
+
+# A source that no longer exists — a leftover from deleting or reordering —
+# falls back to the default seam rather than refusing the timeline.
+run = build(blob(segments=[
+    {"prompt": "one", "duration_s": 5},
+    {"prompt": "two", "duration_s": 5, "continue": True, "continue_from": 7},
+])).expand
+chain = in_order(
+    [(node_id, n["inputs"]) for node_id, n in run.items()
+     if n["class_type"] == "MiniMaxH3TimelineSegment"],
+    ["one", "two"])
+check("an out-of-range source falls back to the previous segment",
+      source_segment(run, chain[1][1]["prev_image"]), chain[0][0])
+check("...and is not written onto the payload",
+      json.loads(chain[1][1]["segment_data"]).get("continue_from"), None)
+
 # What makes editing a long timeline bearable: a segment node's inputs are its
 # cache key, so editing the last shot must leave the earlier segments' inputs
 # byte-identical. This is the assertion to keep — it is easy to lose by handing a

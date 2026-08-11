@@ -202,8 +202,12 @@ inside the modal is where the work happens.
 
 ![The Timeline strip](docs/img/timeline.png)
 
-**Chained** renders each segment and joins them; a segment can start from the
-previous one's last frame and inherit a tail of its sound. **One pass** compiles the
+**Chained** renders each segment and joins them; a segment can start from an
+earlier segment's last frame and inherit a tail of its sound. The seam continues
+from the previous segment by default, but from segment 3 on a *from* control under
+the seam's two switches lets it name any earlier one — a story that returns to
+segment 1's hallway after an unrelated segment 2 continues from segment 1, while
+segment 2 stays a hard cut. **One pass** compiles the
 same cards into a *single* generation, since H3's prompt format is already a shot
 list — nothing is decoded and re-encoded mid-clip, so there is no seam and music or
 dialogue carries across a cut. **Refine all** rewrites every card in one call, which

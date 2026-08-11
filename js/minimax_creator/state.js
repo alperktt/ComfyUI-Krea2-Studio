@@ -646,6 +646,14 @@ function syncCanvas(timeline) {
     timeline.segments[0].continue = false;
     timeline.segments[0].continue_audio = false;
   }
+  // A seam may name any earlier segment as its source; anything else — the
+  // previous one included, which is what absence already means — is dropped.
+  // Same policy as the flags: pruned here once rather than guarded at every
+  // read, so reordering and deleting cannot leave a stale source behind.
+  timeline.segments.forEach((segment, index) => {
+    const from = segment.continue_from;
+    if (!Number.isInteger(from) || from < 1 || from >= index) delete segment.continue_from;
+  });
   return timeline;
 }
 
@@ -680,6 +688,12 @@ export function parseTimeline(raw) {
         delete segment.turbo;
         segment.continue = raw?.continue === true;
         segment.continue_audio = raw?.continue_audio === true;
+        // The seam's source, as the 1-based number on the card it names.
+        // `syncCanvas` prunes anything that does not point at an earlier
+        // segment, so only the type is checked here.
+        delete segment.continue_from;
+        const from = Number(raw?.continue_from);
+        if (Number.isInteger(from)) segment.continue_from = from;
         return segment;
       });
       return syncCanvas(timeline);
@@ -719,6 +733,13 @@ export function serializeTimeline(timeline) {
       // add anything. Never on the first segment: there is nothing to continue.
       if (index > 0 && segment.continue) out.continue = true;
       if (index > 0 && segment.continue_audio) out.continue_audio = true;
+      // Only on a live seam, and only when it names something other than the
+      // previous segment — which is what an absent key already says.
+      if ((out.continue || out.continue_audio)
+          && Number.isInteger(segment.continue_from)
+          && segment.continue_from >= 1 && segment.continue_from < index) {
+        out.continue_from = segment.continue_from;
+      }
       return out;
     }),
   }, null, 2);
@@ -1356,6 +1377,27 @@ export function hasReferences(state) {
 /** A timeline segment that starts from the previous segment's last frame. */
 export const continues = (state) => state.continue === true;
 
+/** The 1-based number of the segment the seam in front of `index` inherits
+ *  from — the previous one unless a valid `continue_from` names an earlier
+ *  segment. Meaningless for index 0, which has no seam. */
+export function continueSource(segment, index) {
+  const from = segment.continue_from;
+  return Number.isInteger(from) && from >= 1 && from < index ? from : index;
+}
+
+/** Rewrite every seam source through `map` (1-based number in the old order ->
+ *  the same segment's new number, or null for one that is gone), after a move,
+ *  duplicate or remove changed what the numbers point at. `syncTimeline` then
+ *  prunes whatever no longer points at an earlier segment. */
+export function remapContinueFrom(timeline, map) {
+  for (const segment of timeline.segments) {
+    if (!Number.isInteger(segment.continue_from)) continue;
+    const next = map(segment.continue_from);
+    if (Number.isInteger(next) && next >= 1) segment.continue_from = next;
+    else delete segment.continue_from;
+  }
+}
+
 /** ...and one whose sound carries on from it. Not implied by the above. */
 export const continuesAudio = (state) => state.continue_audio === true;
 
@@ -1429,14 +1471,14 @@ export function resolved(state, keyframeSize = null) {
  */
 export function blockedReason(state, action) {
   if (action === "reference" && continues(state)) {
-    return "This segment continues from the previous one, which is a keyframe generation on FL2VA — "
+    return "This segment continues from an earlier one, which is a keyframe generation on FL2VA — "
          + "references need Ref2VA. Turn continuation off to attach references.";
   }
   if (action === "reference" && hasFrames(state)) {
     return "Remove the start/end frame first — references use the Ref2VA checkpoint, frames use FL2VA.";
   }
   if (action === "first_frame" && continues(state)) {
-    return "This segment's start frame is the previous segment's last frame. Turn continuation off to choose one.";
+    return "This segment's start frame is an earlier segment's last frame. Turn continuation off to choose one.";
   }
   if ((action === "first_frame" || action === "last_frame") && hasReferences(state)) {
     return "Remove the references first — start/end frames use the FL2VA checkpoint, references use Ref2VA.";
@@ -1451,7 +1493,7 @@ export function blockedReason(state, action) {
          + "so the inherited soundtrack has nowhere to go.";
   }
   if (action === "continue" && frameAsset(state, "first_frame")) {
-    return "Remove this segment's start frame first — continuing would replace it with the previous "
+    return "Remove this segment's start frame first — continuing would replace it with the source "
          + "segment's last frame.";
   }
   return null;

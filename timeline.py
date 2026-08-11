@@ -239,9 +239,9 @@ class MiniMaxH3TimelineSegment(io.ComfyNode):
                 io.Model.Input("model_fl2va", optional=True),
                 io.Model.Input("model_ref2va", optional=True),
                 io.Image.Input("prev_image", optional=True,
-                    tooltip="The previous segment's last frame, when this segment continues from it."),
+                    tooltip="An earlier segment's last frame, when this segment continues from it."),
                 io.Audio.Input("prev_audio", optional=True,
-                    tooltip="The tail of the previous segment's soundtrack, when this segment's sound continues from it."),
+                    tooltip="The tail of an earlier segment's soundtrack, when this segment's sound continues from it."),
             ],
             outputs=[
                 io.Model.Output(display_name="model"),
@@ -307,14 +307,14 @@ class MiniMaxH3TimelineSegment(io.ComfyNode):
         if compiled.continues:
             if prev_image is None:
                 raise ValueError(
-                    "This segment continues from the previous one but no frame "
+                    "This segment continues from an earlier one but no frame "
                     "reached it — the Timeline node should have wired one."
                 )
             loaded[encoder.PREV_FRAME] = {"image": prev_image[-1:]}
         if compiled.continues_audio:
             if prev_audio is None:
                 raise ValueError(
-                    "This segment's sound continues from the previous one but no "
+                    "This segment's sound continues from an earlier one but no "
                     "audio reached it — the Timeline node should have wired some."
                 )
             loaded[encoder.PREV_AUDIO] = {"audio": prev_audio}

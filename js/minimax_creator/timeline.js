@@ -370,6 +370,11 @@ class Timeline {
     const sound = S.continuesAudio(segment);
     const soundBlocked = sound ? null : S.blockedReason(segment, "continue_audio");
 
+    // Which earlier segment a live seam inherits from — the previous one unless
+    // the seam names another, which is what makes a circular narrative possible:
+    // segment 3 can return to segment 1's hallway after an unrelated segment 2.
+    const from = S.continueSource(segment, index);
+
     // Two switches, not one control with three states. The picture and the sound
     // cross a seam independently: a hard cut whose score keeps playing is as
     // ordinary as a match cut that resets the room tone.
@@ -378,7 +383,7 @@ class Timeline {
         class: `mmc-tl-join${on ? " on" : ""}`,
         disabled: blocked ? true : undefined,
         title: blocked || (on
-          ? `Segment ${index + 1} starts on segment ${index}'s last frame. Click for a hard cut.`
+          ? `Segment ${index + 1} starts on segment ${from}'s last frame. Click for a hard cut.`
           : `Hard cut into segment ${index + 1}. Click to start it on segment ${index}'s last frame.`),
         onclick: blocked ? undefined : () => { segment.continue = !on; this.commit(); },
       }, [el("span", { text: on ? "↝" : "✂" }), el("span", { text: on ? "continues" : "cut" })]),
@@ -386,13 +391,45 @@ class Timeline {
         class: `mmc-tl-join mmc-tl-join-sound${sound ? " on" : ""}`,
         disabled: soundBlocked ? true : undefined,
         title: soundBlocked || (sound
-          ? `Segment ${index + 1}'s sound carries on from segment ${index}'s. `
+          ? `Segment ${index + 1}'s sound carries on from segment ${from}'s. `
             + `Click to let it start its own.`
           : `Segment ${index + 1} generates its own sound from scratch. `
-            + `Click to carry the last ${this.timeline.audio_tail_s}s of segment ${index}'s into it.`),
+            + `Click to carry the last ${this.timeline.audio_tail_s}s of segment ${from}'s into it.`),
         onclick: soundBlocked ? undefined : () => { segment.continue_audio = !sound; this.commit(); },
       }, [icon("audio", 13), el("span", { text: sound ? "sound" : "silent seam" })]),
+      // Where the seam inherits from. Only on a live seam, and only once there
+      // is a choice to make: seam 2 can only continue from segment 1, and a
+      // one-option picker would only raise the question it answers.
+      ...((on || sound) && index >= 2 ? [el("button", {
+        class: `mmc-tl-join mmc-tl-join-from${from !== index ? " on" : ""}`,
+        title: `What continues across this seam is segment ${from}'s last `
+             + `${on && sound ? "frame and sound" : on ? "frame" : "sound"}. `
+             + `Click to inherit from a different earlier segment — a story returning to `
+             + `segment 1 after an unrelated shot continues from segment 1.`,
+        onclick: (event) => this.pickContinueFrom(event.currentTarget, segment, index),
+      }, [el("span", { text: `from #${from}` })])] : []),
     ]);
+  }
+
+  /** The seam's source, chosen from every segment before this one. */
+  pickContinueFrom(anchor, segment, index) {
+    const options = [];
+    for (let n = 1; n <= index; n += 1) {
+      options.push(n === index ? `segment ${n} — previous` : `segment ${n}`);
+    }
+    openChoicePopover(anchor, {
+      title: `Segment ${index + 1} continues from`,
+      options,
+      value: options[S.continueSource(segment, index) - 1],
+      onPick: (choice) => {
+        const n = Number(/\d+/.exec(choice)[0]);
+        // The previous segment is the default, so choosing it is choosing to
+        // store nothing — an absent key survives reordering with no bookkeeping.
+        if (n === index) delete segment.continue_from;
+        else segment.continue_from = n;
+        this.commit();
+      },
+    });
   }
 
   renderCard(segment, index) {
@@ -489,25 +526,37 @@ class Timeline {
   duplicate(index) {
     if (this.timeline.segments.length >= S.MAX_SEGMENTS) return;
     this.timeline.segments.splice(index + 1, 0, S.cloneSegment(this.timeline.segments[index]));
+    // Every segment after the insertion moved down one card; a seam naming one
+    // of them follows it. Nothing pointed at the clone a moment ago, and a seam
+    // naming the original still does.
+    S.remapContinueFrom(this.timeline, (n) => (n > index + 1 ? n + 1 : n));
     this.commit();
   }
 
   remove(index) {
     if (this.timeline.segments.length <= 1) return;
     this.timeline.segments.splice(index, 1);
+    // A seam that named the removed segment falls back to the previous one;
+    // one naming a later segment follows it up a card.
+    S.remapContinueFrom(this.timeline,
+      (n) => (n === index + 1 ? null : n > index + 1 ? n - 1 : n));
     this.commit();
   }
 
   /**
    * Reorder. A segment carries its continuation flag with it, and `syncTimeline`
    * clears it off whatever ends up first — a segment moved to the front has
-   * nothing left to continue from.
+   * nothing left to continue from. A named seam source follows the card it
+   * points at, and `syncTimeline` likewise drops any source the swap carried
+   * to or past its own seam.
    */
   move(index, delta) {
     const target = index + delta;
     const segments = this.timeline.segments;
     if (target < 0 || target >= segments.length) return;
     [segments[index], segments[target]] = [segments[target], segments[index]];
+    S.remapContinueFrom(this.timeline,
+      (n) => (n === index + 1 ? target + 1 : n === target + 1 ? index + 1 : n));
     this.commit();
   }
 
@@ -840,7 +889,7 @@ export class TimelineBody {
             ? `Shot ${index + 1} · ${segment.duration_s} s`
               + (index ? ` · cuts in at ${S.shotTime(at[index])}` : " · opens the clip")
             : `Segment ${index + 1} · ${segment.duration_s} s · ${S.mode(segment)}`
-              + (continues ? " · continues from the previous segment" : " · hard cut"),
+              + (continues ? ` · continues from segment ${S.continueSource(segment, index)}` : " · hard cut"),
         }, [
           ...(continues ? [icon("link", 13)] : []),
           el("span", { class: "mmc-tl-tick-n", text: String(index + 1) }),

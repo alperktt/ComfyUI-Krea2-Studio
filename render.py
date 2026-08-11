@@ -155,8 +155,9 @@ def emit(payloads, labels, weights, sampling, acceleration, unique_id,
     graph = GraphBuilder()
     links = models.emit_links(graph, weights, set(where))
     joined = None           # (images, audio) for everything emitted so far
-    previous = None         # the previous payload's decoded images
-    previous_audio = None   # ...and its decoded sound
+    decoded = []            # every payload's decoded (images, audio), in order —
+                            # a seam defaults to the previous one but may name
+                            # any earlier segment via the payload's continue_from
 
     for index, one in enumerate(compiled):
         inputs = {
@@ -179,15 +180,17 @@ def emit(payloads, labels, weights, sampling, acceleration, unique_id,
             inputs["model_fl2va"] = links.model_fl2va
         if links.model_ref2va is not None:
             inputs["model_ref2va"] = links.model_ref2va
+        source = decoded[payloads[index].get("continue_from", index - 1)] \
+            if index else (None, None)
         if one.continues:
-            # Only the frame, not the whole batch: the previous segment's images
+            # Only the frame, not the whole batch: the source segment's images
             # are a video and what this one inherits is its last moment.
             # Inserted here rather than after every segment, so a render of hard
             # cuts has no dead nodes in it and a Creator render has none at all.
-            inputs["prev_image"] = graph.node(LAST_FRAME_NODE, image=previous).out(0)
+            inputs["prev_image"] = graph.node(LAST_FRAME_NODE, image=source[0]).out(0)
         if one.continues_audio:
             inputs["prev_audio"] = graph.node(
-                AUDIO_TAIL_NODE, audio=previous_audio, seconds=tail_s).out(0)
+                AUDIO_TAIL_NODE, audio=source[1], seconds=tail_s).out(0)
 
         segment = graph.node(SEGMENT_NODE, **inputs)
 
@@ -260,7 +263,7 @@ def emit(payloads, labels, weights, sampling, acceleration, unique_id,
         # this one attenuates anything hot enough to clip on the way to a file.
         images = graph.node("VAEDecode", samples=sampled.out(0), vae=links.vae).out(0)
         audio = graph.node("VAEDecodeAudio", samples=sampled.out(0), vae=links.audio_vae).out(0)
-        previous, previous_audio = images, audio
+        decoded.append((images, audio))
 
         if joined is None:
             joined = (images, audio)
