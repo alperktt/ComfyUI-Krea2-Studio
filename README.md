@@ -40,10 +40,17 @@ Then put the weights where ComfyUI already looks:
 | preview decoder | `models/vae_approx` — [`taeh3.safetensors`](https://github.com/madebyollin/taehv) |
 | refiner (optional) | `models/text_encoders` — any Qwen3-VL, 4B is plenty |
 | Krea 2 / Ideogram 4.0 (optional) | `models/diffusion_models`, `models/text_encoders`, `models/vae` |
+| single-image H3 VAE (optional) | `models/vae` — for H3 stills, see [PreStage](#prestage) |
 
 You pick the files in the node itself, on the **weights** pill. Anything a render
 needs and does not have is refused before the queue starts, naming the field and
 the folder it looks in.
+
+> The single-image VAE is a merged H3 VAE and loads through the same node as the
+> real one, so nothing downstream can tell them apart. It belongs in the
+> PreStage's VAE slot and nowhere else — in a video workflow it costs multi-frame
+> reconstruction. The weights pill will not auto-fill it as a video VAE, but it
+> will let you pick it, so read the filename.
 
 ## Attaching things
 
@@ -125,13 +132,41 @@ model will read *before* five minutes of sampling, not infer it from the result.
 
 The pipeline eats stills — start frames, end frames, references, storyboards — and
 making one usually means a second workflow, a second tab and a trip through the
-output folder. The PreStage generates them on the same canvas, locally, with Krea 2
-or Ideogram 4.0.
+output folder. The PreStage generates them on the same canvas, locally, with Krea 2,
+Ideogram 4.0, or H3 itself.
 
 Spawn it from the **pre-stage** pill; it lands at the left edge of the node it
 belongs to. Its result card has chips that write the finished still straight into
 the peer as a start frame, end frame or reference. The hand-off is by file, so one
 Run does both and an untouched PreStage is a cache hit.
+
+### Stills from H3 itself
+
+Experimental, and the reason to bother: the other two are image models, so a
+keyframe from them means loading a second model family and then matching a look
+across an architecture boundary. Switch the model pill to **MiniMax H3** and the
+still is made by the weights that will render the shot, on the canvas that shot
+will run at.
+
+It is a video generation with one frame kept. The node samples the shortest legal
+clip, takes one temporal slice of the latent, and decodes it with an
+image-specialised H3 VAE (`minimax_h3_t1_image_vae_*`), whose decoder was
+fine-tuned to turn a single temporal latent into a picture while its encoder was
+left frozen. That is why one file does both jobs here: the encoder that reads your
+references is still the stock H3 one, bit for bit.
+
+The body is the Creator's, because the request is a Creator's — nine reference
+images, three clips, three sounds, a start frame, an end frame, LoRAs, `@`
+mentions, FL2VA/Ref2VA routing, the taeh3 preview. Two pills are its own:
+
+| pill | what it does |
+|---|---|
+| `5f · 2 latent` | how much video is sampled to get the one frame. 5 is cheapest; H3's trained range starts at 124, so longer is more in-distribution and proportionally slower. |
+| `latent 0` | which latent frame becomes the picture. 0 is the causal first frame — the one slice the decoder was fitted to. Negative counts from the end. |
+
+Reconstruction is soft compared to a dedicated image model: fine text, thin
+contours and hair are where it shows first. It is an experiment, marked as one in
+the UI, and the video VAE is not a substitute for it in either direction.
 
 ## Timeline
 
@@ -286,6 +321,7 @@ python3 tests/test_settings.py        # what the settings file may hold
 python3 tests/test_canvas_mirror.py   # canvas.js against canvas.py
 python3 tests/test_prestage_mirror.py
 python3 tests/test_outputs_mirror.py  # outputs.js against outputs.py
+python3 tests/test_js_bodies.py       # the frontend loads and every node body mounts
 ```
 
 Those need neither torch nor ComfyUI (the mirror tests need `node`). The graph tests do, and skip themselves with a
