@@ -178,9 +178,15 @@ export function outputUrl({ filename, subfolder = "", type = "output" }) {
 const loraCache = new Map();   // folder -> {at, body}
 
 /**
- * One folder of models/loras, each row carrying whatever its CiviMeta sidecar
- * knows. `folder` is a relative path, "" for everything; the reply also carries
- * the folder list, so the manager never has to ask for it separately.
+ * One folder of models/loras, each row carrying whatever the sidecars beside it
+ * know — CiviMeta, Lora Manager, `.civitai.info`, A1111, or nothing but a
+ * preview image. `folder` is a relative path, "" for everything; the reply also
+ * carries the folder list, so the manager never has to ask for it separately.
+ *
+ * `force` is the Rescan button, and it clears the server's caches as well as
+ * this one: the server holds a directory listing briefly and a row for as long
+ * as nothing beside the file changes, neither of which notices a sidecar edited
+ * in place. A button that says "look again" has to reach that far.
  *
  * @returns {Promise<{loras: object[], folders: {path: string, count: number}[],
  *                    folder: string, matched: number, truncated: boolean}>}
@@ -188,8 +194,9 @@ const loraCache = new Map();   // folder -> {at, body}
 export async function listLoras({ folder = "", force = false } = {}) {
   const hit = loraCache.get(folder);
   if (!force && hit && Date.now() - hit.at < CACHE_MS) return hit.body;
-  const response = await api.fetchApi(
-    `/minimax_creator/loras?folder=${encodeURIComponent(folder)}`);
+  const query = new URLSearchParams({ folder });
+  if (force) query.set("refresh", "1");
+  const response = await api.fetchApi(`/minimax_creator/loras?${query}`);
   if (!response.ok) throw new Error(`LoRA listing failed (${response.status})`);
   const body = await response.json();
   if (force) loraCache.clear();
@@ -197,8 +204,9 @@ export async function listLoras({ folder = "", force = false } = {}) {
   return body;
 }
 
-/** The sidecar's showcase image or clip. 404s into the card's fallback when
- *  there is no sidecar, which is the normal state of a hand-placed LoRA. */
+/** The card's image or clip, from wherever the server found one — a sidecar's
+ *  gallery, a `.preview.png` beside the file, or a thumbnail embedded in the
+ *  safetensors header. 404s into the card's fallback when there is nothing. */
 export function loraPreviewUrl(name) {
   return api.apiURL(`/minimax_creator/lora_preview?name=${encodeURIComponent(name)}`);
 }
@@ -206,7 +214,7 @@ export function loraPreviewUrl(name) {
 const detailCache = new Map();   // name -> {at, detail}
 
 /**
- * Everything the detail sheet shows for one LoRA: the full CiviMeta sidecar
+ * Everything the detail sheet shows for one LoRA: the merged sidecar record
  * with its showcase and generation recipes, and the safetensors header either
  * way. Cached briefly — closing and reopening the same sheet is a normal way
  * to read, and nothing in it changes at that cadence.

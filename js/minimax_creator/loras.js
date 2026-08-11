@@ -7,8 +7,10 @@
 // control writes straight through to creator_data and the only exit is Done.
 //
 // Cards come from models/loras. Everything above the filename — showcase image,
-// title, base model, trigger words — comes from the CiviMeta sidecar directory
-// beside the file, and a LoRA without one still gets a working card.
+// title, base model, trigger words — comes from whatever sidecars are beside the
+// file, which is `lorameta.py`'s problem rather than this file's: half a dozen
+// tools write half a dozen layouts and they all arrive here as one row shape. A
+// LoRA nothing has ever described still gets a working card from its filename.
 //
 // A real collection is hundreds or thousands of files, so the grid never holds
 // all of them: a folder picker narrows what the server even walks, and what
@@ -185,7 +187,11 @@ class LoraManager {
 
   toggle(row) {
     if (S.findLora(this.state, row.name)) S.removeLora(this.state, row.name);
-    else S.addLora(this.state, row.name, row.trained_words || []);
+    // Both of these are the sidecar's opinion and both stay editable: the
+    // triggers become chips that can be switched off, the strength a slider
+    // that can be dragged. Starting from what the file's author chose is only
+    // a better guess than 1.00, not a decision.
+    else S.addLora(this.state, row.name, row.trained_words || [], row.strength);
     this.refreshCard(row);
     this.changed();
   }
@@ -425,10 +431,10 @@ class LoraManager {
         if (event.key === "Enter" || event.key === " ") { event.preventDefault(); this.toggle(row); }
       },
     });
-    // The preview kind is decided server-side from what the sidecar actually
-    // holds: an H3 LoRA usually showcases clips, and CiviMeta only generates
-    // still thumbnails for still media — so a video card shows a still of its
-    // clip (see `still`) and plays it on hover.
+    // The preview kind is decided server-side from what was actually found: an
+    // H3 LoRA usually showcases clips, CiviMeta only generates still thumbnails
+    // for still media, and `{name}.preview.mp4` is a video by definition — so a
+    // video card shows a still of its clip (see `still`) and plays it on hover.
     if (row.preview === "image") {
       art.appendChild(el("img", { src: loraPreviewUrl(row.name), loading: "lazy", alt: "" }));
     } else {
@@ -458,6 +464,16 @@ class LoraManager {
         class: "mmc-lora-words",
         title: "Trigger words from the sidecar. Adding this LoRA takes them on, and you can then drop or extend them.",
         text: row.trained_words.join(", "),
+      }));
+    }
+    // A LoRA nothing has described says so, rather than looking like one whose
+    // sidecar is merely empty. The manager is also where someone would go to
+    // find out why a card is bare.
+    if (!entry && !row.sources?.length) {
+      body.appendChild(el("div", {
+        class: "mmc-lora-words",
+        title: "No sidecar and nothing in the file's own header. Double-click for what the safetensors header does say.",
+        text: "no metadata",
       }));
     }
     if (entry) body.appendChild(this.controls(entry, row));

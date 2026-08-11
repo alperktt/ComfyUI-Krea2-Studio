@@ -9,8 +9,10 @@ Video does need routes of its own: `/view` serves the whole clip, which is the
 wrong thing to hand a 140 px grid cell or a waveform canvas. See preview.py.
 
 LoRAs need both routes of their own. `/view` only serves input, output and temp,
-so it cannot reach models/loras, and the CiviMeta sidecar next to each file has
-to be read server-side.
+so it cannot reach models/loras, and whatever sidecar sits next to each file has
+to be read server-side. What those sidecars *are* is `lorameta.py`'s problem —
+half a dozen tools write half a dozen layouts, and nothing here knows which one
+filled this folder.
 
 The settings pair at the bottom is the one thing here that is not a listing. It
 has to be a route rather than the frontend's userdata API for the reason
@@ -19,16 +21,14 @@ and only the server can hand both ends the same path.
 """
 
 import asyncio
-import json
 import os
-import struct
 
 from aiohttp import web
 
 import folder_paths
 from server import PromptServer
 
-from . import models, preview, settings
+from . import lorameta, models, preview, settings
 
 # The picker builds its grid lazily and paginates, so the cap only bounds the
 # listing's JSON payload (~2 MB at this size). Newest first, so when a folder
@@ -41,19 +41,6 @@ MAX_ASSETS = 20000
 # for every one of them is seconds of work — so only the newest MAX_LORAS are
 # described, and the manager says so and offers the folder picker instead.
 MAX_LORAS = 600
-
-# CiviMeta writes `{model}.civitai/` beside every file it has identified:
-# meta.json (the Civitai model version), images.json, media/NNN.ext (the
-# creator's showcase, downloaded) and thumbnails/NNN.webp (generated, images
-# only — a video showcase has no thumbnail, so media/ is the fallback).
-SIDECAR_SUFFIX = ".civitai"
-PREVIEW_DIRS = ("thumbnails", "media")
-PREVIEW_KINDS = {
-    ".webp": "image", ".jpg": "image", ".jpeg": "image", ".png": "image", ".gif": "image",
-    ".mp4": "video", ".webm": "video",
-}
-# CiviMeta leaves a stub behind when a media download fails part way.
-MIN_PREVIEW_BYTES = 100
 
 
 def _classify(filename):
@@ -195,97 +182,6 @@ async def asset_peaks(request):
     return web.json_response(result, headers={"Cache-Control": "no-cache"})
 
 
-def _first_preview(sidecar):
-    """The showcase image or clip CiviMeta cached, as (relative path, kind).
-
-    Thumbnails first — they are generated WebP and a fraction of the bytes — then
-    the raw media, which is the only thing a video-preview LoRA has. Both are
-    numbered (`001.webp`), so alphabetical order is the creator's order.
-    """
-    for sub in PREVIEW_DIRS:
-        directory = os.path.join(sidecar, sub)
-        try:
-            names = sorted(os.listdir(directory))
-        except OSError:
-            continue
-        for name in names:
-            kind = PREVIEW_KINDS.get(os.path.splitext(name)[1].lower())
-            if kind is None:
-                continue
-            path = os.path.join(directory, name)
-            try:
-                if os.path.getsize(path) < MIN_PREVIEW_BYTES:
-                    continue
-            except OSError:
-                continue
-            return f"{sub}/{name}", kind
-    return None, None
-
-
-def _read_meta(sidecar):
-    try:
-        with open(os.path.join(sidecar, "meta.json"), encoding="utf-8") as handle:
-            meta = json.load(handle)
-    except (OSError, ValueError):
-        return None
-    return meta if isinstance(meta, dict) else None
-
-
-# name -> (sidecar mtime, description). Reading a JSON file and listing two
-# directories per LoRA is cheap, but not cheap enough to redo on every keystroke
-# in the manager's search box.
-_LORA_CACHE = {}
-
-
-def _describe_lora(name, path):
-    sidecar = path + SIDECAR_SUFFIX
-    try:
-        stamp = os.path.getmtime(sidecar)
-    except OSError:
-        stamp = None
-
-    cached = _LORA_CACHE.get(name)
-    if cached and cached[0] == stamp:
-        return cached[1]
-
-    try:
-        size = os.path.getsize(path)
-        mtime = os.path.getmtime(path)
-    except OSError:
-        size, mtime = 0, 0
-
-    row = {
-        "name": name,
-        "base": os.path.splitext(os.path.basename(name))[0],
-        "folder": os.path.dirname(name),
-        "size": size,
-        "mtime": mtime,
-        "preview": None,
-    }
-
-    if stamp is not None:
-        _, kind = _first_preview(sidecar)
-        row["preview"] = kind
-        meta = _read_meta(sidecar)
-        if meta:
-            stats = meta.get("stats") or {}
-            row.update({
-                "title": meta.get("name"),
-                "version": meta.get("versionName"),
-                "base_model": meta.get("baseModel"),
-                "type": meta.get("type"),
-                "tags": meta.get("tags") or [],
-                "trained_words": meta.get("trainedWords") or [],
-                "nsfw": bool(meta.get("nsfw")),
-                "model_id": meta.get("modelId"),
-                "version_id": meta.get("versionId"),
-                "downloads": stats.get("downloads"),
-            })
-
-    _LORA_CACHE[name] = (stamp, row)
-    return row
-
-
 def _lora_names():
     """Every registered LoRA, as a forward-slash relative name.
 
@@ -315,13 +211,19 @@ def _in_folder(name, folder):
     return not folder or name.startswith(folder + "/")
 
 
-def _collect_loras(folder):
+def _collect_loras(folder, refresh=False):
     """The rows for one folder, newest first, capped at MAX_LORAS.
 
     Two passes on purpose. Stat-ing every candidate is cheap and is the only way
     to know which ones are the newest; reading sidecars is not, so it happens
     only for the ones that survive the cap.
     """
+    if refresh:
+        # The manager's Rescan. `lorameta` holds a directory listing for a short
+        # while and a row for as long as nothing beside the file changes, which
+        # between them cannot notice a sidecar edited in place — so the button
+        # that exists to say "look again" has to actually mean it.
+        lorameta.forget()
     names = _lora_names()
     found = []
     for name in names:
@@ -335,7 +237,7 @@ def _collect_loras(folder):
         except OSError:
             continue
     found.sort(reverse=True)
-    rows = [_describe_lora(name, path) for _, name, path in found[:MAX_LORAS]]
+    rows = [lorameta.row(name, path) for _, name, path in found[:MAX_LORAS]]
     return {
         "loras": rows,
         "folders": _folder_counts(names),
@@ -351,220 +253,97 @@ async def list_loras(request):
     # reads. On the event loop that is the prompt queue and the websocket held
     # up for as long as it takes.
     folder = request.query.get("folder", "").strip("/")
+    refresh = request.query.get("refresh") == "1"
     loop = asyncio.get_running_loop()
-    return web.json_response(await loop.run_in_executor(None, _collect_loras, folder))
+    return web.json_response(await loop.run_in_executor(None, _collect_loras, folder, refresh))
+
+
+def _lora_path(request):
+    """The absolute path behind a `?name=`, or None.
+
+    `get_full_path` normalises the name against the registered lora folders,
+    which is also what keeps a crafted name inside them.
+    """
+    return folder_paths.get_full_path("loras", request.query.get("name", ""))
+
+
+def _serve(path, data):
+    """A media file, or bytes that were never a file, as a response.
+
+    Embedded cover images and ModelSpec thumbnails live inside the safetensors
+    header and have no filename to hand aiohttp, so they are served from memory
+    with a type sniffed off their first bytes.
+    """
+    if path is not None:
+        return web.FileResponse(path)
+    if data is not None:
+        payload, mime = data
+        return web.Response(body=payload, content_type=mime)
+    return web.Response(status=404)
 
 
 @PromptServer.instance.routes.get("/minimax_creator/lora_preview")
 async def lora_preview(request):
-    """Serve the CiviMeta showcase image or clip for one LoRA.
+    """Serve the card image or clip for one LoRA, from wherever it was found.
 
     Core's `/view` is limited to input/output/temp, so models/loras is out of its
-    reach. `get_full_path` normalises the name against the registered lora
-    folders, which is also what keeps a crafted name inside them.
+    reach.
     """
-    path = folder_paths.get_full_path("loras", request.query.get("name", ""))
+    path = _lora_path(request)
     if path is None:
         return web.Response(status=404)
-    sidecar = path + SIDECAR_SUFFIX
-    relative, _ = _first_preview(sidecar)
-    if relative is None:
-        return web.Response(status=404)
-    return web.FileResponse(os.path.join(sidecar, *relative.split("/")))
-
-
-def _list_showcase(sidecar):
-    """Every showcase file CiviMeta cached, in the creator's order.
-
-    Only media/ is walked — thumbnails are looked up per entry, because a video
-    showcase never has one and the detail sheet needs to know which is which.
-    """
-    entries = []
-    directory = os.path.join(sidecar, "media")
-    try:
-        names = sorted(os.listdir(directory))
-    except OSError:
-        return entries
-    for name in names:
-        kind = PREVIEW_KINDS.get(os.path.splitext(name)[1].lower())
-        if kind is None:
-            continue
-        try:
-            if os.path.getsize(os.path.join(directory, name)) < MIN_PREVIEW_BYTES:
-                continue
-        except OSError:
-            continue
-        stem = os.path.splitext(name)[0]
-        thumb = os.path.join(sidecar, "thumbnails", stem + ".webp")
-        try:
-            has_thumb = os.path.getsize(thumb) >= MIN_PREVIEW_BYTES
-        except OSError:
-            has_thumb = False
-        entries.append({"file": name, "kind": kind, "stem": stem, "thumb": has_thumb})
-    return entries
-
-
-# The per-image generation settings worth showing on a detail sheet. images.json
-# carries more (the whole Comfy graph, resource lists); the recipe is what a
-# person can act on.
-RECIPE_KEYS = ("prompt", "negativePrompt", "seed", "steps", "cfgScale", "sampler", "scheduler")
-
-
-def _showcase_rows(sidecar):
-    """The showcase as the detail sheet wants it: one row per cached file, each
-    carrying the generation recipe images.json holds for it.
-
-    Media files are numbered from the images.json order (`001` is items[0]), so
-    a numeric stem is the authoritative link back to its metadata — positional
-    matching would drift the moment one download in the middle failed.
-    """
-    try:
-        with open(os.path.join(sidecar, "images.json"), encoding="utf-8") as handle:
-            items = json.load(handle).get("items") or []
-    except (OSError, ValueError, AttributeError):
-        items = []
-
-    rows = []
-    for index, entry in enumerate(_list_showcase(sidecar)):
-        row = {"index": index, "kind": entry["kind"], "thumb": entry["thumb"], "meta": None}
-        try:
-            item = items[int(entry["stem"]) - 1]
-        except (ValueError, IndexError):
-            item = None
-        if isinstance(item, dict):
-            meta = item.get("meta")
-            if isinstance(meta, dict):
-                recipe = {key: meta.get(key) for key in RECIPE_KEYS if meta.get(key) is not None}
-                row["meta"] = recipe or None
-            row["nsfw"] = bool(item.get("nsfw"))
-        rows.append(row)
-    return rows
-
-
-# A safetensors header is one JSON blob at the front of the file. Anything
-# claiming to be bigger than this is not a header, it is a corrupt length field
-# about to become a memory allocation.
-MAX_ST_HEADER = 64 * 1024 * 1024
-
-
-def _read_safetensors_header(path):
-    """What the file itself can say: training metadata, tensor census, rank.
-
-    `metadata` is the trainer's `__metadata__` block verbatim (kohya's ss_*
-    keys, ai-toolkit's json-in-string values — the frontend knows the dialects).
-    `ranks` comes from the lora_A/lora_down shapes, which is the ground truth
-    the metadata's ss_network_dim merely repeats.
-    """
-    try:
-        with open(path, "rb") as handle:
-            prefix = handle.read(8)
-            if len(prefix) < 8:
-                return {"error": "not a safetensors file"}
-            (length,) = struct.unpack("<Q", prefix)
-            if not 0 < length <= MAX_ST_HEADER:
-                return {"error": "no readable header"}
-            header = json.loads(handle.read(length))
-    except (OSError, ValueError, UnicodeDecodeError) as exc:
-        return {"error": str(exc)}
-    if not isinstance(header, dict):
-        return {"error": "no readable header"}
-
-    metadata = header.pop("__metadata__", None)
-    dtypes = {}
-    ranks = set()
-    for key, tensor in header.items():
-        if not isinstance(tensor, dict):
-            continue
-        dtype = tensor.get("dtype")
-        if dtype:
-            dtypes[dtype] = dtypes.get(dtype, 0) + 1
-        if key.endswith(("lora_A.weight", "lora_down.weight")):
-            shape = tensor.get("shape") or []
-            if shape:
-                ranks.add(shape[0])
-    return {
-        "metadata": metadata if isinstance(metadata, dict) else {},
-        "tensors": len(header),
-        "dtypes": dtypes,
-        "ranks": sorted(ranks),
-    }
-
-
-# What the detail sheet shows from meta.json, verbatim. The listing's
-# _describe_lora flattens a chosen few of these; the sheet gets the lot,
-# including the two description HTML blobs — which the frontend sanitizes
-# before they touch the DOM.
-DETAIL_META_KEYS = (
-    "hash", "modelId", "versionId", "name", "versionName", "type", "baseModel",
-    "creator", "description", "versionDescription", "tags", "trainedWords",
-    "stats", "license", "nsfw", "files", "versions", "mediaCount", "fetchedAt",
-)
-
-
-def _lora_detail(name):
-    path = folder_paths.get_full_path("loras", name)
-    if path is None:
-        return None
-    try:
-        size = os.path.getsize(path)
-        mtime = os.path.getmtime(path)
-    except OSError:
-        size, mtime = 0, 0
-    detail = {
-        "name": name,
-        "size": size,
-        "mtime": mtime,
-        "header": _read_safetensors_header(path),
-        "civitai": None,
-        "showcase": [],
-    }
-    sidecar = path + SIDECAR_SUFFIX
-    meta = _read_meta(sidecar)
-    if meta:
-        detail["civitai"] = {key: meta.get(key) for key in DETAIL_META_KEYS}
-        detail["showcase"] = _showcase_rows(sidecar)
-    return detail
+    loop = asyncio.get_running_loop()
+    found, data = await loop.run_in_executor(None, lorameta.preview, path)
+    return _serve(found, data)
 
 
 @PromptServer.instance.routes.get("/minimax_creator/lora_detail")
 async def lora_detail(request):
-    """Everything one LoRA's detail sheet needs, in one request: the full
-    CiviMeta sidecar (when there is one), the showcase with its generation
-    recipes, and what the safetensors header itself says either way.
+    """Everything one LoRA's detail sheet needs, in one request: whatever the
+    sidecars beside it know, the showcase with its generation recipes, and what
+    the safetensors header itself says either way.
     """
     name = request.query.get("name", "")
-    # Reading a header on a network share, plus a sidecar's JSON files, is I/O
+    path = folder_paths.get_full_path("loras", name)
+    if path is None:
+        return web.json_response({"error": "no such LoRA"}, status=404)
+    # Reading a header on a network share, plus a handful of sidecars, is I/O
     # the event loop must not sit on.
     loop = asyncio.get_running_loop()
-    detail = await loop.run_in_executor(None, _lora_detail, name)
-    if detail is None:
-        return web.json_response({"error": "no such LoRA"}, status=404)
-    return web.json_response(detail)
+    return web.json_response(await loop.run_in_executor(None, lorameta.detail, name, path))
 
 
 @PromptServer.instance.routes.get("/minimax_creator/lora_showcase")
 async def lora_showcase(request):
     """Serve one showcase file by its index in the detail's showcase list.
 
-    `?thumb=1` asks for the generated WebP thumbnail instead — the filmstrip's
-    request — and falls back to the media file when there is none, which is the
-    normal state of a video showcase.
+    `?thumb=1` asks for the generated thumbnail instead — the filmstrip's
+    request — and falls back to the full media when there is none, which is the
+    normal state of a video showcase and of every gallery but CiviMeta's.
+
+    The list is recomputed rather than remembered between the two requests: a
+    server that held one per open sheet would be holding decoded cover images
+    for every LoRA anyone had looked at.
     """
-    path = folder_paths.get_full_path("loras", request.query.get("name", ""))
+    path = _lora_path(request)
     if path is None:
         return web.Response(status=404)
-    sidecar = path + SIDECAR_SUFFIX
     try:
         index = int(request.query.get("item", "0"))
     except ValueError:
         return web.Response(status=404)
-    entries = _list_showcase(sidecar)
+
+    loop = asyncio.get_running_loop()
+    entries = await loop.run_in_executor(None, lorameta.showcase, path)
     if not 0 <= index < len(entries):
         return web.Response(status=404)
     entry = entries[index]
-    if request.query.get("thumb") == "1" and entry["thumb"]:
-        return web.FileResponse(os.path.join(sidecar, "thumbnails", entry["stem"] + ".webp"))
-    return web.FileResponse(os.path.join(sidecar, "media", entry["file"]))
+    if request.query.get("thumb") == "1" and entry.get("thumb"):
+        return web.FileResponse(entry["thumb"])
+    data = None
+    if entry.get("data") is not None:
+        data = (entry["data"], entry.get("mime") or lorameta.sniff(entry["data"]))
+    return _serve(entry.get("path"), data)
 
 
 @PromptServer.instance.routes.get("/minimax_creator/models")

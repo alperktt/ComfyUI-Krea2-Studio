@@ -1203,10 +1203,18 @@ export function activeLoras(state) {
 /** `triggers` seeds from the sidecar's trained words, which is the only moment
  *  the sidecar is consulted — from here on the entry owns its own list, so
  *  dropping a word or adding one of your own are the same edit. */
-export function addLora(state, name, triggers = []) {
+/** `strength` is the weight a sidecar recorded — A1111's "preferred weight",
+ *  Lora Manager's usage tip — which is the number whoever wrote it settled on
+ *  after using the file. Absent, out of range or not a number all mean nobody
+ *  recorded one, and the slider starts where it always did. */
+export function addLora(state, name, triggers = [], strength = null) {
   if (findLora(state, name)) return null;
+  const preferred = Number(strength);
   const entry = {
-    name, strength: DEFAULT_STRENGTH, enabled: true,
+    name,
+    strength: Number.isFinite(preferred) && preferred >= -1 && preferred <= 2
+      ? preferred : DEFAULT_STRENGTH,
+    enabled: true,
     modes: [...CHECKPOINTS], triggers: [...triggers],
   };
   state.loras.push(entry);

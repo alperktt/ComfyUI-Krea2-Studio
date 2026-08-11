@@ -1,13 +1,19 @@
 // The LoRA detail sheet: double-click on a manager card.
 //
 // Two deliberately different shapes, because the two kinds of file know
-// different things about themselves. A LoRA with a CiviMeta sidecar opens
+// different things about themselves. A LoRA some tool has described opens
 // showcase-first — big media, a filmstrip, and under the selected image the
-// generation recipe images.json recorded for it, which is the closest thing to
-// an answer to "how do I prompt this". A LoRA without one opens as a spec
-// sheet read from the safetensors header itself: trainer, rank, precision,
+// generation recipe that was recorded for it, which is the closest thing to an
+// answer to "how do I prompt this". A LoRA nothing has described opens as a
+// spec sheet read from the safetensors header itself: trainer, rank, precision,
 // training run, and (for kohya-trained files) the dataset's tag frequency,
 // which is the closest thing such a file has to trigger words.
+//
+// Which tool wrote what is not this file's business. `lorameta.py` merges every
+// sidecar it found into one record under this pack's own field names, and names
+// its sources at the bottom of the sheet — which is the one place it matters,
+// because "where did this title come from" is a question only asked when the
+// title looks wrong.
 
 import { el, ICONS, svg, mountOverlay } from "./dom.js";
 import { loraDetail, loraShowcaseUrl } from "./api.js";
@@ -18,6 +24,18 @@ export function openLoraDetail(row) {
     new LoraDetailSheet(row, resolve).mount();
   });
 }
+
+// What each of `lorameta.PROVIDERS` is called on the sheet. Named after the file
+// on disk rather than after the tool wherever the file is the recognisable part:
+// somebody looking at why a title is wrong is going to go looking in the folder.
+const SOURCE_LABEL = {
+  civimeta: "CiviMeta sidecar",
+  loramanager: ".metadata.json",
+  civitai_info: ".civitai.info",
+  a1111: ".json / .txt",
+  header: "safetensors header",
+  loose: "preview file",
+};
 
 // ---- formatting -------------------------------------------------------------
 
@@ -49,9 +67,11 @@ function parseJson(text) {
 
 // ---- description HTML -------------------------------------------------------
 
-// The sidecar's description is HTML straight from Civitai. Only this structural
-// subset survives; anything else is unwrapped to its text. No images and no
-// iframes: a detail sheet must not phone remote hosts on open.
+// A description is HTML straight from Civitai, or plain text somebody typed
+// into a `.txt` beside the file. Only this structural subset survives; anything
+// else is unwrapped to its text, which is also what makes plain text safe to
+// send through here. No images and no iframes: a detail sheet must not phone
+// remote hosts on open.
 const SAFE_TAGS = new Set([
   "P", "BR", "UL", "OL", "LI", "STRONG", "B", "EM", "I", "U", "S",
   "CODE", "PRE", "BLOCKQUOTE",
@@ -204,7 +224,7 @@ class LoraDetailSheet {
     this.sheet.classList.toggle("bare", !showcase.length);
     this.sheet.replaceChildren(
       ...(showcase.length ? [this.stage(showcase)] : []),
-      detail.civitai ? this.civitaiInfo() : this.headerInfo(),
+      detail.meta ? this.metaInfo() : this.headerInfo(),
     );
   }
 
@@ -271,7 +291,7 @@ class LoraDetailSheet {
     const facts = [
       meta.seed != null && ["seed", String(meta.seed)],
       meta.steps != null && ["steps", String(meta.steps)],
-      meta.cfgScale != null && ["cfg", String(meta.cfgScale)],
+      meta.cfg != null && ["cfg", String(meta.cfg)],
       meta.sampler && ["sampler", String(meta.sampler)],
       meta.scheduler && ["sched", String(meta.scheduler)],
     ].filter(Boolean);
@@ -290,11 +310,11 @@ class LoraDetailSheet {
         this.copyButton(meta.prompt),
       ]));
     }
-    if (meta.negativePrompt) {
+    if (meta.negative_prompt) {
       children.push(el("div", {
         class: "mmc-sheet-negative",
-        text: `negative: ${meta.negativePrompt}`,
-        title: meta.negativePrompt,
+        text: `negative: ${meta.negative_prompt}`,
+        title: meta.negative_prompt,
       }));
     }
     this.recipeBox.replaceChildren(...children);
@@ -334,19 +354,19 @@ class LoraDetailSheet {
       words.map((word) => el("span", { class: className, text: word })));
   }
 
-  civitaiInfo() {
-    const meta = this.detail.civitai;
+  metaInfo() {
+    const meta = this.detail.meta;
     const stats = meta.stats || {};
-    const eyebrow = [meta.type, meta.baseModel].filter(Boolean).join(" · ");
+    const eyebrow = [meta.type, meta.base_model].filter(Boolean).join(" · ");
 
     const statRow = el("div", { class: "mmc-sheet-stats" }, [
       Number.isFinite(stats.downloads) && this.stat(fmtCount(stats.downloads), "downloads"),
       stats.rating > 0 && this.stat(`★ ${stats.rating.toFixed(1)}`, "rating"),
       stats.favorites > 0 && this.stat(fmtCount(stats.favorites), "favorites"),
-      stats.commentCount > 0 && this.stat(fmtCount(stats.commentCount), "comments"),
+      stats.comments > 0 && this.stat(fmtCount(stats.comments), "comments"),
     ].filter(Boolean));
 
-    const description = [meta.description, meta.versionDescription]
+    const description = [meta.description, meta.version_description]
       .filter((html) => html && String(html).trim());
     const about = description.length
       ? el("div", { class: "mmc-sheet-desc" }, description.map((html) => {
@@ -356,9 +376,12 @@ class LoraDetailSheet {
       }))
       : null;
 
-    const link = meta.modelId ? el("a", {
+    // Built server-side, because only the server knows whether the record that
+    // produced this sheet came from Civitai at all — a LoRA described entirely
+    // by a `.txt` and a preview image has nowhere to link to.
+    const link = meta.url ? el("a", {
       class: "mmc-sheet-link",
-      href: `https://civitai.com/models/${meta.modelId}${meta.versionId ? `?modelVersionId=${meta.versionId}` : ""}`,
+      href: meta.url,
       target: "_blank", rel: "noopener noreferrer",
       text: "Open on Civitai ↗",
     }) : null;
@@ -369,17 +392,25 @@ class LoraDetailSheet {
         eyebrow,
         meta.nsfw ? el("span", { class: "mmc-sheet-nsfw", text: "NSFW" }) : null,
       ]),
-      el("div", { class: "mmc-sheet-title", text: meta.name || this.row.base }),
+      el("div", { class: "mmc-sheet-title", text: meta.title || this.row.base }),
       el("div", {
         class: "mmc-sheet-byline",
         text: [
-          meta.versionName,
-          meta.creator?.username && `by ${meta.creator.username}`,
-          meta.fetchedAt && `fetched ${fmtDate(meta.fetchedAt)}`,
+          meta.version,
+          meta.creator && `by ${meta.creator}`,
+          meta.fetched_at && `fetched ${fmtDate(meta.fetched_at)}`,
         ].filter(Boolean).join(" · "),
       }),
       statRow.childElementCount ? statRow : null,
-      this.section("Trigger words", this.chips(meta.trainedWords, "mmc-sheet-chip accent")),
+      this.section("Trigger words", this.chips(meta.trained_words, "mmc-sheet-chip accent")),
+      // Whoever wrote the sidecar had settled on a weight. The manager's slider
+      // now starts there, so the sheet says where "there" came from.
+      this.section("Suggested strength", Number.isFinite(meta.strength)
+        ? el("div", { class: "mmc-sheet-license", text: meta.strength.toFixed(2) })
+        : null),
+      this.section("Notes", meta.notes
+        ? el("div", { class: "mmc-sheet-desc" }, [el("div", { text: meta.notes })])
+        : null),
       this.section("About", about),
       this.section("Versions", this.versions(meta)),
       this.section("License", this.license(meta.license)),
@@ -402,25 +433,26 @@ class LoraDetailSheet {
   versions(meta) {
     if (!meta.versions?.length) return null;
     return el("div", { class: "mmc-sheet-versions" }, meta.versions.map((version) =>
-      el("div", { class: "mmc-sheet-version", "aria-current": version.id === meta.versionId }, [
+      el("div", { class: "mmc-sheet-version", "aria-current": version.id === meta.version_id }, [
         el("span", { class: "mmc-sheet-version-name", text: version.name || String(version.id) }),
         el("span", {
           class: "mmc-sheet-version-sub",
-          text: [version.baseModel, fmtDate(version.createdAt)].filter(Boolean).join(" · "),
+          text: [version.base_model, fmtDate(version.created_at)].filter(Boolean).join(" · "),
         }),
-        version.id === meta.versionId ? el("span", { class: "mmc-sheet-installed", text: "installed" }) : null,
+        version.id === meta.version_id ? el("span", { class: "mmc-sheet-installed", text: "installed" }) : null,
       ])));
   }
 
+  /** Already normalised server-side: Civitai returns an array of permissions
+   *  and CiviMeta stores the same thing as the set literal "{Image,Rent,Sell}",
+   *  and neither spelling reaches this far any more. */
   license(license) {
     if (!license) return null;
-    // allowCommercialUse arrives as a set literal in a string: "{Image,Rent,Sell}".
-    const commercial = String(license.allowCommercialUse ?? "").replace(/["{}]/g, "").split(",")
-      .map((part) => part.trim()).filter((part) => part && part.toLowerCase() !== "none");
     const lines = [
-      commercial.length ? `Commercial use: ${commercial.join(", ")}` : "No commercial use",
-      license.allowNoCredit ? "Credit not required" : "Credit required",
-      license.allowDerivatives ? "Derivatives allowed" : "No derivatives",
+      license.commercial?.length
+        ? `Commercial use: ${license.commercial.join(", ")}` : "No commercial use",
+      license.credit ? "Credit required" : "Credit not required",
+      license.derivatives ? "Derivatives allowed" : "No derivatives",
     ];
     return el("div", { class: "mmc-sheet-license", text: lines.join(" · ") });
   }
@@ -429,6 +461,7 @@ class LoraDetailSheet {
     const header = this.detail.header || {};
     const facts = headerFacts(header, this.detail.size)
       .filter(([label]) => ["Rank", "Precision", "Tensors", "File size"].includes(label));
+    const sources = (meta.sources || []).map((key) => SOURCE_LABEL[key] || key);
     return el("div", { class: "mmc-sheet-file" }, [
       el("div", { class: "mmc-sheet-path", text: this.row.name, title: this.row.name }),
       facts.length ? el("div", {
@@ -436,6 +469,13 @@ class LoraDetailSheet {
         text: facts.map(([label, value]) => `${label.toLowerCase()} ${value}`).join(" · "),
       }) : null,
       meta.hash ? el("div", { class: "mmc-sheet-hash", text: `sha256 ${String(meta.hash).slice(0, 12)}…`, title: meta.hash }) : null,
+      // Only worth reading when something above looks wrong, which is exactly
+      // when knowing which file on disk said it is the whole answer.
+      sources.length ? el("div", {
+        class: "mmc-sheet-file-facts",
+        title: "Where the fields above were read from. Later entries only fill in what earlier ones left blank.",
+        text: `read from ${sources.join(", ")}`,
+      }) : null,
     ]);
   }
 
@@ -484,7 +524,7 @@ class LoraDetailSheet {
       el("div", { class: "mmc-sheet-title", text: metadata.name || metadata.ss_output_name || this.row.base }),
       el("div", {
         class: "mmc-sheet-byline",
-        text: "No CiviMeta sidecar — everything below was read from the file itself.",
+        text: "No sidecar anywhere beside this file — everything below was read from the file itself.",
       }),
       header.error
         ? el("div", { class: "mmc-sheet-license", text: `The header could not be read: ${header.error}` })

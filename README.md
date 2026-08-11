@@ -102,11 +102,31 @@ palette and pose along with the face.
 
 ![The LoRA manager](docs/img/lora_picker.png)
 
-A full-screen manager over `models/loras`. Cards carry the showcase image, Civitai
-title, base model and trigger words read from the CiviMeta sidecar; a LoRA without
-one still gets a working card from its filename. Each card sets a strength, which
-checkpoint it belongs to, and its trigger words. Those words are prefixed to the
-prompt at compile time and printed under the LoRA chips in the node body.
+A full-screen manager over `models/loras`. Cards carry the showcase image or clip,
+the title, base model and trigger words read from whatever is sitting beside the
+file; a LoRA nothing has described still gets a working card from its filename.
+Each card sets a strength, which checkpoint it belongs to, and its trigger words.
+Those words are prefixed to the prompt at compile time and printed under the LoRA
+chips in the node body.
+
+Metadata is read from whichever of these it finds, and merged — later entries only
+fill in what earlier ones left blank, except for the trigger words and the strength,
+where anything *you* wrote outranks anything a website said:
+
+| Written by | Files read |
+| --- | --- |
+| CiviMeta | `{model}.safetensors.civitai/` — `meta.json`, `images.json`, `media/`, `thumbnails/` |
+| ComfyUI-Lora-Manager | `{model}.metadata.json`, and its example-images folder if one is configured |
+| Civitai Helper, CivitAI Browser+ | `{model}.civitai.info`, `{model}.api_info.json`, `{model}_0.jpg`… |
+| A1111, Forge, and downstream | `{model}.json` (activation text, preferred weight), `{model}.txt`, `{model}.description.txt` |
+| ComfyUI core, hayden-fr's manager, pysssss | `{model}.preview.{png,jpg,webp,mp4,webm,…}`, `{model}.{ext}`, `{model}.md` |
+| The file itself | ModelSpec (`modelspec.title`, `.trigger_phrase`, `.thumbnail`) and kohya's embedded `ssmd_cover_images` |
+
+Nothing is written back: every one of these is read-only, and a LoRA the pack cannot
+identify is a card with a filename on it rather than an error. Double-clicking a card
+opens the detail sheet — the showcase with the generation settings recorded for each
+image, and, at the bottom, which of the files above each field was read from. **Rescan**
+re-reads everything, which is what to press after editing a sidecar by hand.
 
 **turbo** on the sampler row is a switch, not a preset: it adds a distillation LoRA
 (larryvrh's `minimax_h3_turbo_v4_step600_ema`, the lightx2v 4-step distill, or
