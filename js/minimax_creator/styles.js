@@ -538,6 +538,26 @@ button.mmc-mode:hover { background: var(--mmc-surface-2); border-color: var(--mm
      overflow-y is here for. */
   grid-auto-rows: max-content;
 }
+/* The lazy-load sentinel takes a full grid row of its own: left in the normal
+   flow it would sit beside the last cells and be "visible" from the start. */
+.mmc-grid-sentinel { grid-column: 1 / -1; height: 1px; }
+/* Page numbers for a folder too large to scroll end to end. Floats bottom-left,
+   mirroring the foot bottom-right; hidden while everything fits on one page. */
+.mmc-pager {
+  position: absolute; bottom: 34px; left: 44px;
+  display: flex; align-items: center; gap: 4px; padding: 8px 10px;
+  background: #202020; border: 1px solid var(--mmc-line); border-radius: 14px;
+  box-shadow: 0 12px 32px rgba(0,0,0,.5);
+}
+.mmc-page {
+  min-width: 28px; height: 28px; padding: 0 6px; border-radius: 8px;
+  background: none; border: 0; color: var(--mmc-dim);
+  font-size: 12px; font-family: inherit; cursor: pointer;
+}
+.mmc-page:hover { color: #ededed; background: #2a2a2a; }
+.mmc-page[aria-current="true"] { background: #333; color: #fff; }
+.mmc-page:disabled { opacity: .35; cursor: default; background: none; }
+.mmc-page-gap { color: var(--mmc-dim); font-size: 12px; padding: 0 2px; }
 /* The square is height:0 + padding-bottom:100%, not aspect-ratio, and the media
    is positioned out of flow.
    With aspect-ratio and in-flow media, thumbnails rendered at their natural

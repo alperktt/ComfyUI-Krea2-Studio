@@ -30,9 +30,11 @@ from server import PromptServer
 
 from . import models, preview, settings
 
-# A large input folder should not turn the picker into a stall. Newest first,
-# so the cap drops the least interesting files.
-MAX_ASSETS = 4000
+# The picker builds its grid lazily and paginates, so the cap only bounds the
+# listing's JSON payload (~2 MB at this size). Newest first, so when a folder
+# does exceed it the cap drops the least interesting files, and the picker
+# says so on the last page.
+MAX_ASSETS = 20000
 
 # How many LoRAs get the full sidecar treatment in one listing. A collection of
 # a few thousand is normal, and reading a JSON file plus listing two directories

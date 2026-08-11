@@ -2,8 +2,8 @@
 // a slot counter that stops you selecting more than the model accepts.
 
 import { el, ICONS, svg, icon, mountOverlay, dismissable } from "./dom.js";
-import { listAssets, viewUrl, thumbUrl, upload, moveAsset, deleteAsset,
-         loadPickerPrefs, savePickerPrefs } from "./api.js";
+import { listAssets, listingTruncated, viewUrl, thumbUrl, upload, moveAsset,
+         deleteAsset, loadPickerPrefs, savePickerPrefs } from "./api.js";
 import { openTrim, trimLabel } from "./trim.js";
 
 // "renders" is a tab, not a kind: it browses the output folder instead of a
@@ -21,6 +21,15 @@ const KIND_LABEL = { image: "Image", video: "Video", audio: "Audio", renders: "R
 const ACCEPT = { image: "image/*", video: "video/*", audio: "audio/*" };
 // What a configured video cell says about itself, short enough for the badge.
 const TRACK_BADGE = { "picture+sound": "sound", "picture": "silent", "sound": "sound only" };
+// How many cells the grid materialises per batch. A folder of hundreds of
+// files used to become hundreds of cells and thumbnail requests at once, which
+// froze the browser; now a sentinel at the bottom fetches the next batch as it
+// scrolls into view.
+const PAGE_SIZE = 60;
+// Where lazy scrolling stops and pages begin. Within a page cells still arrive
+// in PAGE_SIZE batches; past it a pager appears, because a ten-thousand-file
+// folder should be jumped through, not scrolled end to end.
+const PER_PAGE = 240;
 
 /**
  * @param {object} options
@@ -60,6 +69,12 @@ class Picker {
     // node" and is bounded by slots — marking is bounded by nothing.
     this.organize = false;
     this.marked = [];   // paths, in click order
+    // Lazy grid state: which page is open, how many of its rows have cells,
+    // and the cells themselves by path so a click can update one instead of
+    // rebuilding all.
+    this.page = 0;
+    this.visibleCount = PAGE_SIZE;
+    this.cells = new Map();
   }
 
   mount() {
@@ -68,7 +83,12 @@ class Picker {
       class: "mmc-search",
       type: "search",
       placeholder: "Search...",
-      oninput: (event) => { this.query = event.target.value.toLowerCase(); this.renderGrid(); },
+      oninput: (event) => {
+        this.query = event.target.value.toLowerCase();
+        this.page = 0;
+        this.visibleCount = PAGE_SIZE;
+        this.renderGrid();
+      },
     });
 
     // One kind is a title, not a choice: a lone tab-button (the timeline's
@@ -88,6 +108,9 @@ class Picker {
     this.slots = el("span", { class: "mmc-slots" });
     // Children come from renderFoot: picking and organizing want different rows.
     this.foot = el("div", { class: "mmc-modal-foot" });
+    // Floats bottom-left, mirroring the foot; renderPager fills it, and hides
+    // it entirely while everything fits on one page.
+    this.pager = el("div", { class: "mmc-pager" });
 
     this.shelfRow = el("div", { class: "mmc-shelves" });
     this.modal = el("div", { class: "mmc-modal" }, [
@@ -107,6 +130,7 @@ class Picker {
       ]),
       this.shelfRow,
       this.grid,
+      this.pager,
       this.foot,
     ]);
     this.uploadButton = this.modal.querySelector(".mmc-upload");
@@ -164,6 +188,8 @@ class Picker {
       this.shelf = "all";
       this.marked = [];
     }
+    this.page = 0;
+    this.visibleCount = PAGE_SIZE;
     this.renderShelves();
     this.renderGrid();
     this.renderFoot();
@@ -182,7 +208,10 @@ class Picker {
     this.prefs = { ...this.prefs, favorites };
     savePickerPrefs(this.prefs);
     this.renderShelves();
-    this.renderGrid();
+    // On the favorites shelf a star changes what is visible; anywhere else it
+    // only changes the one cell.
+    if (this.shelf === "fav") this.renderGrid();
+    else this.refreshCell(asset);
   }
 
   /** The listing the current tab is browsing. The one place that knows the
@@ -212,6 +241,8 @@ class Picker {
 
   setShelf(shelf) {
     this.shelf = shelf;
+    this.page = 0;
+    this.visibleCount = PAGE_SIZE;
     this.renderShelves();
     this.renderGrid();
   }
@@ -357,7 +388,7 @@ class Picker {
     const at = this.marked.indexOf(asset.path);
     if (at >= 0) this.marked.splice(at, 1);
     else this.marked.push(asset.path);
-    this.renderGrid();
+    this.syncSelected();
     this.renderFoot();
   }
 
@@ -473,7 +504,12 @@ class Picker {
   }
 
   renderGrid() {
+    this.observer?.disconnect();
+    this.observer = null;
+    this.cells.clear();
     this.grid.replaceChildren();
+    this.pages = 1;
+    this.renderPager();
     if (!this.loaded) {
       this.grid.appendChild(el("div", { class: "mmc-empty", text: "Loading…" }));
       return;
@@ -500,7 +536,113 @@ class Picker {
       }));
       return;
     }
-    for (const asset of rows) this.grid.appendChild(this.cell(asset));
+    // Clamp rather than reset: a delete that empties the last page should land
+    // on the new last page, not back at the first.
+    this.pages = Math.ceil(rows.length / PER_PAGE);
+    this.page = Math.min(this.page, this.pages - 1);
+    this.gridRows = rows.slice(this.page * PER_PAGE, (this.page + 1) * PER_PAGE);
+    this.renderPager();
+    this.appendCells(0);
+  }
+
+  setPage(page) {
+    if (page === this.page || page < 0 || page >= this.pages) return;
+    this.page = page;
+    this.visibleCount = PAGE_SIZE;
+    this.renderGrid();
+    this.grid.scrollTop = 0;
+  }
+
+  /** The page numbers worth a button: first, last, and the current page's
+   *  neighbours, with a gap marker over each run left out. */
+  pageList() {
+    const want = new Set([0, this.pages - 1, this.page - 1, this.page, this.page + 1]);
+    const list = [];
+    for (let i = 0; i < this.pages; i++) {
+      if (want.has(i)) list.push(i);
+      else if (list[list.length - 1] !== "gap") list.push("gap");
+    }
+    return list;
+  }
+
+  renderPager() {
+    if (this.pages <= 1) {
+      this.pager.style.display = "none";
+      return;
+    }
+    this.pager.style.display = "";
+    const button = (label, page, { current = false, disabled = false } = {}) =>
+      el("button", {
+        class: "mmc-page", text: label,
+        "aria-current": current,
+        disabled: disabled || null,
+        onclick: () => this.setPage(page),
+      });
+    this.pager.replaceChildren(
+      button("‹", this.page - 1, { disabled: this.page === 0 }),
+      ...this.pageList().map((p) => p === "gap"
+        ? el("span", { class: "mmc-page-gap", text: "…" })
+        : button(String(p + 1), p, { current: p === this.page })),
+      button("›", this.page + 1, { disabled: this.page === this.pages - 1 }),
+    );
+  }
+
+  /** Materialise cells from `from` up to `visibleCount`. When rows remain, a
+   *  sentinel cell watches the grid's own scrollport and appends the next
+   *  batch as it comes into view — already-built cells are never touched, so
+   *  their thumbnails are never re-fetched. */
+  appendCells(from) {
+    const to = Math.min(this.visibleCount, this.gridRows.length);
+    for (const asset of this.gridRows.slice(from, to)) {
+      const cell = this.cell(asset);
+      this.cells.set(asset.path, cell);
+      this.grid.appendChild(cell);
+    }
+    if (to >= this.gridRows.length) {
+      // The very end of the listing: if the server capped it, this is the one
+      // place a browsing user can be told the folder holds more.
+      const root = this.kind === "renders" ? "output" : "input";
+      if (this.page === this.pages - 1 && listingTruncated(root)) {
+        this.grid.appendChild(el("div", {
+          class: "mmc-grid-note",
+          text: `The folder holds more — only the newest ${this.activeAssets().length} files are listed.`,
+        }));
+      }
+      return;
+    }
+    const sentinel = el("div", { class: "mmc-grid-sentinel" });
+    this.grid.appendChild(sentinel);
+    this.observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      this.observer.disconnect();
+      sentinel.remove();
+      this.visibleCount = to + PAGE_SIZE;
+      this.appendCells(to);
+    }, { root: this.grid, rootMargin: "300px" });
+    this.observer.observe(sentinel);
+  }
+
+  /** Rebuild one cell in place — for a change that lives inside it, like its
+   *  star or segment badge. Cells not yet materialised have nothing to show. */
+  refreshCell(asset) {
+    const old = this.cells.get(asset.path);
+    if (!old) return;
+    const fresh = this.cell(asset);
+    this.cells.set(asset.path, fresh);
+    old.replaceWith(fresh);
+  }
+
+  /** Reflect the selection (or, organizing, the marks) onto the cells already
+   *  in the DOM. This is what a click changes — rebuilding the whole grid for
+   *  it re-created every cell and re-fired every thumbnail request, which is
+   *  what made large folders freeze. */
+  syncSelected() {
+    for (const [path, cell] of this.cells) {
+      const chosen = this.organize
+        ? this.marked.includes(path)
+        : this.selected.some((a) => a.path === path);
+      cell.setAttribute("aria-selected", String(chosen));
+    }
   }
 
   cell(asset) {
@@ -515,11 +657,9 @@ class Picker {
       tabindex: "0",
       "aria-selected": chosen,
       title: `${asset.path} — double-click to view`,
-      // Double-clicks are detected by hand: the first click's toggle rebuilds
-      // the grid, so the second click lands on a replacement element, and
-      // Firefox will not synthesise a dblclick across two different nodes.
-      // The second click re-toggles first, so viewing leaves the selection
-      // exactly where it stood.
+      // Double-clicks are detected by hand rather than with dblclick: the
+      // second click re-toggles first, so viewing leaves the selection exactly
+      // where it stood, and viewOnly grids get a single-click view.
       onclick: () => {
         const now = Date.now();
         const double = this.lastClick
@@ -644,13 +784,14 @@ class Picker {
     // selection through that compile.py would refuse.
     if (selected && !this.fits(this.targetKind(asset))) {
       this.settings.set(asset.path, { ...result, track: setting.track });
-      this.renderGrid();   // the segment still changed, even if the track did not
+      this.refreshCell(asset);   // the segment still changed, even if the track did not
       this.warn(`No ${this.targetKind(asset)} slot left for ${asset.name}.`);
       return;
     }
+    this.refreshCell(asset);
     // Configuring a file is how you say you want it: select it if it wasn't.
     if (!selected) this.toggle(asset);
-    else { this.renderGrid(); this.renderFoot(); }
+    else this.renderFoot();
   }
 
   /** A transient line in the footer, where the slot counter already is — the
@@ -688,7 +829,7 @@ class Picker {
     else if (this.options.single) this.selected = [asset];
     else if (this.room(this.targetKind(asset))) this.selected.push(asset);
     else return;  // at capacity: the counter already says why
-    this.renderGrid();
+    this.syncSelected();
     this.renderFoot();
   }
 
@@ -781,6 +922,7 @@ class Picker {
   close(result) {
     clearTimeout(this.warnTimer);
     clearTimeout(this.armTimer);
+    this.observer?.disconnect();
     this.unmount();
     this.resolve(result);
   }

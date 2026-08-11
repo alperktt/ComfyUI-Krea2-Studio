@@ -14,8 +14,14 @@ export async function listAssets({ force = false, root = "input" } = {}) {
   if (!response.ok) throw new Error(`asset listing failed (${response.status})`);
   const body = await response.json();
   const assets = body.assets ?? [];
-  cache.set(root, { at: Date.now(), assets });
+  cache.set(root, { at: Date.now(), assets, truncated: body.truncated === true });
   return assets;
+}
+
+/** Whether the last listing of `root` hit the server's cap — the folder holds
+ *  more files than came back. Read after listAssets; false before any call. */
+export function listingTruncated(root = "input") {
+  return cache.get(root)?.truncated === true;
 }
 
 export function invalidate() {
