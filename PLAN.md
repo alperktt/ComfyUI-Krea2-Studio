@@ -111,15 +111,12 @@ for you. Everything else in this package exists to support that one gesture.
   Core already handles the round trip (`comfy/sd.py` returns 1 latent frame for
   1 image and special-cases `frames == 1` in the memory estimate).
 
-  **What is not known yet.** The DiT's trained range is 124–362 frames, so
+  **What the pills are for.** The DiT's trained range is 124–362 frames, so
   sampling 5 is far off distribution temporally even though the latent is in
-  distribution spatially. Three open questions — how short the clip can be, which
-  latent frame reads best, and whether the image decoder beats the stock H3 VAE
-  on that frame — are what the `dev` block in `compile_still.py` exists to
-  answer: it widens one queue into a sweep over lengths × latent indices × VAE
-  files, sharing the seed so the passes are comparable and naming each file with
-  its coordinate. Every line of it is marked `DEV` and comes out, with the sweep
-  pill, once the numbers are in.
+  distribution spatially. How short the clip can be and which latent frame reads
+  best are properties of the weights rather than of this code, and the weights
+  keep changing — so both are pills (`5f · 2 latent`, `latent 0`) rather than
+  constants. The sweep that answered them the first time has been removed.
 
 ## Known rough edges in a chained timeline
 

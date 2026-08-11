@@ -541,27 +541,6 @@ check("taeh3 previews the still",
       "ModelPreviewOverrideKJ" in preview or comfy_nodes.NODE_CLASS_MAPPINGS.get(
           "ModelPreviewOverrideKJ") is None, True)
 
-# ---- the dev sweep -----------------------------------------------------------
-#
-# DEV: one queue, every combination, each file named with its coordinate. Comes
-# out with `compile_still`'s DEV block.
-
-sweep = by_class(still(still_blob(minimax={
-    "dev": {"lengths": [5, 22], "indices": [0, -1], "vaes": ["stock_h3_vae.safetensors"]},
-})).expand)
-check("one sampler pass per length", len(sweep["KSampler"]), 2)
-check("one picture per combination",
-      (len(sweep["MiniMaxH3StillLatent"]), len(sweep["MiniMaxH3SaveImage"])), (4, 4))
-check("the swept decoder is loaded once, alongside the picked one",
-      sorted(i["vae_name"] for _, i in sweep["VAELoader"]),
-      sorted([H3_MODELS["vae"], "stock_h3_vae.safetensors"]))
-check("every file carries its coordinate",
-      sorted(i["filename_prefix"].rsplit("/", 1)[-1] for _, i in sweep["MiniMaxH3SaveImage"]),
-      sorted([f"prestage_L{length}_i{index}_stock_h3_vae"
-              for length in (5, 22) for index in (0, -1)]))
-check("both passes share a seed, so the lengths are comparable",
-      len({i["seed"] for _, i in sweep["KSampler"]}), 1)
-
 # ---- refusals ----------------------------------------------------------------
 
 expect_error("a latent frame the clip does not have is refused",

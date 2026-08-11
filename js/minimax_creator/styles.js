@@ -1075,8 +1075,23 @@ button.mmc-mode:hover { background: var(--mmc-surface-2); border-color: var(--mm
    thing on the page you might want to read across before choosing, so none of
    it is allowed to be decoration. */
 .mmc-set-opt[aria-checked="true"] .mmc-set-value { color: var(--mmc-text); }
+/* A typed setting, in the box the chosen settings use. Same border, radius and
+   inset as .mmc-set-choices above — one is a list of answers and the other is a
+   field, and on this page they are the same kind of thing. */
+.mmc-set-field {
+  margin-top: 10px; background: var(--mmc-surface); border: 1px solid var(--mmc-line);
+  border-radius: 14px; padding: 12px;
+}
+/* The field is the width of its box here, not of a 320px popover, so the
+   example line has room to be read rather than wrapped. */
+.mmc-set-field .mmc-out-example { padding: 10px 2px 0; }
+.mmc-set-field .mmc-out-key { width: 66px; }
+.mmc-set-field .mmc-out-tokens { padding: 10px 0 0; }
 .mmc-set-foot {
   color: var(--mmc-off); font-size: 11px; line-height: 1.55; padding: 10px 2px 0;
+}
+.mmc-set-foot code {
+  font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; color: var(--mmc-dim);
 }
 .mmc-set-wait { color: var(--mmc-dim); font-size: 13px; padding: 28px 0 24px; }
 .mmc-set-problem { color: #e0743c; font-size: 12px; line-height: 1.45; padding: 14px 0 0; }

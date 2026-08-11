@@ -1,10 +1,16 @@
 """Preferences that belong to this ComfyUI rather than to a workflow.
 
 The line this file draws: a workflow says what the piece *is* — the prompt, the
-references, the duration, where the files land. This says how this machine
-writes them. Encoding quality is the first thing on the right side of that line:
-two people opening the same `.json` should get the same render, and should not
-also be made to agree about how many megabytes it is allowed to take.
+references, the duration. This says how this machine writes it. Two people
+opening the same `.json` should get the same shot, and should not also be made
+to agree about how many megabytes it may take or which folder on their own disk
+it lands in.
+
+Encoding quality was the first thing on this side of the line; the output
+folders followed it, for the same reason and one more. A prefix stored per node
+meant every node was a place the answer could differ, so a workflow with a
+Creator, a Timeline and a pre-stage in it had three, and moving a project to
+another machine carried someone else's folder names along with it.
 
 So it is not in `creator_data` and it is not a widget. It is one small JSON file
 that the settings page writes and the save node reads.
@@ -29,6 +35,8 @@ runs it standalone, the same way `outputs.py` is tested.
 import json
 import os
 
+from . import outputs
+
 FILE = "minimax_creator.settings.json"
 
 # libx264's own scale, verbatim: 0 is (near) lossless and 51 is unwatchable.
@@ -41,7 +49,18 @@ MAX_CRF = 51
 # pack wrote before the setting existed. Passing it explicitly changes no file.
 DEFAULT_CRF = 23
 
-DEFAULTS = {"video_crf": DEFAULT_CRF}
+# Where the two kinds of file land under ComfyUI's output directory. Prefixes,
+# not folders: core's `filename_prefix` names the folder *and* the stem every
+# file in it is numbered off, and expands `%year%`-style tokens per render.
+# `outputs.py` owns what one is allowed to be.
+DEFAULT_VIDEO_PREFIX = outputs.VIDEO_PREFIX
+DEFAULT_IMAGE_PREFIX = outputs.IMAGE_PREFIX
+
+DEFAULTS = {
+    "video_crf": DEFAULT_CRF,
+    "video_prefix": DEFAULT_VIDEO_PREFIX,
+    "image_prefix": DEFAULT_IMAGE_PREFIX,
+}
 
 
 def clean(raw):
@@ -64,6 +83,16 @@ def clean(raw):
         if not MIN_CRF <= crf <= MAX_CRF:
             raise ValueError(f"video_crf must be between {MIN_CRF} and {MAX_CRF}")
         clean_settings["video_crf"] = crf
+    for key, fallback in (("video_prefix", DEFAULT_VIDEO_PREFIX),
+                          ("image_prefix", DEFAULT_IMAGE_PREFIX)):
+        if key in raw and raw[key] is not None:
+            # `outputs.clean` is what the save nodes are held to, so a prefix
+            # that would be refused at the end of a render is refused here
+            # instead — while it is still a field somebody is editing.
+            try:
+                clean_settings[key] = outputs.clean(raw[key], fallback)
+            except outputs.PrefixError as exc:
+                raise ValueError(f"{key}: {exc}") from exc
     return clean_settings
 
 
@@ -107,3 +136,13 @@ def save(raw):
 def video_crf():
     """The quality target for every video this pack writes."""
     return load()["video_crf"]
+
+
+def video_prefix():
+    """Where finished renders land, unless the blob names somewhere itself."""
+    return load()["video_prefix"]
+
+
+def image_prefix():
+    """Where pre-stage stills land, unless the blob names somewhere itself."""
+    return load()["image_prefix"]

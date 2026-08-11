@@ -3,7 +3,9 @@
 // editing rather than at queue time, but compile.py stays authoritative.
 
 import { ASPECT_PRESETS, FPS, NATIVE_SHORT_EDGE, framesForSeconds, secondsForFrames, resolveCanvas } from "./canvas.js";
-import { VIDEO_PREFIX, IMAGE_PREFIX, cleanPrefix } from "./outputs.js";
+// Where files land is not in the blob any more — it is a preference of this
+// machine, in `settings.js`, so a shared workflow does not carry one person's
+// folder names onto another person's disk.
 
 export const MAX_REF_IMAGES = 9;
 export const MAX_REF_VIDEOS = 3;
@@ -336,7 +338,7 @@ export const DEFAULT_STRENGTH = 1.0;
 /** A fresh generation. `prefix` is where its renders land when the blob does
  *  not say — the video default, or the stills folder for the pre-stage's H3
  *  branch, whose request is one of these too. */
-export function emptyState(prefix = VIDEO_PREFIX) {
+export function emptyState() {
   return {
     version: 1,
     prompt: "",
@@ -357,10 +359,6 @@ export function emptyState(prefix = VIDEO_PREFIX) {
     // "auto" follows the mode. Pinning it runs the same payload on the other
     // weights; compile.py decides which pins it will accept.
     checkpoint: "auto",
-    // Where the finished clip lands under output/. Owned by the node for the
-    // same reason the weights are: a timeline saves one file, so a segment
-    // carrying its own would be a second answer to a question that has one.
-    output_prefix: prefix,
     // Which files to load. Owned by the node, not by a segment — a timeline
     // segment inherits the timeline's and never carries its own.
     models: emptyModels(),
@@ -369,11 +367,11 @@ export function emptyState(prefix = VIDEO_PREFIX) {
   };
 }
 
-export function parseState(raw, prefix = VIDEO_PREFIX) {
+export function parseState(raw) {
   try {
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object") {
-      const state = { ...emptyState(prefix), ...parsed };
+      const state = { ...emptyState(), ...parsed };
       // Workflows saved before LoRAs existed have no key at all, and a
       // hand-edited blob can have the wrong type in it.
       if (!Array.isArray(state.loras)) state.loras = [];
@@ -383,7 +381,6 @@ export function parseState(raw, prefix = VIDEO_PREFIX) {
         if (typeof state[key] !== "string") state[key] = "";
       }
       if (!CHECKPOINT_CHOICES.includes(state.checkpoint)) state.checkpoint = "auto";
-      state.output_prefix = parsePrefix(state.output_prefix, prefix);
       state.models = parseModels(state.models);
       state.turbo = parseTurbo(state.turbo);
       normalizeCheckpoint(state);
@@ -401,27 +398,7 @@ export function parseState(raw, prefix = VIDEO_PREFIX) {
     // A malformed blob is recoverable: fall back to empty rather than leaving
     // the node unusable. The user's text is gone either way.
   }
-  return emptyState(prefix);
-}
-
-/** A blob's `output_prefix` as the UI holds it: always a string, always one
- *  `outputs.py` would accept.
- *
- *  A blob saved before this field existed has no key, and one hand-edited to
- *  something unusable has to leave the node editable — so both fall back to the
- *  node's default rather than being carried into the field as an error the user
- *  never typed. The queue refuses the blob's own value either way: this is the
- *  *editor's* copy, not the one that gets rendered with. */
-function parsePrefix(raw, fallback) {
-  if (raw === undefined || raw === null) return fallback;
-  return cleanPrefix(raw, fallback).prefix ?? fallback;
-}
-
-/** …and back out, but only when it departs from the node's default — so a blob
- *  nobody retargeted round-trips exactly as it did before the field existed. */
-function serializePrefix(prefix, fallback) {
-  const clean = cleanPrefix(prefix, fallback).prefix ?? fallback;
-  return clean === fallback ? {} : { output_prefix: clean };
+  return emptyState();
 }
 
 /** LoRA entries, stripped to what compile.py reads. Shared by a segment's own
@@ -512,13 +489,12 @@ function serializeCommon(state) {
   };
 }
 
-export function serializeState(state, prefix = VIDEO_PREFIX) {
+export function serializeState(state) {
   return JSON.stringify({
     version: 1,
     ...serializeCommon(state),
     aspect: state.aspect,
     short_edge: state.short_edge,
-    ...serializePrefix(state.output_prefix, prefix),
     // Not in serializeCommon: the weights belong to the node, and a timeline
     // segment goes through that function too. The turbo switch likewise.
     ...serializeModels(state.models),
@@ -587,9 +563,6 @@ export function emptyTimeline() {
     // How much of the previous segment's sound a continuing seam inherits.
     // Mirrors compile.DEFAULT_AUDIO_TAIL_S.
     audio_tail_s: DEFAULT_AUDIO_TAIL_S,
-    // Where the finished clip lands under output/. One prefix, because a
-    // timeline is one file however many segments went into it.
-    output_prefix: VIDEO_PREFIX,
     // One set of weights for the whole clip. Chained or not, the segments are
     // concatenated at the end and cannot come from different checkpoints of the
     // same name any more than they can come out different sizes.
@@ -636,7 +609,6 @@ export function parseTimeline(raw) {
         if (typeof timeline[key] !== "string") timeline[key] = "";
       }
       if (!timeline.refined || typeof timeline.refined !== "object") timeline.refined = null;
-      timeline.output_prefix = parsePrefix(timeline.output_prefix, VIDEO_PREFIX);
       timeline.models = parseModels(timeline.models);
       timeline.turbo = parseTurbo(timeline.turbo);
       const segments = Array.isArray(parsed.segments) ? parsed.segments : [];
@@ -676,7 +648,6 @@ export function serializeTimeline(timeline) {
     short_edge: timeline.short_edge,
     loras: serializeLoras(timeline.loras ?? []),
     audio_tail_s: clampTail(timeline.audio_tail_s),
-    ...serializePrefix(timeline.output_prefix, VIDEO_PREFIX),
     ...serializeModels(timeline.models),
     ...serializeTurbo(timeline.turbo),
     segments: timeline.segments.map((segment, index) => {
@@ -783,12 +754,8 @@ export function emptyStill() {
     frames: PRESTAGE_STILL_FRAMES,
     latent_index: PRESTAGE_STILL_INDEX,
     prompt_mode: "context-ir",
-    // DEV: the sweep. Empty lists mean "just render the settings above"; the
-    // pill fills them to compare lengths, latent frames and decoders in one
-    // queue. Comes out with the dev pill once the numbers are in.
-    dev: { lengths: [], indices: [], vaes: [] },
     // The generation, in the Creator's own shape — because it is one.
-    request: emptyState(IMAGE_PREFIX),
+    request: emptyState(),
   };
 }
 
@@ -800,11 +767,7 @@ export function parseStill(raw) {
   const index = Number(raw.latent_index);
   if (Number.isFinite(index)) out.latent_index = Math.round(index);
   if (PRESTAGE_PROMPT_MODES.includes(raw.prompt_mode)) out.prompt_mode = raw.prompt_mode;
-  const dev = raw.dev && typeof raw.dev === "object" ? raw.dev : {};   // DEV
-  for (const [key, cast] of [["lengths", Number], ["indices", Number], ["vaes", String]]) {
-    if (Array.isArray(dev[key])) out.dev[key] = dev[key].map(cast).filter((v) => v === 0 || v);
-  }
-  out.request = parseState(JSON.stringify(raw.request ?? {}), IMAGE_PREFIX);
+  out.request = parseState(JSON.stringify(raw.request ?? {}));
   return out;
 }
 
@@ -812,23 +775,10 @@ function serializeStill(still) {
   const out = {
     frames: still.frames,
     latent_index: still.latent_index,
-    request: JSON.parse(serializeState(still.request, IMAGE_PREFIX)),
+    request: JSON.parse(serializeState(still.request)),
   };
   if (still.prompt_mode !== "context-ir") out.prompt_mode = still.prompt_mode;
-  const dev = {};                                                      // DEV
-  for (const key of ["lengths", "indices", "vaes"]) {
-    if (still.dev?.[key]?.length) dev[key] = [...still.dev[key]];
-  }
-  if (Object.keys(dev).length) out.dev = dev;
   return out;
-}
-
-/** Whether the dev sweep is on, and how many files it would write. */
-export function stillSweep(still) {                                    // DEV
-  const lengths = still.dev?.lengths?.length || 1;
-  const indices = still.dev?.indices?.length || 1;
-  const vaes = still.dev?.vaes?.length || 1;
-  return { on: lengths * indices * vaes > 1, passes: lengths, images: lengths * indices * vaes };
 }
 
 export const PRESTAGE_CANVAS_MULTIPLE = 16;
@@ -931,9 +881,6 @@ export function emptyPreStage() {
     // The H3 branch: its own settings, and its generation in the Creator's
     // shape. Nothing above it applies to that branch — see `emptyStill`.
     minimax: emptyStill(),
-    // Where the still lands under output/. Its own default folder, which is
-    // what sorts stills apart from finished renders in the gallery.
-    output_prefix: IMAGE_PREFIX,
     models: emptyPreStageModels(),
     // A hint for peer discovery, never authoritative — ids renumber on paste,
     // so the pre-stage pill re-derives the pairing by scan.
@@ -956,7 +903,6 @@ export function parsePreStage(raw) {
       const state = { ...emptyPreStage(), ...parsed };
       if (!PRESTAGE_ARCHES.includes(state.arch)) state.arch = "krea2";
       if (typeof state.prompt !== "string") state.prompt = "";
-      state.output_prefix = parsePrefix(state.output_prefix, IMAGE_PREFIX);
       if (!Array.isArray(state.refs)) state.refs = [];
       state.refs = state.refs
         .filter((ref) => ref && typeof ref.filename === "string")
@@ -1026,7 +972,6 @@ export function serializePreStage(state) {
       : {}),
     ...(state.quality !== "default" ? { quality: state.quality } : {}),
     minimax: serializeStill(state.minimax),
-    ...serializePrefix(state.output_prefix, IMAGE_PREFIX),
     ...(Object.keys(models).length ? { models } : {}),
     ...(state.peer != null ? { peer: state.peer } : {}),
   }, null, 2);

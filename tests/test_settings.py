@@ -20,9 +20,20 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-spec = importlib.util.spec_from_file_location("mmc_settings", os.path.join(ROOT, "settings.py"))
-settings = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(settings)
+# `settings.py` validates the output prefixes through `outputs.py`, so it comes
+# in as part of a synthetic package rather than as a lone file — still nothing
+# from ComfyUI, which is the property this test exists to keep.
+import types
+
+package = types.ModuleType("mmcpkg")
+package.__path__ = [ROOT]
+sys.modules["mmcpkg"] = package
+for name in ("outputs", "settings"):
+    spec = importlib.util.spec_from_file_location(f"mmcpkg.{name}", os.path.join(ROOT, f"{name}.py"))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[f"mmcpkg.{name}"] = module
+    spec.loader.exec_module(module)
+settings = sys.modules["mmcpkg.settings"]
 
 FAILURES = []
 
@@ -56,9 +67,23 @@ check("both ends of libx264's scale are legal",
 check("a whole float is a whole number", settings.clean({"video_crf": 18.0})["video_crf"], 18)
 # A key this build has never heard of belongs to a newer one. Dropped rather
 # than carried, so `load()` returns exactly the keys the code reads.
-check("an unknown key is dropped", sorted(settings.clean({"nonsense": 1})), ["video_crf"])
+check("an unknown key is dropped", sorted(settings.clean({"nonsense": 1})),
+      sorted(settings.DEFAULTS))
 
 refuses("a value off the encoder's scale", {"video_crf": 99}, "between")
+
+# The output folders. `outputs.clean` is the authority — this only has to show
+# that the setting is held to it, so a prefix that would be refused at the end
+# of a render is refused while it is still a field being edited.
+check("a folder is kept as typed",
+      settings.clean({"video_prefix": "client/shoot-3/take"})["video_prefix"],
+      "client/shoot-3/take")
+check("a trailing slash keeps the default's filename stem",
+      settings.clean({"image_prefix": "client/"})["image_prefix"], "client/prestage")
+check("an empty folder is the default",
+      settings.clean({"video_prefix": ""})["video_prefix"], settings.DEFAULT_VIDEO_PREFIX)
+refuses("an absolute output folder", {"video_prefix": "/tmp/renders"}, "absolute")
+refuses("a folder that escapes upwards", {"image_prefix": "../elsewhere/x"}, "'.' and '..'")
 refuses("a negative value", {"video_crf": -1}, "between")
 refuses("a fractional value", {"video_crf": 18.5}, "whole number")
 refuses("a string", {"video_crf": "18"}, "whole number")
@@ -75,7 +100,7 @@ with tempfile.TemporaryDirectory() as directory:
     check("no file yet is the defaults", settings.load(), dict(settings.DEFAULTS))
 
     check("saving hands back what was stored", settings.save({"video_crf": 14}),
-          {"video_crf": 14})
+          {**settings.DEFAULTS, "video_crf": 14})
     check("...and that is what loads", settings.load()["video_crf"], 14)
     check("...and what the save node asks for", settings.video_crf(), 14)
 

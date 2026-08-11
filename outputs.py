@@ -80,11 +80,16 @@ def clean(raw, default):
     return "/".join(parts)
 
 
-def video(data):
-    """The prefix a Creator or Timeline blob asks for."""
-    return clean(data.get("output_prefix"), VIDEO_PREFIX)
+# The blob's own key is no longer written by the UI — where files land is a
+# preference of this machine and lives in `settings.py`, so a workflow shared
+# with someone else does not carry your folder names to their disk. It is still
+# *read*, because a hand-edited blob is a supported way to drive these nodes and
+# a prefix typed into one has to mean something. Blob first, then the setting.
+def video(data, default=None):
+    """The prefix a Creator or Timeline render lands under."""
+    return clean(data.get("output_prefix"), default or VIDEO_PREFIX)
 
 
-def image(data):
-    """The prefix a PreStage blob asks for."""
-    return clean(data.get("output_prefix"), IMAGE_PREFIX)
+def image(data, default=None):
+    """The prefix a PreStage still lands under."""
+    return clean(data.get("output_prefix"), default or IMAGE_PREFIX)

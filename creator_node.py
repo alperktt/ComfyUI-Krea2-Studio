@@ -42,7 +42,7 @@ import json
 from comfy_api.latest import ComfyExtension, io
 
 from . import (accel, canvas, lora, media, models, outputs, prestage, render,
-               timeline)
+               settings, timeline)
 
 DEFAULT_DATA = json.dumps({
     "version": 1,
@@ -173,7 +173,7 @@ class MiniMaxH3Creator(io.ComfyNode):
             # cannot be used should stop the queue before anything is sampled,
             # not after — `get_save_image_path` raising at the end of a render
             # costs the user the render.
-            filename_prefix=outputs.video(data))
+            filename_prefix=outputs.video(data, settings.video_prefix()))
         return render.expanded(graph)
 
 

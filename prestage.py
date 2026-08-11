@@ -36,7 +36,7 @@ import json
 from comfy_api.latest import io
 
 from . import (canvas, compile_image, compile_still, media, outputs, render,
-               render_image, render_still)
+               render_image, render_still, settings)
 
 DEFAULT_DATA = json.dumps({
     "version": 1,
@@ -158,16 +158,16 @@ class MiniMaxH3PreStage(io.ComfyNode):
                 plan = compile_still.compile_still(data)
             except compile_image.CompileError as exc:
                 raise ValueError(str(exc)) from exc
-            # The request owns the weights and the output folder, because it is
-            # an ordinary creator request — see `compile_still`.
-            request = plan.passes[0].request
+            # The request owns the weights, because it is an ordinary creator
+            # request — see `compile_still`.
+            request = plan.request
             graph = render_still.emit(
                 plan,
                 render_still.weights_from_blob(request),
                 render.Sampling(seed=seed, steps=steps, cfg=cfg,
                                 sampler_name=sampler_name, scheduler=scheduler),
                 cls.hidden.unique_id,
-                filename_prefix=outputs.image(request))
+                filename_prefix=outputs.image(request, settings.image_prefix()))
             return render.expanded(graph)
 
         try:
@@ -182,7 +182,7 @@ class MiniMaxH3PreStage(io.ComfyNode):
                             sampler_name=sampler_name, scheduler=scheduler),
             cls.hidden.unique_id,
             # Refused before anything is sampled — see MiniMaxH3Creator.execute.
-            filename_prefix=outputs.image(data))
+            filename_prefix=outputs.image(data, settings.image_prefix()))
         return render.expanded(graph)
 
 

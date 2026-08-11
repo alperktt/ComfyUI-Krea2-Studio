@@ -17,15 +17,11 @@ is what the experimental T=1 image decoder was trained against. Decoding latent
 index 0 is therefore not a trick — it is the one temporal slice the image VAE
 was fitted to.
 
-**What is still unknown, and what the dev block is for.** The DiT's trained
-range is 124-362 frames (`canvas.TRAINED_MIN_FRAMES`), so a 5-frame generation
-is far off-distribution temporally even though the *latent* it produces is in
-distribution spatially. Whether the shortest legal clip gives a still as good as
-a full-length one — and whether the frozen-encoder image VAE beats the stock H3
-VAE at decoding it — is a question about weights, not about code, so the `dev`
-block sweeps lengths, latent indices and VAE files in one queue and saves each
-combination under its own name. It is scaffolding: see `DEV_*` below, all of
-which comes out once the numbers are in.
+**How long a clip, and which frame of it.** The DiT's trained range is 124-362
+frames (`canvas.TRAINED_MIN_FRAMES`), so the short end of `STILL_LENGTHS` is
+off-distribution temporally even though the *latent* it produces is in
+distribution spatially. Both are pills rather than constants because the answer
+is a property of the weights, not of this code, and the weights keep changing.
 
 Pure, like its two neighbours: no torch, no ComfyUI, no disk. The canvas and
 duration rules are `canvas.py`'s, because they are the video model's.
@@ -85,26 +81,16 @@ def resolve_index(index, frames):
 
 
 @dataclass(frozen=True)
-class Decode:
-    """One picture taken off one sampler pass.
+class StillPlan:
+    """One sampler pass, and the frame taken out of it."""
 
-    `vae` is a filename when this decode overrides the picked VAE, which only
-    the dev sweep does; `None` means the file the node is set to.
-    """
-
-    index: int
-    vae: str = None
-    label: str = ""
-
-
-@dataclass(frozen=True)
-class StillPass:
-    """One sampler pass, and everything decoded out of it."""
-
-    frames: int
     request: dict
+    frames: int = DEFAULT_FRAMES
+    index: int = DEFAULT_LATENT_INDEX
     prompt_override: str = None
-    decodes: tuple = ()
+    # Whether anything attached will be encoded as sound. False for almost every
+    # still, and that is what leaves the audio VAE unloaded.
+    audio: bool = False
 
     @property
     def payload(self):
@@ -113,21 +99,6 @@ class StillPass:
         if self.prompt_override:
             payload["prompt_override"] = self.prompt_override
         return payload
-
-
-@dataclass(frozen=True)
-class StillPlan:
-    passes: tuple = ()
-    # Whether anything attached will be encoded as sound. False for almost every
-    # still, and that is what leaves the audio VAE unloaded.
-    audio: bool = False
-    # True when the dev block widened this into a sweep, which is the one case
-    # a single pre-stage queue writes more than one file.
-    sweeping: bool = False
-
-    @property
-    def images(self):
-        return sum(len(one.decodes) for one in self.passes)
 
 
 def _checkpoint(request):
@@ -182,8 +153,8 @@ def _block(data):
 def _request(block, frames):
     """The request one pass generates from: the still's own, at this length.
 
-    A copy rather than the stored dict, because the sweep runs the same request
-    at several lengths and each pass has to say which it is.
+    A copy rather than the stored dict, because the length it is generated at
+    is the still's setting rather than the request's.
     """
     request = dict(block.get("request") or {})
     if not isinstance(request, dict):
@@ -208,54 +179,6 @@ def _plain_prompt(request, checkpoint):
     return prompt
 
 
-# ---- dev sweep ---------------------------------------------------------------
-#
-# DEV: everything from here to `compile_still` is scaffolding for choosing the
-# still length, the latent index and the decoder, and comes out with the
-# `dev` block once those are settled. It adds nothing to a normal render: an
-# absent or empty block compiles to exactly one pass with exactly one decode.
-
-DEV_KEY = "dev"
-# How many pictures one queue may expand into. A sweep is lengths x indices x
-# VAEs and the lengths are sampler passes, so this is the difference between a
-# long experiment and a hung machine.
-DEV_MAX_PASSES = 8
-DEV_MAX_IMAGES = 64
-
-
-def _dev(data):
-    block = _block(data).get(DEV_KEY)
-    return block if isinstance(block, dict) else {}
-
-
-def _dev_list(block, key, cast):
-    raw = block.get(key)
-    if not isinstance(raw, (list, tuple)):
-        return []
-    out = []
-    for item in raw:
-        try:
-            value = cast(item)
-        except (TypeError, ValueError):
-            raise CompileError(f"the dev sweep's {key} list holds an unusable entry {item!r}")
-        if value not in out:
-            out.append(value)
-    return out
-
-
-def _label(frames, index, vae):
-    """What a swept file is called, appended to the output prefix.
-
-    The name has to carry the whole coordinate or the sweep is a folder of
-    pictures nobody can tell apart.
-    """
-    parts = [f"L{frames}", f"i{index}"]
-    if vae:
-        stem = vae.replace("\\", "/").rsplit("/", 1)[-1].rsplit(".", 1)[0]
-        parts.append("".join(c if c.isalnum() or c in "-_" else "-" for c in stem)[:40])
-    return "_".join(parts)
-
-
 def compile_still(data):
     """A pre-stage blob (arch 'minimax') -> `StillPlan`.
 
@@ -270,7 +193,8 @@ def compile_still(data):
         raise CompileError("prestage_data must be a JSON object")
 
     block = _block(data)
-    request = _request(block, DEFAULT_FRAMES)
+    frames = _frames(block.get("frames", DEFAULT_FRAMES))
+    request = _request(block, frames)
     if not str(request.get("prompt") or "").strip() and not (
             (request.get("refined") or {}).get("body") or "").strip():
         raise CompileError("describe the still first — the prompt is empty")
@@ -280,41 +204,15 @@ def compile_still(data):
         raise CompileError(f"unknown prompt mode {mode!r}")
     override = _plain_prompt(request, _checkpoint(request)) if mode == "plain" else None
 
-    frames = _frames(block.get("frames", DEFAULT_FRAMES))
-    index = block.get("latent_index", DEFAULT_LATENT_INDEX)
     try:
-        index = int(index)
+        index = int(block.get("latent_index", DEFAULT_LATENT_INDEX))
     except (TypeError, ValueError):
         raise CompileError("the latent frame index must be a whole number")
 
-    dev = _dev(data)                                            # DEV
-    lengths = _dev_list(dev, "lengths", int) or [frames]        # DEV
-    lengths = [_frames(one) for one in lengths]                 # DEV
-    indices = _dev_list(dev, "indices", int) or [index]         # DEV
-    vaes = _dev_list(dev, "vaes", str) or [None]                # DEV
-    sweeping = len(lengths) * len(indices) * len(vaes) > 1      # DEV
-
-    if len(lengths) > DEV_MAX_PASSES:                           # DEV
-        raise CompileError(
-            f"a sweep runs at most {DEV_MAX_PASSES} lengths — each one is a whole "
-            f"sampler pass"
-        )
-    if len(lengths) * len(indices) * len(vaes) > DEV_MAX_IMAGES:  # DEV
-        raise CompileError(f"a sweep writes at most {DEV_MAX_IMAGES} pictures")
-
-    passes = []
-    for length in lengths:
-        decodes = []
-        for one in indices:
-            resolved = resolve_index(one, length)
-            for vae in vaes:
-                decodes.append(Decode(
-                    index=resolved, vae=vae,
-                    label=_label(length, one, vae) if sweeping else ""))
-        passes.append(StillPass(
-            frames=length,
-            request=_request(block, length),
-            prompt_override=override,
-            decodes=tuple(decodes)))
-
-    return StillPlan(passes=tuple(passes), audio=needs_audio(request), sweeping=sweeping)
+    return StillPlan(
+        request=request,
+        frames=frames,
+        index=resolve_index(index, frames),
+        prompt_override=override,
+        audio=needs_audio(request),
+    )

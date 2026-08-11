@@ -46,7 +46,9 @@ class Node {
     this.classList = { add: () => {}, remove: () => {}, toggle: () => {}, contains: () => false };
     this.dataset = {};
   }
-  setAttribute(k, v) { this.attrs[k] = v; }
+  // A real input takes its starting value from the attribute, and the pack sets
+  // it that way — el() has no special case for `value`.
+  setAttribute(k, v) { this.attrs[k] = v; if (k === "value") this._value = v; }
   getAttribute(k) { return this.attrs[k]; }
   removeAttribute(k) { delete this.attrs[k]; }
   addEventListener(t, fn) { (this.listeners[t] ??= []).push(fn); }
@@ -101,8 +103,24 @@ export const NodeClass = Node;
 STUBS = {
     "app.js": "export const app = { registerExtension: (e) => { globalThis.__ext = e; },"
               " graph: null, canvas: null };",
-    "api.js": "export const api = { addEventListener() {}, removeEventListener() {},"
-              " apiURL: (u) => u, fetchApi: async () => ({ ok: true, json: async () => ({}) }) };",
+    # `fetchApi` answers the settings route the way the server does, and records
+    # what was posted — which is what lets the settings page be exercised here.
+    "api.js": """
+globalThis.__posted = [];
+let stored = { video_crf: 23, video_prefix: "minimax/renders/H3",
+               image_prefix: "minimax/stills/prestage" };
+export const api = {
+  addEventListener() {}, removeEventListener() {}, apiURL: (u) => u,
+  async fetchApi(route, options) {
+    if (route.endsWith("/settings") && options?.method === "POST") {
+      const patch = JSON.parse(options.body);
+      globalThis.__posted.push(patch);
+      stored = { ...stored, ...patch };
+    }
+    return { ok: true, status: 200, json: async () => ({ settings: stored }) };
+  },
+};
+""",
     "widgets.js": "export const ComfyWidgets = {};",
 }
 
@@ -163,6 +181,46 @@ try {
   out.errors.push(`arch switch: ${error.message}`);
 }
 
+// The settings page: two tabs now, because where files land moved off the node
+// bodies and onto this machine. Read the rendered tree rather than a screenshot
+// — what matters is that both tabs exist, the folder fields carry the stored
+// prefixes, and a committed edit posts the key the server expects.
+try {
+  const { openSettings } = await import("./js/minimax_creator/settings.js");
+  openSettings();
+  await new Promise((done) => setTimeout(done, 0));
+  const page = document.body.children.at(-1);
+  const tabs = [];
+  const walk = (node) => {
+    if (node.className === "mmc-tab") tabs.push(node.text.trim());
+    (node.children ?? []).forEach(walk);
+  };
+  walk(page);
+  out.settings = { tabs, quality: page.text.includes("crf 23") };
+
+  // Switch to Folders and commit a new renders prefix, the way the field does.
+  const tabButtons = [];
+  const collect = (node) => {
+    if (node.className === "mmc-tab") tabButtons.push(node);
+    (node.children ?? []).forEach(collect);
+  };
+  collect(page);
+  tabButtons[1].listeners.click[0]();
+  const fields = [];
+  const findFields = (node) => {
+    if (node.className === "mmc-out-field") fields.push(node);
+    (node.children ?? []).forEach(findFields);
+  };
+  findFields(page);
+  out.settings.fields = fields.map((f) => f.value);
+  fields[0].value = "client/shoot-3/take";
+  fields[0].listeners.change[0]();
+  await new Promise((done) => setTimeout(done, 0));
+  out.settings.posted = globalThis.__posted;
+} catch (error) {
+  out.errors.push(`settings page: ${error.message}`);
+}
+
 console.log(JSON.stringify(out));
 """
 
@@ -220,16 +278,27 @@ check("the H3 pre-stage mounts the Creator's body",
 # What a still is set up with. Every one of these is the video nodes' own
 # control, reached by being a video request rather than by being re-described.
 for wanted in ("Add image", "Add video", "Add audio", "Add LoRA", "Gallery", "From video",
-               "Start frame", "End frame", "MiniMax H3", "latent", "sweep", "T2VA"):
+               "Start frame", "End frame", "MiniMax H3", "latent", "T2VA"):
     if wanted not in (report["still"] or ""):
         FAILURES.append(f"the H3 still's body has no {wanted!r}")
 
 # ...and what it must *not* have. The settings page is the video rate control;
 # a node that writes PNGs offering it is a control over nothing.
-for unwanted in ("Settings", " s "):
+for unwanted in ("Settings", " s ", "sweep"):
     if unwanted in (report["still"] or ""):
         FAILURES.append(f"the H3 still's body should not carry {unwanted!r}")
 check("the Creator keeps the settings tool", "Settings" in (report["creator"] or ""), True)
+
+# The settings page owns two questions now — how good the file is, and where it
+# goes — so it has two tabs, and the folder fields are the only place the
+# prefixes can be set.
+settings = report.get("settings", {})
+check("the settings page has both tabs", settings.get("tabs"), ["Quality", "Folders"])
+check("the quality tab shows the encoder value", settings.get("quality"), True)
+check("the folders tab carries both stored prefixes", settings.get("fields"),
+      ["minimax/renders/H3", "minimax/stills/prestage"])
+check("editing a folder writes it back under the server's own key",
+      settings.get("posted"), [{"video_prefix": "client/shoot-3/take"}])
 
 check("switching to an image model rebuilds the body",
       report.get("switch", {}).get("image"), "PreStageEditor")

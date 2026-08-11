@@ -181,9 +181,8 @@ to 32. In the image modes the aspect comes from the keyframe.
 
 ## Where files go
 
-Renders are saved by the node itself, under ComfyUI's output folder. The **folder
-pill** on the Creator, the Timeline and the PreStage sets where — click it and
-type a path:
+Renders are saved by the node itself, under ComfyUI's output folder. **Settings →
+Folders** sets where — one answer per machine, for every node in the pack:
 
 | | default | lands in |
 |---|---|---|
@@ -196,11 +195,14 @@ filename, so `client-a/` is usually what you want.
 
 `%year%`, `%month%`, `%day%`, `%hour%`, `%minute%`, `%second%`, `%width%` and
 `%height%` are filled in as each file is written, in a folder as readily as in a
-filename — `minimax/%year%-%month%-%day%/H3` gives you a folder per day. The
-popover has a button per token and shows the exact path the next file will take.
+filename — `minimax/%year%-%month%-%day%/H3` gives you a folder per day. There is
+a button per token, and the field shows the exact path the next file will take.
 
-The value is saved in the workflow, so a `.json` shared with someone else renders
-into the same structure on their machine.
+These are preferences of this ComfyUI, not of the workflow: a `.json` shared with
+someone else writes into *their* folders rather than carrying yours onto their
+disk. A hand-edited blob may still set `output_prefix` for one node, which wins
+over the setting — that is the only way to have two nodes write to different
+places.
 
 ### Output quality
 

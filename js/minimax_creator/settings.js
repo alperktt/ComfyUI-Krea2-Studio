@@ -14,9 +14,14 @@
 // The server is the only copy. Nothing is cached between openings: the file can
 // be edited by hand, and a page that showed a remembered value would be showing
 // something the next render will not use.
+//
+// Two tabs, because the page now answers two questions that are not the same
+// question: how good the file is, and where it goes. Both are this machine's
+// rather than the workflow's, which is the only reason they share a page.
 
 import { el, mountOverlay } from "./dom.js";
 import { loadSettings, saveSettings } from "./api.js";
+import { TOKENS, cleanPrefix, folderOf, stemOf, examplePath } from "./outputs.js";
 
 // libx264's own quality scale: lower is better and bigger, and six points is
 // roughly double the file size. Four points on it, because the encoder's full
@@ -44,18 +49,30 @@ export function openSettings() {
   return new Promise((resolve) => new SettingsPage(resolve).mount());
 }
 
+const TABS = [
+  { key: "quality", label: "Quality" },
+  { key: "folders", label: "Folders" },
+];
+
 class SettingsPage {
   constructor(resolve) {
     this.resolve = resolve;
     this.settings = null;   // until the server answers
     this.problem = null;
+    this.tab = TABS[0].key;
   }
 
   mount() {
     this.body = el("div", { class: "mmc-set-body" });
+    this.tabs = TABS.map((tab) => el("button", {
+      class: "mmc-tab",
+      "aria-selected": tab.key === this.tab,
+      text: tab.label,
+      onclick: () => this.show(tab.key),
+    }));
     this.modal = el("div", { class: "mmc-modal mmc-settings" }, [
       el("div", { class: "mmc-modal-head" }, [
-        el("button", { class: "mmc-tab", "aria-selected": true, text: "Settings" }),
+        ...this.tabs,
         el("button", { class: "mmc-close", text: "✕", title: "Close", onclick: () => this.close() }),
       ]),
       this.body,
@@ -105,6 +122,15 @@ class SettingsPage {
     this.render();
   }
 
+  show(tab) {
+    if (tab === this.tab) return;
+    this.tab = tab;
+    // The problem line belongs to the control that produced it, so it does not
+    // follow you to a tab where it means nothing.
+    this.problem = null;
+    this.render();
+  }
+
   close() {
     this.unmount();
     this.resolve();
@@ -117,9 +143,12 @@ class SettingsPage {
       this.body.replaceChildren(el("div", { class: "mmc-set-wait", text: this.problem ?? "Reading settings…" }));
       return;
     }
+    for (const [index, tab] of TABS.entries()) {
+      this.tabs[index].setAttribute("aria-selected", String(tab.key === this.tab));
+    }
     this.body.replaceChildren(
       ...(this.problem ? [el("div", { class: "mmc-set-problem", text: this.problem })] : []),
-      this.renderQuality(),
+      ...(this.tab === "quality" ? [this.renderQuality()] : this.renderFolders()),
     );
   }
 
@@ -163,6 +192,120 @@ class SettingsPage {
           }),
         ]),
       ]);
+  }
+
+  // ---- folders ---------------------------------------------------------------
+
+  /**
+   * Where the two kinds of file land. One section each, because the pack writes
+   * two kinds of thing and filing them together is what makes a gallery you
+   * have to read filenames in.
+   *
+   * This used to be a pill on every node, which meant every node was a place
+   * the answer could differ and a shared workflow arrived carrying somebody
+   * else's folder names. It is one answer per machine now.
+   */
+  renderFolders() {
+    return [
+      this.folderSection("video_prefix", "Renders",
+        "Where finished videos land. The Creator and the Timeline both write here.",
+        "mp4"),
+      this.folderSection("image_prefix", "Stills",
+        "Where pre-stage stills land. Their own folder, which is what lets the "
+        + "gallery show stills and renders apart without being told which is which.",
+        "png"),
+      el("div", { class: "mmc-set-foot" }, [
+        el("span", { text: "Both are relative to ComfyUI's output folder. Start ComfyUI with " }),
+        el("code", { text: "--output-directory" }),
+        el("span", { text: " to move that folder itself. The last part of the path names the "
+                         + "files, not a folder: the counter core adds is what keeps them apart." }),
+      ]),
+    ];
+  }
+
+  /**
+   * One folder field, with what it resolves to underneath it.
+   *
+   * Written through on Enter or on leaving the field rather than on every
+   * keystroke — the rest of the page writes on a click, and a click is finished
+   * where a half-typed path is not. What is live is the *reading*: the folder
+   * and the example filename move as you type, because a prefix is two things
+   * at once and nobody should have to queue a render to find out which.
+   */
+  folderSection(key, title, description, extension) {
+    const stored = this.settings[key];
+    const field = el("input", {
+      class: "mmc-out-field",
+      type: "text",
+      value: stored,
+      spellcheck: false,
+      "aria-label": `${title} — folder and filename prefix`,
+      onkeydown: (event) => {
+        event.stopPropagation();
+        if (event.key === "Enter") field.blur();
+        if (event.key === "Escape") { field.value = this.settings[key]; field.blur(); }
+      },
+      onchange: () => commit(),
+      onblur: () => commit(),
+    });
+    const problem = el("div", { class: "mmc-out-problem" });
+    const example = el("div", { class: "mmc-out-example" });
+
+    const paint = () => {
+      const { prefix, error } = cleanPrefix(field.value, stored);
+      field.classList.toggle("bad", Boolean(error));
+      problem.textContent = error ?? "";
+      problem.style.display = error ? "" : "none";
+      example.replaceChildren(...(error ? [] : [
+        // The folder and the file are shown apart because they are the two
+        // halves nobody expects: "minimax/renders/H3" is a file called H3 in a
+        // folder called renders, not a folder called H3.
+        el("div", { class: "mmc-out-line" }, [
+          el("span", { class: "mmc-out-key", text: "folder" }),
+          el("span", { text: folderOf(prefix) ? `output/${folderOf(prefix)}/` : "output/" }),
+        ]),
+        el("div", { class: "mmc-out-line" }, [
+          el("span", { class: "mmc-out-key", text: "first file" }),
+          el("span", { text: examplePath(stemOf(prefix), { extension }) }),
+        ]),
+      ]));
+      return { prefix, error };
+    };
+
+    const commit = () => {
+      const { prefix, error } = paint();
+      // A path that does not parse is left on screen to be fixed rather than
+      // stored or silently reverted — nothing has changed on disk yet, and the
+      // line under it says what is wrong.
+      if (error || prefix === this.settings[key]) return;
+      this.set({ [key]: prefix });
+    };
+
+    field.addEventListener("input", paint);
+    paint();
+
+    return this.section("Output", title, description, [
+      el("div", { class: "mmc-set-field" }, [
+        field,
+        problem,
+        example,
+        // Core expands these when the file is written. Buttons because nobody
+        // guesses the spelling of `%year%`, and a folder per shoot date is the
+        // most useful thing this field does.
+        el("div", { class: "mmc-out-tokens" }, TOKENS.map((token) => el("button", {
+          class: "mmc-out-token",
+          text: token,
+          title: `Insert ${token} — filled in when the file is written`,
+          onclick: () => {
+            const at = field.selectionStart ?? field.value.length;
+            field.value = field.value.slice(0, at) + token + field.value.slice(field.selectionEnd ?? at);
+            field.focus();
+            field.setSelectionRange?.(at + token.length, at + token.length);
+            commit();
+          },
+        }))),
+      ]),
+    ]);
   }
 
   /** One setting, under a section heading. The heading repeats down the page as

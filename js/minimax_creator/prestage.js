@@ -23,9 +23,8 @@ import { el, icon, ICONS, svg, dismissable, placeNear } from "./dom.js";
 import { openPicker } from "./picker.js";
 import { openLoras } from "./loras.js";
 import { openFrameGrab } from "./framegrab.js";
-import { openChoicePopover, openOutputPopover, stepperPill, aspectGlyph, edgeSlider, PILL_GLYPH } from "./pills.js";
+import { openChoicePopover, stepperPill, aspectGlyph, edgeSlider, PILL_GLYPH } from "./pills.js";
 import { CreatorEditor } from "./editor.js";
-import { IMAGE_PREFIX, folderOf } from "./outputs.js";
 import { samplingBar } from "./sampling.js";
 import { Stage } from "./stage.js";
 import { loadCatalog, catalogByFolder } from "./models.js";
@@ -371,19 +370,7 @@ export class PreStageEditor {
       el("span", { class: "mmc-pill-sub", text: `${geometry.width} × ${geometry.height}` }),
     ]);
 
-    // Where the still lands. Its own default folder, apart from the video
-    // node's, which is what sorts the gallery into stills and finished renders
-    // without the picker having to know the difference between them.
-    const outFolder = folderOf(state.output_prefix || IMAGE_PREFIX);
-    const outputPill = el("button", {
-      class: "mmc-pill",
-      title: `Stills land in output/${outFolder ? `${outFolder}/` : ""} — click to change it.`,
-      onclick: (event) => openOutputPopover(
-        event.currentTarget, state, () => this.commit(),
-        { fallback: IMAGE_PREFIX, extension: "png" }),
-    }, [icon("folder", 16), el("span", { text: outFolder ? outFolder.split("/").pop() : "output" })]);
-
-    const pills = [archPill, aspectPill, resPill, outputPill];
+    const pills = [archPill, aspectPill, resPill];
 
     if (state.arch === "ideogram4") {
       // Ideogram's speed axis. The preset owns the schedule shape as well as
@@ -688,11 +675,11 @@ export class PreStageBody {
 
   /** The H3 branch: a Creator body on the still's own request.
    *
-   *  Everything it is handed is what a Creator node hands it, with three
-   *  differences — no seconds pill (a still's length is how much video is
-   *  sampled to get one frame, which is the sweep's business and not the
-   *  clip's), the stills folder as the output default, and no pre-stage pill,
-   *  because this *is* the pre-stage.
+   *  Everything it is handed is what a Creator node hands it, minus three
+   *  things a still has no use for — the seconds pill (how much video gets
+   *  sampled to obtain the one frame is its own pill), the settings tool (it
+   *  holds the video rate control), and the pre-stage pill, because this *is*
+   *  the pre-stage.
    */
   mountStill() {
     const still = this.state.minimax;
@@ -709,7 +696,6 @@ export class PreStageBody {
       settingsTool: false,
       extraPills: () => [this.renderArchPill(), ...this.renderStillPills()],
       extraTools: () => [this.renderFrameGrabTool()],
-      output: { fallback: IMAGE_PREFIX, extension: "png" },
       setRoute: (route) => {
         still.request.models.route = route;
         this.commit();
@@ -842,78 +828,7 @@ export class PreStageBody {
       onChange: (next) => { still.latent_index = Math.round(next); this.commit(); },
     });
 
-    return [length, index, this.renderDevPill()];   // DEV
-  }
-
-  // DEV: the sweep pill, and everything it opens. One queue renders every
-  // combination of sampled length, kept latent frame and decoder, each saved
-  // under a name carrying its coordinate, so the three open questions can be
-  // answered by looking at a folder. Comes out with `compile_still`'s DEV block.
-  renderDevPill() {
-    const sweep = S.stillSweep(this.state.minimax);
-    return el("button", {
-      class: `mmc-pill${sweep.on ? " accel-on" : ""}`,
-      title: sweep.on
-        ? `Dev sweep on: ${sweep.passes} sampler pass(es), ${sweep.images} pictures, one per `
-          + "combination. Each file is named with its length, latent frame and decoder."
-        : "Dev sweep — render several lengths, latent frames and decoders in one queue to "
-        + "compare them. Off, this renders the settings above once.",
-      onclick: (event) => this.openDevSweep(event.currentTarget),
-    }, [icon("effect", 16),
-        el("span", { text: sweep.on ? `sweep · ${sweep.images}` : "sweep" })]);
-  }
-
-  // DEV
-  openDevSweep(anchor) {
-    const still = this.state.minimax;
-    const pop = el("div", { class: "mmc-pop mmc-weights-pop" });
-    const body = el("div");
-
-    const toggle = (list, value) => {
-      const at = list.indexOf(value);
-      if (at === -1) list.push(value);
-      else list.splice(at, 1);
-      list.sort((a, b) => (typeof a === "string" ? String(a).localeCompare(String(b)) : a - b));
-      this.commit();
-      render();
-    };
-
-    const row = (label, options, list, format) => el("div", { class: "mmc-weight-row" }, [
-      el("span", { class: "mmc-weight-name", text: label }),
-      el("div", { class: "mmc-pills" }, options.map((option) => el("button", {
-        class: "mmc-pill",
-        "aria-pressed": list.includes(option),
-        onclick: () => toggle(list, option),
-      }, [el("span", { text: format ? format(option) : String(option) })]))),
-    ]);
-
-    const render = () => {
-      const vaes = (catalogByFolder().vae ?? []).filter((name) =>
-        /h3|minimax/i.test(name) && !/audio/i.test(name));
-      // Every latent frame the longest swept length has, so the choices do not
-      // change under you as the length list does. Out-of-range combinations are
-      // refused at queue time by compile_still.
-      const longest = Math.max(still.frames, ...(still.dev.lengths.length ? still.dev.lengths : [0]));
-      const indices = [...Array(S.stillLatentFrames(longest)).keys()];
-      body.replaceChildren(
-        row("Lengths", S.PRESTAGE_STILL_LENGTHS, still.dev.lengths, (n) => `${n}f`),
-        row("Latent frames", indices, still.dev.indices, (n) => `i${n}`),
-        row("Decoders", vaes, still.dev.vaes,
-            (name) => name.split("/").pop().replace(/\.[^.]+$/, "").slice(-18)),
-        el("div", { class: "mmc-note" }, [
-          el("span", { class: "mmc-note-key", text: "writes" }),
-          el("span", { text: `${S.stillSweep(still).images} picture(s) per queue — an empty row `
-                           + `means "just the pill's own setting".` }),
-        ]),
-      );
-    };
-
-    pop.append(el("div", { class: "mmc-pop-title", text: "Dev sweep" }), body);
-    render();
-    document.body.appendChild(pop);
-    placeNear(pop, anchor);
-    dismissable(pop);
-    loadCatalog(() => pop.isConnected && render());
+    return [length, index];
   }
 
   // ---- the rest of the rail --------------------------------------------------

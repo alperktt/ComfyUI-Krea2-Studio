@@ -199,7 +199,7 @@ class MiniMaxH3Timeline(io.ComfyNode):
             cls.hidden.unique_id,
             tail_s=compiler.audio_tail_seconds(data.get("audio_tail_s")),
             # Refused before anything is sampled — see MiniMaxH3Creator.execute.
-            filename_prefix=outputs.video(data))
+            filename_prefix=outputs.video(data, settings.video_prefix()))
         return render.expanded(graph)
 
 
