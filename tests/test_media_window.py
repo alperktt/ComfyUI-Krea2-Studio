@@ -21,6 +21,7 @@ Skips itself with a message if ComfyUI or PyAV cannot be imported.
 import importlib.util
 import os
 import sys
+import tempfile
 import types
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -120,7 +121,10 @@ def write_clip(path):
     container.close()
 
 
-SCRATCH = os.environ.get("TMPDIR", "/tmp")
+# `tempfile` rather than TMPDIR-or-/tmp: it honours TMPDIR where that is the
+# convention and still resolves on Windows, where /tmp does not exist and PyAV
+# reports the missing directory as a bare FileNotFoundError from the encoder.
+SCRATCH = tempfile.gettempdir()
 CLIP = os.path.join(SCRATCH, "mmc_test_window.mp4")
 write_clip(CLIP)
 

@@ -47,7 +47,8 @@ CASES = [
 ]
 
 SCRIPT = """
-const m = await import(process.argv[1]);
+const { pathToFileURL } = await import("node:url");
+const m = await import(pathToFileURL(process.argv[1]).href);
 const cases = JSON.parse(process.argv[2]);
 const out = { constants: { VIDEO_PREFIX: m.VIDEO_PREFIX, IMAGE_PREFIX: m.IMAGE_PREFIX,
                            TOKENS: m.TOKENS },

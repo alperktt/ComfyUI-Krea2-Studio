@@ -31,7 +31,8 @@ spec.loader.exec_module(canvas)
 # Everything the mirror is expected to reproduce, dumped in one go rather than
 # one subprocess per question.
 SCRIPT = """
-const c = await import(process.argv[1]);
+const { pathToFileURL } = await import("node:url");
+const c = await import(pathToFileURL(process.argv[1]).href);
 const out = { constants: {}, frames: {}, canvases: {}, trained: {} };
 for (const name of ["CANVAS_MULTIPLE", "FPS", "NATIVE_SHORT_EDGE", "NATIVE_MAX_PIXELS",
                     "MIN_SHORT_EDGE", "MAX_SHORT_EDGE", "MIN_SECONDS", "MAX_SECONDS",

@@ -39,7 +39,8 @@ cs = sys.modules["mmcpkg.compile_still"]
 cv = sys.modules["mmcpkg.canvas"]
 
 SCRIPT = """
-const s = await import(process.argv[1]);
+const { pathToFileURL } = await import("node:url");
+const s = await import(pathToFileURL(process.argv[1]).href);
 const out = { constants: {}, canvases: {}, ideogram: {}, turbo: s.PRESTAGE_TURBO_STEPS,
               krea_raw: s.PRESTAGE_KREA_RAW };
 for (const name of ["PRESTAGE_CANVAS_MULTIPLE", "PRESTAGE_MIN_EDGE", "PRESTAGE_MAX_EDGE",
