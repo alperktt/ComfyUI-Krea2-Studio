@@ -45,7 +45,7 @@ from typing import Any, Optional
 from comfy_api.latest import io
 from comfy_execution.graph_utils import GraphBuilder
 
-from . import accel, canvas, compile as compiler, media, models, outputs
+from . import accel, canvas, compile as compiler, media, models, outputs, settings
 
 SEGMENT_NODE = "MiniMaxH3TimelineSegment"
 LAST_FRAME_NODE = "MiniMaxH3LastFrame"
@@ -245,9 +245,16 @@ def emit_tail(graph, images, audio, unique_id, filename_prefix=FILENAME_PREFIX):
 
     The display-id stamp is the whole reason the node can show its own result —
     see the module docstring.
+
+    The quality target is read here, once, and travels into the graph as an
+    ordinary input. That is what makes it take effect on a re-queue: an output
+    node with unchanged inputs is a cache hit, so a save node that read the
+    setting itself would keep writing yesterday's quality until something else
+    about the render changed.
     """
     save = graph.node(SAVE_NODE, images=images, audio=audio,
-                      fps=float(canvas.FPS), filename_prefix=filename_prefix)
+                      fps=float(canvas.FPS), filename_prefix=filename_prefix,
+                      crf=settings.video_crf())
     save.set_override_display_id(unique_id)
     return save
 

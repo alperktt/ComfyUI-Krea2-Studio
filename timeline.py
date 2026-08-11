@@ -49,7 +49,7 @@ import torch
 from comfy_api.latest import io
 
 from . import (accel, canvas, compile as compiler, encode as encoder, lora,
-               media, models, outputs, payload as payload_repair, render)
+               media, models, outputs, payload as payload_repair, render, settings)
 
 DEFAULT_DATA = json.dumps({
     "version": 2,
@@ -432,13 +432,22 @@ class MiniMaxH3Save(io.ComfyNode):
                 io.Audio.Input("audio"),
                 io.Float.Input("fps", default=float(canvas.FPS), min=1.0, max=120.0),
                 io.String.Input("filename_prefix", default="minimax/H3"),
+                # An input rather than a read of `settings.py` here, so that
+                # changing the quality and re-queueing actually re-writes the
+                # file: an output node whose inputs are all unchanged is a
+                # cache hit, and the render would keep the quality it had.
+                # `render.emit_tail` is the one place that reads the setting.
+                io.Int.Input("crf", default=settings.DEFAULT_CRF,
+                             min=settings.MIN_CRF, max=settings.MAX_CRF),
             ],
             outputs=[],
             hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo],
         )
 
     @classmethod
-    def execute(cls, images, audio, fps, filename_prefix) -> io.NodeOutput:
+    def execute(cls, images, audio, fps, filename_prefix,
+                crf=settings.DEFAULT_CRF) -> io.NodeOutput:
+        import inspect
         import os
         from fractions import Fraction
 
@@ -463,10 +472,24 @@ class MiniMaxH3Save(io.ComfyNode):
         video = InputImpl.VideoFromComponents(Types.VideoComponents(
             images=images, audio=audio, frame_rate=Fraction(round(float(fps)))))
         filename = f"{name}_{counter:05}_.mp4"
+        # `crf` reached core's video writer in ComfyUI 0.29. On anything older
+        # the argument does not exist, and dropping it would mean a file that
+        # does not have the quality the settings page says is set — so it is
+        # only dropped when it is the value libx264 would have chosen anyway,
+        # and refused loudly otherwise.
+        quality = {"crf": float(crf)}
+        if "crf" not in inspect.signature(video.save_to).parameters:
+            if int(crf) != settings.DEFAULT_CRF:
+                raise RuntimeError(
+                    f"Output quality (crf {int(crf)}) needs ComfyUI 0.29 or newer — "
+                    f"this one can only write libx264's default of {settings.DEFAULT_CRF}. "
+                    "Update ComfyUI, or set the quality back to Standard.")
+            quality = {}
         video.save_to(os.path.join(directory, filename),
                       format=Types.VideoContainer.MP4,
                       codec=Types.VideoCodec.H264,
-                      metadata=metadata)
+                      metadata=metadata,
+                      **quality)
 
         # Not `ui.PreviewVideo`: that reports under "images", the key the stock
         # frontend preview keys on — and with the caller's id stamped on this

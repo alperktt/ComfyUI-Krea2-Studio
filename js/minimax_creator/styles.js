@@ -1027,6 +1027,54 @@ button.mmc-mode:hover { background: var(--mmc-surface-2); border-color: var(--mm
 }
 .mmc-add:disabled { opacity: .4; cursor: not-allowed; }
 
+/* --- settings page -------------------------------------------------------- */
+/* A sibling of the LoRA manager rather than a new species: same overlay, same
+   head, same Done. Narrower, and only as tall as what is in it — the picker's
+   1100×760 shell around one control reads as a page left half-built. */
+.mmc-settings { width: min(600px, 100%); height: auto; max-height: min(760px, 100%); }
+.mmc-set-body { overflow-y: auto; min-height: 0; padding: 4px 24px 8px; }
+/* Static, unlike the picker's, which floats over a scrolling grid. There is no
+   grid here to hover above and nothing for it to clear. */
+.mmc-settings .mmc-modal-foot {
+  position: static; justify-content: flex-end; background: none; border: 0;
+  box-shadow: none; padding: 8px 24px 20px;
+}
+.mmc-set-section { padding: 16px 0 4px; display: flex; flex-direction: column; gap: 4px; }
+.mmc-set-title { font-size: 15px; }
+/* Measured, not full-bleed: a 600px line of 12px text is a paragraph nobody
+   finishes. Wide enough to reach the choice box below it, though — a
+   description visibly narrower than the control it describes reads as a
+   column that lost its other half. */
+.mmc-set-desc { color: var(--mmc-dim); font-size: 12px; line-height: 1.5; max-width: 62ch; }
+.mmc-set-choices {
+  margin-top: 10px; background: var(--mmc-surface); border: 1px solid var(--mmc-line);
+  border-radius: 14px; padding: 4px;
+}
+/* Three columns: the radio, the words, and the value the encoder is actually
+   given. Fixed on the right so the numbers stack under each other — they are a
+   scale, and a scale you have to read across for is not one. */
+.mmc-set-opt {
+  display: grid; grid-template-columns: 18px 1fr auto; gap: 12px;
+  align-items: start; padding: 11px 12px; border-radius: 11px;
+}
+.mmc-set-opt .mmc-radio { margin-top: 1px; }
+.mmc-set-opt-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.mmc-set-opt-label { font-size: 14px; }
+.mmc-set-opt-note { color: var(--mmc-dim); font-size: 11.5px; line-height: 1.45; }
+.mmc-set-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+  color: var(--mmc-dim); font-variant-numeric: tabular-nums; padding-top: 2px;
+}
+/* The value in force reads as text, the rest as labels. This column is the one
+   thing on the page you might want to read across before choosing, so none of
+   it is allowed to be decoration. */
+.mmc-set-opt[aria-checked="true"] .mmc-set-value { color: var(--mmc-text); }
+.mmc-set-foot {
+  color: var(--mmc-off); font-size: 11px; line-height: 1.55; padding: 10px 2px 0;
+}
+.mmc-set-wait { color: var(--mmc-dim); font-size: 13px; padding: 28px 0 24px; }
+.mmc-set-problem { color: #e0743c; font-size: 12px; line-height: 1.45; padding: 14px 0 0; }
+
 /* --- timeline ------------------------------------------------------------- */
 
 /* The continuation switch, on a segment's pill row. Lit when on, because a
