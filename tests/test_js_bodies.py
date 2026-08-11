@@ -140,6 +140,7 @@ for (const [cls, widget, blob] of [
                        body: node.mmcBody?.editor?.constructor.name
                           ?? node.mmcBody?.constructor.name };
     if (blob !== "{}") out.still = node.mmcBody.root.text;
+    if (cls === "MiniMaxH3Creator") out.creator = node.mmcBody.root.text;
   } catch (error) {
     out.errors.push(`${cls}: ${error.message}`);
   }
@@ -222,6 +223,13 @@ for wanted in ("Add image", "Add video", "Add audio", "Add LoRA", "Gallery", "Fr
                "Start frame", "End frame", "MiniMax H3", "latent", "sweep", "T2VA"):
     if wanted not in (report["still"] or ""):
         FAILURES.append(f"the H3 still's body has no {wanted!r}")
+
+# ...and what it must *not* have. The settings page is the video rate control;
+# a node that writes PNGs offering it is a control over nothing.
+for unwanted in ("Settings", " s "):
+    if unwanted in (report["still"] or ""):
+        FAILURES.append(f"the H3 still's body should not carry {unwanted!r}")
+check("the Creator keeps the settings tool", "Settings" in (report["creator"] or ""), True)
 
 check("switching to an image model rebuilds the body",
       report.get("switch", {}).get("image"), "PreStageEditor")

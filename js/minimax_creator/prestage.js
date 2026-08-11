@@ -704,6 +704,9 @@ export class PreStageBody {
       nodeId: this.nodeId,
       stage: this.stage,
       durationPill: false,
+      // The settings page holds the video rate control and this node writes
+      // PNGs, so it would be a button over nothing.
+      settingsTool: false,
       extraPills: () => [this.renderArchPill(), ...this.renderStillPills()],
       extraTools: () => [this.renderFrameGrabTool()],
       output: { fallback: IMAGE_PREFIX, extension: "png" },

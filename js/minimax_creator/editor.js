@@ -80,7 +80,11 @@ export class CreatorEditor {
    *   duration pill's place. What a caller that is *not* rendering a video
    *   needs to say about the generation.
    * @param {() => Element[]} [options.extraTools]  extra rail tools, after the
-   *   gallery.
+   *   gallery. What a body needs that a Creator does not — the pre-stage's
+   *   frame grabber is the only one.
+   * @param {boolean} [options.settingsTool]  false where the settings page has
+   *   nothing to say about what this body makes. It holds the video rate
+   *   control, and a pre-stage writes PNGs.
    * @param {{fallback: string, extension: string}} [options.output]  where this
    *   body's renders land when the blob does not say, and what they are. The
    *   video default when absent.
@@ -94,9 +98,10 @@ export class CreatorEditor {
                 samplingWidgets = null, onWidgetChange = null, nodeId = null,
                 routeOf = null, setRoute = null, preStage = null,
                 durationPill = true, extraPills = null, extraTools = null,
-                output = null, stage = null }) {
+                settingsTool = true, output = null, stage = null }) {
     this.preStage = preStage;
     this.durationPill = durationPill;
+    this.settingsTool = settingsTool;
     this.extraPills = extraPills;
     this.extraTools = extraTools;
     this.output = output ?? { fallback: VIDEO_PREFIX, extension: "mp4" };
@@ -559,12 +564,13 @@ export class CreatorEditor {
       // Beside the Gallery because it is the same kind of thing: neither one
       // touches this generation. The Gallery is what this ComfyUI has already
       // made and this is how it writes the next one, and both stay where they
-      // are whatever the prompt says.
-      el("button", {
+      // are whatever the prompt says. Absent where it would be a control over
+      // nothing — see `settingsTool`.
+      ...(this.settingsTool ? [el("button", {
         class: "mmc-tool",
         title: "Preferences for this ComfyUI — output quality. Not saved into the workflow.",
         onclick: () => openSettings(),
-      }, [el("span", { class: "mmc-tool-icon" }, [icon("gear")]), el("span", { text: "Settings" })]),
+      }, [el("span", { class: "mmc-tool-icon" }, [icon("gear")]), el("span", { text: "Settings" })])] : []),
       ...(this.extraTools?.() ?? []),
       // Last in the rail because it is the step after everything else: the
       // rewrite is written against the references and the duration, so it wants
