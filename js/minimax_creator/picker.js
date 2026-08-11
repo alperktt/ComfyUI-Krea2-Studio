@@ -71,13 +71,19 @@ class Picker {
       oninput: (event) => { this.query = event.target.value.toLowerCase(); this.renderGrid(); },
     });
 
-    this.tabs = this.options.kinds.map((kind) =>
-      el("button", {
-        class: "mmc-tab",
-        "aria-selected": kind === this.kind,
-        onclick: () => this.selectTab(kind),
-        text: KIND_LABEL[kind],
-      }));
+    // One kind is a title, not a choice: a lone tab-button (the timeline's
+    // view-only gallery is all renders) would be a control that does nothing.
+    // Same static head the timeline modal has. selectTab still walks this
+    // list, and setAttribute works the same on a span.
+    this.tabs = this.options.kinds.length === 1
+      ? [el("span", { class: "mmc-tab", "aria-selected": "true", text: KIND_LABEL[this.kind] })]
+      : this.options.kinds.map((kind) =>
+          el("button", {
+            class: "mmc-tab",
+            "aria-selected": kind === this.kind,
+            onclick: () => this.selectTab(kind),
+            text: KIND_LABEL[kind],
+          }));
 
     this.slots = el("span", { class: "mmc-slots" });
     // Children come from renderFoot: picking and organizing want different rows.

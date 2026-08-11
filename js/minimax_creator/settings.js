@@ -197,9 +197,12 @@ class SettingsPage {
   // ---- folders ---------------------------------------------------------------
 
   /**
-   * Where the two kinds of file land. One section each, because the pack writes
-   * two kinds of thing and filing them together is what makes a gallery you
-   * have to read filenames in.
+   * Where the two kinds of file land: one section, one card, two rows.
+   *
+   * The two prefixes are one setting asked twice, so they read as two rows of
+   * one card the way the quality tiers do — two full sections was the same
+   * heading, description and token row said twice, and the second telling
+   * taught nothing the first had not.
    *
    * This used to be a pill on every node, which meant every node was a place
    * the answer could differ and a shared workflow arrived carrying somebody
@@ -207,32 +210,40 @@ class SettingsPage {
    */
   renderFolders() {
     return [
-      this.folderSection("video_prefix", "Renders",
-        "Where finished videos land. The Creator and the Timeline both write here.",
-        "mp4"),
-      this.folderSection("image_prefix", "Stills",
-        "Where pre-stage stills land. Their own folder, which is what lets the "
-        + "gallery show stills and renders apart without being told which is which.",
-        "png"),
-      el("div", { class: "mmc-set-foot" }, [
-        el("span", { text: "Both are relative to ComfyUI's output folder. Start ComfyUI with " }),
-        el("code", { text: "--output-directory" }),
-        el("span", { text: " to move that folder itself. The last part of the path names the "
-                         + "files, not a folder: the counter core adds is what keeps them apart." }),
-      ]),
+      this.section("Output", "Folders",
+        "Where this ComfyUI files what it makes. Renders and stills get their "
+        + "own, which is how the gallery tells them apart.",
+        [
+          el("div", { class: "mmc-set-field" }, [
+            this.folderRow("video_prefix", "Renders",
+              "finished videos — the Creator and the Timeline", "mp4"),
+            this.folderRow("image_prefix", "Stills",
+              "pre-stage stills", "png"),
+          ]),
+          el("div", { class: "mmc-set-foot" }, [
+            el("span", { text: "Relative to ComfyUI's output folder (" }),
+            el("code", { text: "--output-directory" }),
+            el("span", { text: " moves that). The last part names the files, not a folder — "
+                             + "core's counter numbers them apart." }),
+          ]),
+        ]),
     ];
   }
 
   /**
-   * One folder field, with what it resolves to underneath it.
+   * One destination: a name, the field, and the single line it resolves to.
    *
    * Written through on Enter or on leaving the field rather than on every
    * keystroke — the rest of the page writes on a click, and a click is finished
-   * where a half-typed path is not. What is live is the *reading*: the folder
-   * and the example filename move as you type, because a prefix is two things
-   * at once and nobody should have to queue a render to find out which.
+   * where a half-typed path is not. What is live is the *reading*: the line
+   * under the field moves as you type, folder half dim and filename bright,
+   * because a prefix is two things at once and "renders/H3" being a file called
+   * H3 rather than a folder called H3 is the one surprise this page holds.
+   *
+   * The token chips only exist while the field has focus — CSS, off
+   * :focus-within — so the page at rest is two fields, not sixteen buttons.
    */
-  folderSection(key, title, description, extension) {
+  folderRow(key, title, description, extension) {
     const stored = this.settings[key];
     const field = el("input", {
       class: "mmc-out-field",
@@ -257,17 +268,16 @@ class SettingsPage {
       problem.textContent = error ?? "";
       problem.style.display = error ? "" : "none";
       example.replaceChildren(...(error ? [] : [
-        // The folder and the file are shown apart because they are the two
-        // halves nobody expects: "minimax/renders/H3" is a file called H3 in a
-        // folder called renders, not a folder called H3.
-        el("div", { class: "mmc-out-line" }, [
-          el("span", { class: "mmc-out-key", text: "folder" }),
-          el("span", { text: folderOf(prefix) ? `output/${folderOf(prefix)}/` : "output/" }),
-        ]),
-        el("div", { class: "mmc-out-line" }, [
-          el("span", { class: "mmc-out-key", text: "first file" }),
-          el("span", { text: examplePath(stemOf(prefix), { extension }) }),
-        ]),
+        // One line: the folder half dim, the file half bright. The colour break
+        // is the split nobody expects — "minimax/renders/H3" is a file called
+        // H3 in a folder called renders, not a folder called H3 — and a break
+        // in the path itself says that better than labels beside it did.
+        el("span", { class: "mmc-out-dim", text: "→ " }),
+        el("span", {
+          class: "mmc-out-dim",
+          text: folderOf(prefix) ? `output/${folderOf(prefix)}/` : "output/",
+        }),
+        el("span", { text: examplePath(stemOf(prefix), { extension }) }),
       ]));
       return { prefix, error };
     };
@@ -284,27 +294,40 @@ class SettingsPage {
     field.addEventListener("input", paint);
     paint();
 
-    return this.section("Output", title, description, [
-      el("div", { class: "mmc-set-field" }, [
-        field,
-        problem,
-        example,
-        // Core expands these when the file is written. Buttons because nobody
-        // guesses the spelling of `%year%`, and a folder per shoot date is the
-        // most useful thing this field does.
-        el("div", { class: "mmc-out-tokens" }, TOKENS.map((token) => el("button", {
-          class: "mmc-out-token",
-          text: token,
-          title: `Insert ${token} — filled in when the file is written`,
-          onclick: () => {
-            const at = field.selectionStart ?? field.value.length;
-            field.value = field.value.slice(0, at) + token + field.value.slice(field.selectionEnd ?? at);
-            field.focus();
-            field.setSelectionRange?.(at + token.length, at + token.length);
-            commit();
-          },
-        }))),
+    return el("div", { class: "mmc-set-dest" }, [
+      el("div", { class: "mmc-set-dest-head" }, [
+        el("span", { class: "mmc-set-dest-name", text: title }),
+        el("span", { class: "mmc-set-dest-sub", text: description }),
       ]),
+      field,
+      problem,
+      example,
+      // Core expands these when the file is written. Buttons because nobody
+      // guesses the spelling of `%year%`, and a folder per shoot date is the
+      // most useful thing this field does. The chips say the word and the
+      // field receives the token: `%year%` is core's syntax and the stored
+      // value, not something anyone should have to read on a button — the
+      // reading underneath shows what it turns into the moment it lands.
+      // Inserting is typing, not finishing: it repaints the reading and leaves
+      // the write to Enter or blur, the same deal the keyboard has — a commit
+      // here would re-render the page and yank the field (row and caret both)
+      // out from under the second click. pointerdown is swallowed so the click
+      // does not blur the field first.
+      el("div", { class: "mmc-out-tokens" }, [
+        el("span", { class: "mmc-out-tokens-key", text: "insert" }),
+        ...TOKENS.map((token) => el("button", {
+        class: "mmc-out-token",
+        text: token.replaceAll("%", ""),
+        title: `Inserts ${token} — filled in when the file is written`,
+        onpointerdown: (event) => event.preventDefault(),
+        onclick: () => {
+          const at = field.selectionStart ?? field.value.length;
+          field.value = field.value.slice(0, at) + token + field.value.slice(field.selectionEnd ?? at);
+          field.focus();
+          field.setSelectionRange?.(at + token.length, at + token.length);
+          paint();
+        },
+      }))]),
     ]);
   }
 

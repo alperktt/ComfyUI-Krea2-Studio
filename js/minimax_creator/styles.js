@@ -195,7 +195,12 @@ const CSS = `
   stroke-linecap: round; stroke-linejoin: round;
 }
 
-.mmc-rail { display: flex; gap: 10px; flex-wrap: wrap; }
+/* Two clusters: generation tools left, the machine's pair (Gallery, Settings)
+   at the far edge. space-between does the split; on a node too narrow for both,
+   the right cluster wraps under and keeps its edge. */
+.mmc-rail { display: flex; gap: 10px 24px; flex-wrap: wrap; justify-content: space-between; }
+.mmc-rail-group { display: flex; gap: 10px; flex-wrap: wrap; }
+.mmc-rail-group:last-child { margin-left: auto; }
 .mmc-tool {
   display: flex; flex-direction: column; align-items: center; gap: 6px;
   background: none; border: 0; padding: 0; cursor: pointer;
@@ -367,10 +372,8 @@ button.mmc-mode:hover { background: var(--mmc-surface-2); border-color: var(--mm
 }
 .mmc-pop-title { color: var(--mmc-dim); font-size: 12px; padding: 6px 10px 8px; }
 
-/* The output-folder popover. Fixed width for the same reason the slider's is:
-   the example line changes length on every keystroke, and a popover that
-   resized under the caret would be unusable to type in. */
-.mmc-out-pop { width: 320px; }
+/* The output-prefix field and its live reading — Settings → Folders is the only
+   place these appear now that the per-node popover is gone. */
 .mmc-out-field {
   width: 100%; box-sizing: border-box; padding: 8px 10px;
   background: var(--mmc-surface); border: 1px solid var(--mmc-line);
@@ -380,32 +383,30 @@ button.mmc-mode:hover { background: var(--mmc-surface-2); border-color: var(--mm
 .mmc-out-field:focus { outline: none; border-color: var(--mmc-blue); }
 .mmc-out-field.bad { border-color: #e0743c; }
 .mmc-out-problem { color: #e0743c; font-size: 11.5px; line-height: 1.45; padding: 6px 2px 0; }
+/* One line, two colours: the folder half dim, the filename bright. The colour
+   break carries what two labelled rows used to — that the last path part names
+   the files, not a folder. */
 .mmc-out-example {
   padding: 8px 2px 2px; font-size: 11.5px; line-height: 1.6;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--mmc-text);
-  /* A long dated folder must not widen the popover — see above. */
+  /* A dated folder name is long, and the card must not scroll sideways for it. */
   overflow-wrap: anywhere;
 }
-.mmc-out-line { display: flex; gap: 8px; }
-.mmc-out-key {
-  color: var(--mmc-off); flex: none; width: 62px; text-align: right;
-  font-family: inherit;
+.mmc-out-dim { color: var(--mmc-off); }
+.mmc-out-tokens { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 8px 2px 2px; }
+/* Says what the chips do, in the same voice the note-keys use — a bare row of
+   single words reads as filters until something names the action. */
+.mmc-out-tokens-key {
+  color: var(--mmc-off); font-size: 10px; letter-spacing: .06em;
+  text-transform: uppercase; padding-right: 4px;
 }
-.mmc-out-tokens { display: flex; flex-wrap: wrap; gap: 4px; padding: 8px 2px 2px; }
 .mmc-out-token {
   padding: 3px 7px; background: var(--mmc-surface-2); border: 0; border-radius: 7px;
   color: var(--mmc-dim); font-size: 11px; font-family: ui-monospace, Menlo, monospace;
   cursor: pointer;
 }
 .mmc-out-token:hover { background: var(--mmc-surface-3); color: var(--mmc-text); }
-.mmc-out-note {
-  color: var(--mmc-off); font-size: 11px; line-height: 1.5; padding: 8px 2px 2px;
-  border-top: 1px solid var(--mmc-line); margin-top: 8px;
-}
-.mmc-out-note code {
-  font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; color: var(--mmc-dim);
-}
 .mmc-opt {
   display: flex; align-items: center; justify-content: space-between; width: 100%;
   padding: 9px 10px; background: none; border: 0; border-radius: 10px;
@@ -1096,11 +1097,25 @@ button.mmc-mode:hover { background: var(--mmc-surface-2); border-color: var(--mm
   margin-top: 10px; background: var(--mmc-surface); border: 1px solid var(--mmc-line);
   border-radius: 14px; padding: 12px;
 }
-/* The field is the width of its box here, not of a 320px popover, so the
-   example line has room to be read rather than wrapped. */
-.mmc-set-field .mmc-out-example { padding: 10px 2px 0; }
-.mmc-set-field .mmc-out-key { width: 66px; }
-.mmc-set-field .mmc-out-tokens { padding: 10px 0 0; }
+/* A destination: name and note on one line, the field, the reading under it.
+   Two of these share the card, split by a hairline — they are one setting
+   asked twice, and the quality list above answers the same way. */
+.mmc-set-dest { display: flex; flex-direction: column; gap: 8px; padding: 6px 4px; }
+.mmc-set-dest + .mmc-set-dest {
+  border-top: 1px solid var(--mmc-line); margin-top: 10px; padding-top: 16px;
+}
+.mmc-set-dest-head { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.mmc-set-dest-name { font-size: 14px; }
+.mmc-set-dest-sub {
+  color: var(--mmc-dim); font-size: 11.5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mmc-set-dest .mmc-out-example { padding: 0 2px; }
+/* The token chips exist while the destination is being edited and not
+   otherwise: at rest the tab is two fields and their readings, not sixteen
+   buttons. :focus-within keeps them up while a chip itself is the click. */
+.mmc-set-dest .mmc-out-tokens { display: none; padding: 2px 0 0; }
+.mmc-set-dest:focus-within .mmc-out-tokens { display: flex; }
 .mmc-set-foot {
   color: var(--mmc-off); font-size: 11px; line-height: 1.55; padding: 10px 2px 0;
 }
