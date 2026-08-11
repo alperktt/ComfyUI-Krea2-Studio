@@ -615,18 +615,59 @@ wide = timeline([segment(), segment(), segment()], aspect="9:16", short_edge=512
 check("one canvas across the timeline",
       {(c.width, c.height) for c in wide}, {canvas.resolve_canvas(9 / 16, 512)})
 
-expect_error("references in a continuing segment",
-             lambda: timeline([segment(), segment(**{
-                 "continue": True,
-                 "assets": [{"handle": "img-1", "kind": "image", "role": "reference", "filename": "a.png"}],
-             })]),
-             "continuation off")
+# A continuing segment with references: the seam rides as pinned guides that
+# payload.py places on the segment's own timeline, so the checkpoint choice no
+# longer forbids the combination — REF2VA carries the seam.
+referenced_seam = timeline([segment(), segment("with @img-1", **{
+    "continue": True, "continue_audio": True,
+    "assets": [{"handle": "img-1", "kind": "image", "role": "reference", "filename": "a.png"}],
+})])
+check("a continuing segment with references compiles as REF2VA",
+      referenced_seam[1].mode, "REF2VA")
+check("...and keeps both seam flags",
+      (referenced_seam[1].continues, referenced_seam[1].continues_audio), (True, True))
+check("...on the ref2va checkpoint", referenced_seam[1].checkpoint, "ref2va")
 expect_error("a start frame in a continuing segment",
              lambda: timeline([segment(), segment(**{
                  "continue": True,
                  "assets": [{"handle": "img-1", "kind": "image", "role": "first_frame", "filename": "a.png"}],
              })]),
-             "already the previous segment")
+             "already the source segment")
+
+# --- the feather -------------------------------------------------------------
+#
+# How many of the source's last frames the seam inherits. Values off the video
+# VAE's temporal grid cannot be encoded standalone and are refused; a feather
+# on a hard cut is a leftover and is dropped, like the other seam keys.
+
+feathered = timeline([segment(), segment("closer", **{"continue": True, "feather": 22})])
+check("a feathered seam survives compilation", feathered[1].feather, 22)
+check("an unfeathered seam is the classic single frame",
+      timeline([segment(), segment(**{"continue": True})])[1].feather, 1)
+check("a feather on a hard cut is dropped, not refused",
+      timeline([segment(), segment(**{"feather": 22})])[1].feather, 1)
+check("a feathered tail is clamped to the overlap",
+      timeline([segment(), segment(**{"continue": True, "continue_audio": True,
+                                      "feather": 22})], audio_tail_s=4.0)[1].audio_tail_s,
+      22 / 24)
+check("a classic seam's tail is not",
+      timeline([segment(), segment(**{"continue": True, "continue_audio": True})],
+               audio_tail_s=4.0)[1].audio_tail_s,
+      4.0)
+check("the seam line rides a classic sound seam's prompt",
+      "<Audio 1> is the end of the preceding shot's soundtrack"
+      in timeline([segment(), segment(**{"continue": True, "continue_audio": True})])[1].prompt,
+      True)
+check("a feathered seam's tail rides unlabelled — no seam line",
+      timeline([segment(), segment(**{"continue": True, "continue_audio": True, "feather": 22})])[1].prompt,
+      timeline([segment(), segment(**{"continue": True})])[1].prompt)
+expect_error("a feather off the VAE grid",
+             lambda: timeline([segment(), segment(**{"continue": True, "feather": 10})]),
+             "not 10")
+expect_error("a feather wider than the clip affords",
+             lambda: timeline([segment(**{"duration_s": 6}),
+                               segment(**{"duration_s": 1, "continue": True, "feather": 39})]),
+             "at least 78 frames")
 expect_error("errors name the segment",
              lambda: timeline([segment(), segment(**{"duration_s": 6, "checkpoint": "nope"})]),
              "segment 2")
@@ -722,15 +763,15 @@ expect_error("a non-numeric tail",
              lambda: timeline([segment(), segment(**{"continue_audio": True})], audio_tail_s="long"),
              "must be a number")
 
-# REF2VA already fills minimax_refs from its own ordered plan, so the inherited
-# sound has no slot to take without being numbered into it.
-expect_error("the sound seam on a reference segment",
-             lambda: timeline([segment(), segment(**{
-                 "continue_audio": True,
-                 "assets": [{"handle": "img-1", "kind": "image", "role": "reference",
-                             "filename": "a.png"}],
-             })]),
-             "not yet supported")
+# The inherited sound rides after the reference plan's own blocks, unlabelled,
+# so a reference segment's sound seam is an ordinary thing now.
+check("the sound seam on a reference segment compiles",
+      timeline([segment(), segment(**{
+          "continue_audio": True,
+          "assets": [{"handle": "img-1", "kind": "image", "role": "reference",
+                      "filename": "a.png"}],
+      })])[1].continues_audio,
+      True)
 
 # A lone request is unchanged by any of this.
 check("compile_request still defaults to not continuing", build("x").continues, False)

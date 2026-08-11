@@ -207,7 +207,18 @@ earlier segment's last frame and inherit a tail of its sound. The seam continues
 from the previous segment by default, but from segment 3 on a *from* control under
 the seam's two switches lets it name any earlier one — a story that returns to
 segment 1's hallway after an unrelated segment 2 continues from segment 1, while
-segment 2 stays a hard cut. **One pass** compiles the
+segment 2 stays a hard cut.
+
+A continuing seam works in every mode, references included: a Ref2VA segment can
+continue from another Ref2VA segment's last frame, with its `@` references intact.
+The seam's width is adjustable too — the *last frame / blend* control widens it
+from the classic single frame to a 5-, 22- or 39-frame blend. A blended seam pins
+the source's last run as motion context, so the model reads real movement across
+the cut instead of guessing it from a still, and the sound seam is then pinned
+on the new segment's own timeline — continued phase-locked rather than imitated.
+The overlap is re-generated at the segment's head and trimmed off after decode,
+so a blended segment delivers up to 1.6 s less than its card says. **One pass**
+compiles the
 same cards into a *single* generation, since H3's prompt format is already a shot
 list — nothing is decoded and re-encoded mid-clip, so there is no seam and music or
 dialogue carries across a cut. **Refine all** rewrites every card in one call, which

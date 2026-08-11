@@ -526,7 +526,7 @@ export class CreatorEditor {
   }
 
   renderRail() {
-    const disabled = S.hasFrames(this.state);
+    const disabled = !!S.blockedReason(this.state, "reference");
     const tool = (kind, label, iconName) =>
       el("button", {
         class: "mmc-tool",
@@ -545,7 +545,7 @@ export class CreatorEditor {
         tool("image", "Add image", "image"),
         tool("video", "Add video", "video"),
         tool("audio", "Add audio", "audio"),
-        // Not gated by hasFrames: LoRAs sit on the checkpoint, not in the
+        // Not gated like the reference tools: LoRAs sit on the checkpoint, not in the
         // reference slots, so they are the one thing frames and references share.
         el("button", {
           class: "mmc-tool",

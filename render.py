@@ -51,6 +51,7 @@ SEGMENT_NODE = "MiniMaxH3TimelineSegment"
 REFINE_NODE = "MiniMaxH3RefinePass"
 LAST_FRAME_NODE = "MiniMaxH3LastFrame"
 AUDIO_TAIL_NODE = "MiniMaxH3AudioTail"
+TRIM_NODE = "MiniMaxH3SeamTrim"
 JOIN_NODE = "MiniMaxH3TimelineJoin"
 SAVE_NODE = "MiniMaxH3Save"
 
@@ -129,7 +130,7 @@ def routed(compiled, labels):
 
 
 def emit(payloads, labels, weights, sampling, acceleration, unique_id,
-         tail_s=compiler.DEFAULT_AUDIO_TAIL_S, filename_prefix=FILENAME_PREFIX):
+         filename_prefix=FILENAME_PREFIX):
     """-> the graph, which the caller finalizes. Nothing comes back out of it.
 
     `labels[i]` names payload i in any error raised about it — "Segment 2", or
@@ -183,14 +184,21 @@ def emit(payloads, labels, weights, sampling, acceleration, unique_id,
         source = decoded[payloads[index].get("continue_from", index - 1)] \
             if index else (None, None)
         if one.continues:
-            # Only the frame, not the whole batch: the source segment's images
-            # are a video and what this one inherits is its last moment.
-            # Inserted here rather than after every segment, so a render of hard
-            # cuts has no dead nodes in it and a Creator render has none at all.
-            inputs["prev_image"] = graph.node(LAST_FRAME_NODE, image=source[0]).out(0)
+            # Only the tail, not the whole batch: the source segment's images
+            # are a video and what this one inherits is its last moment — or,
+            # feathered, its last few. Inserted here rather than after every
+            # segment, so a render of hard cuts has no dead nodes in it and a
+            # Creator render has none at all. The count rides only on feathered
+            # seams, so a classic seam's node inputs stay byte-identical.
+            inputs["prev_image"] = graph.node(
+                LAST_FRAME_NODE, image=source[0],
+                **({"count": one.feather} if one.feather > 1 else {})).out(0)
         if one.continues_audio:
+            # `one.audio_tail_s` rather than the timeline's setting directly:
+            # compile clamps it to a feathered seam's overlap, and this is
+            # where that decision reaches the graph.
             inputs["prev_audio"] = graph.node(
-                AUDIO_TAIL_NODE, audio=source[1], seconds=tail_s).out(0)
+                AUDIO_TAIL_NODE, audio=source[1], seconds=one.audio_tail_s).out(0)
 
         segment = graph.node(SEGMENT_NODE, **inputs)
 
@@ -263,6 +271,13 @@ def emit(payloads, labels, weights, sampling, acceleration, unique_id,
         # this one attenuates anything hot enough to clip on the way to a file.
         images = graph.node("VAEDecode", samples=sampled.out(0), vae=links.vae).out(0)
         audio = graph.node("VAEDecodeAudio", samples=sampled.out(0), vae=links.audio_vae).out(0)
+        if one.feather > 1:
+            # A feathered segment re-generates the run it inherited at its own
+            # head; joined untrimmed, the source's tail would play twice. The
+            # trimmed pair is also what later seams inherit from — their tail
+            # is identical either way, and this is the segment as delivered.
+            trimmed = graph.node(TRIM_NODE, images=images, audio=audio, frames=one.feather)
+            images, audio = trimmed.out(0), trimmed.out(1)
         decoded.append((images, audio))
 
         if joined is None:

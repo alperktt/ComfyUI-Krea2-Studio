@@ -197,7 +197,6 @@ class MiniMaxH3Timeline(io.ComfyNode):
             accel.Settings(block_cache=block_cache, spectrum=spectrum,
                            spectrum_blend=spectrum_blend),
             cls.hidden.unique_id,
-            tail_s=compiler.audio_tail_seconds(data.get("audio_tail_s")),
             # Refused before anything is sampled — see MiniMaxH3Creator.execute.
             filename_prefix=outputs.video(data, settings.video_prefix()))
         return render.expanded(graph)
@@ -310,7 +309,13 @@ class MiniMaxH3TimelineSegment(io.ComfyNode):
                     "This segment continues from an earlier one but no frame "
                     "reached it — the Timeline node should have wired one."
                 )
-            loaded[encoder.PREV_FRAME] = {"image": prev_image[-1:]}
+            if prev_image.shape[0] < compiled.feather:
+                raise ValueError(
+                    f"this seam inherits {compiled.feather} frames but only "
+                    f"{prev_image.shape[0]} reached it — shorten the feather "
+                    f"or lengthen the source segment"
+                )
+            loaded[encoder.PREV_FRAME] = {"image": prev_image[-compiled.feather:]}
         if compiled.continues_audio:
             if prev_audio is None:
                 raise ValueError(
@@ -318,12 +323,13 @@ class MiniMaxH3TimelineSegment(io.ComfyNode):
                     "audio reached it — the Timeline node should have wired some."
                 )
             loaded[encoder.PREV_AUDIO] = {"audio": prev_audio}
-            # Sending a keyframe and a reference together needs one line of core
-            # worked around; `payload.py` says which and why. Applied only when
-            # both are actually in play, so an ordinary segment carries no
-            # wrapper at all.
-            if compiled.continues:
-                model = payload_repair.repair(model)
+        if compiled.continues or compiled.continues_audio:
+            # What core's payload assembly cannot express — keyframes alongside
+            # references, guides at real timeline positions — is repaired just
+            # before the forward; `payload.py` says exactly what and why. Inert
+            # on a seam that needs neither, so every seam wears it rather than
+            # this node re-deriving which ones do.
+            model = payload_repair.repair(model)
 
         cond, latent = encoder.encode(clip, vae, audio_vae, compiled, loaded)
         return io.NodeOutput(model, cond, latent)
@@ -372,17 +378,75 @@ class MiniMaxH3LastFrame(io.ComfyNode):
             node_id="MiniMaxH3LastFrame",
             display_name="MiniMax H3 Last Frame",
             category="MiniMax/internal",
-            description="The final frame of a decoded batch — what the next timeline segment continues from.",
+            description="The final frames of a decoded batch — what the next timeline segment continues from.",
             is_dev_only=True,
-            inputs=[io.Image.Input("image")],
+            inputs=[
+                io.Image.Input("image"),
+                # A feathered seam inherits a run instead of a single frame.
+                # Optional so a classic seam's graph — and its cache keys —
+                # look exactly as they always have.
+                io.Int.Input("count", default=1, min=1, max=64, optional=True),
+            ],
             outputs=[io.Image.Output()],
         )
 
     @classmethod
-    def execute(cls, image) -> io.NodeOutput:
-        if image.shape[0] == 0:
-            raise ValueError("no frames to continue from")
-        return io.NodeOutput(image[-1:])
+    def execute(cls, image, count=1) -> io.NodeOutput:
+        count = max(1, int(count))
+        if image.shape[0] < count:
+            # Padding or repeating frames would pin motion that never happened;
+            # the seam's width has to come down instead.
+            raise ValueError(
+                f"the source segment has {image.shape[0]} frames and this seam "
+                f"inherits {count} — shorten the feather or lengthen the source"
+                if image.shape[0] else "no frames to continue from"
+            )
+        return io.NodeOutput(image[-count:])
+
+
+class MiniMaxH3SeamTrim(io.ComfyNode):
+    """A feathered segment minus the run it inherited.
+
+    The pinned context occupies the first frames of the segment's own timeline
+    and is re-generated there, so an untrimmed join would play the source's
+    tail twice. Trimmed after decode — picture and the matching stretch of
+    sound together, so the two stay in phase across the cut.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiniMaxH3SeamTrim",
+            display_name="MiniMax H3 Seam Trim",
+            category="MiniMax/internal",
+            description="Drops a feathered seam's re-generated overlap from the front of a decoded segment.",
+            is_dev_only=True,
+            inputs=[
+                io.Image.Input("images"),
+                io.Audio.Input("audio"),
+                io.Int.Input("frames", default=0, min=0, max=64),
+            ],
+            outputs=[io.Image.Output(display_name="images"), io.Audio.Output(display_name="audio")],
+        )
+
+    @classmethod
+    def execute(cls, images, audio, frames) -> io.NodeOutput:
+        frames = int(frames)
+        if frames <= 0:
+            return io.NodeOutput(images, audio)
+        if images.shape[0] <= frames:
+            # compile refuses a feather of half the segment or more, so hitting
+            # this means the graph was built against different arithmetic.
+            raise ValueError(
+                f"cannot trim {frames} inherited frames off a "
+                f"{images.shape[0]}-frame segment"
+            )
+        rate = int(audio["sample_rate"])
+        samples = int(round(frames / canvas.FPS * rate))
+        return io.NodeOutput(
+            images[frames:],
+            {"waveform": audio["waveform"][..., samples:], "sample_rate": rate},
+        )
 
 
 class MiniMaxH3TimelineJoin(io.ComfyNode):
@@ -532,4 +596,5 @@ class MiniMaxH3Save(io.ComfyNode):
 # Registered by `creator_node.MiniMaxCreatorExtension` — one extension for the
 # package, so there is one place that says what this node pack contains.
 NODES = [MiniMaxH3Timeline, MiniMaxH3TimelineSegment, MiniMaxH3LastFrame,
-         MiniMaxH3AudioTail, MiniMaxH3TimelineJoin, MiniMaxH3Save]
+         MiniMaxH3SeamTrim, MiniMaxH3AudioTail, MiniMaxH3TimelineJoin,
+         MiniMaxH3Save]

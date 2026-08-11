@@ -503,6 +503,80 @@ wired = [sorted(k for k in i if k.startswith("prev_"))
 check("the seams get exactly the inputs they asked for",
       sorted(wired), [[], ["prev_audio"], ["prev_audio", "prev_image"]])
 
+# --- the feathered seam ------------------------------------------------------
+#
+# A 22-frame feather: the seam inherits a run instead of a single frame, the
+# audio tail is clamped to the overlap, and the re-generated head is trimmed
+# off the decode before the join and before anything later inherits from it.
+
+feathered = build(blob(audio_tail_s=2.0, segments=[
+    {"prompt": "one", "duration_s": 5},
+    {"prompt": "two", "duration_s": 5, "continue": True, "continue_audio": True,
+     "feather": 22},
+    {"prompt": "three", "duration_s": 5, "continue": True},
+])).expand
+fb = {}
+for node_id, node in feathered.items():
+    fb.setdefault(node["class_type"], []).append((node_id, node["inputs"]))
+
+last_frames = {i.get("count", 1) for _, i in fb["MiniMaxH3LastFrame"]}
+check("the feathered seam takes its run, the classic one its frame",
+      sorted(last_frames), [1, 22])
+check("the audio tail is clamped to the overlap",
+      [i["seconds"] for _, i in fb["MiniMaxH3AudioTail"]], [22 / 24])
+
+trims = fb.get("MiniMaxH3SeamTrim", [])
+check("one trim, on the feathered segment only", len(trims), 1)
+check("it trims exactly the inherited run", trims[0][1]["frames"], 22)
+
+fchain = in_order(
+    [(node_id, n["inputs"]) for node_id, n in feathered.items()
+     if n["class_type"] == "MiniMaxH3TimelineSegment"],
+    ["one", "two", "three"])
+# The trim reads segment 2's own decodes...
+trim_images = feathered[trims[0][1]["images"][0]]
+trim_sampler = feathered[trim_images["inputs"]["samples"][0]]
+check("the trim reads the feathered segment's decode",
+      trim_sampler["inputs"]["model"][0], fchain[1][0])
+# ...and both the join and segment 3's seam read the *trimmed* segment 2, so
+# the source's tail neither plays twice nor leaks into the next inheritance.
+joins = [i for _, i in fb["MiniMaxH3TimelineJoin"]]
+trim_id = trims[0][0]
+check("the join takes the trimmed segment",
+      any(i["images_b"][0] == trim_id for i in joins), True)
+seg3_last_frame = feathered[fchain[2][1]["prev_image"][0]]
+check("the next seam inherits from the trimmed segment",
+      seg3_last_frame["inputs"]["image"][0], trim_id)
+
+# The encoder's guide arithmetic, against a stand-in VAE: one call over the
+# run, one block per latent step, pinned at the offsets core's temporal grid
+# dictates — and a refusal when the two stop agreeing.
+import torch as _torch
+
+encoder_mod = importlib.import_module(f"{PACKAGE}.encode")
+payload_mod = importlib.import_module(f"{PACKAGE}.payload")
+
+
+class _FakeVae:
+    def __init__(self, steps):
+        self.steps = steps
+
+    def encode(self, frames):
+        return _torch.zeros(1, 24, self.steps, 4, 4)
+
+
+guides = encoder_mod._context_keyframes(_FakeVae(7), _torch.zeros(22, 64, 64, 3), 22)
+check("22 frames become 7 per-step guide blocks", len(guides), 7)
+check("every block passes the stock constructor a legal anchor",
+      {g["resolved_frame_index"] for g in guides}, {0})
+check("the real positions follow the (1,4,4,4,4) temporal grid",
+      [g[payload_mod.FRAME_INDEX_KEY] for g in guides], [0, 1, 5, 9, 13, 17, 18])
+try:
+    encoder_mod._context_keyframes(_FakeVae(6), _torch.zeros(22, 64, 64, 3), 22)
+    FAILURES.append("a coverage mismatch should refuse to render, got no error")
+except ValueError:
+    pass
+
 # ---- accelerators -----------------------------------------------------------
 #
 # The packs themselves are optional and usually absent, so what is pinned here is

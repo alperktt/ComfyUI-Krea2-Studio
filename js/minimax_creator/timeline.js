@@ -19,8 +19,11 @@ import { weightsPill, loadCatalog, catalogFiles } from "./models.js";
 import * as S from "./state.js";
 import * as Turbo from "./turbo.js";
 import {
-  framesForSeconds, secondsForFrames, resolveCanvas, ASPECT_PRESETS, describeRatio, isTrainedLength,
+  FPS, framesForSeconds, secondsForFrames, resolveCanvas, ASPECT_PRESETS, describeRatio, isTrainedLength,
 } from "./canvas.js";
+
+/** A seam blend's width as the user reads it: seconds, one decimal. */
+const blendSeconds = (frames) => (frames / FPS).toFixed(1);
 
 /**
  * @param {object} options
@@ -408,7 +411,49 @@ class Timeline {
              + `segment 1 after an unrelated shot continues from segment 1.`,
         onclick: (event) => this.pickContinueFrom(event.currentTarget, segment, index),
       }, [el("span", { text: `from #${from}` })])] : []),
+      // How much of the source's tail crosses the seam. Only on a live picture
+      // seam: the width is a property of the inherited frames, and the classic
+      // last-frame seam is what it says until widened. The chip and its picker
+      // speak in seconds of motion — the frame counts are the encoder's
+      // business, not the user's.
+      ...(on ? [el("button", {
+        class: `mmc-tl-join mmc-tl-join-from${S.feather(segment) > 1 ? " on" : ""}`,
+        title: (S.feather(segment) > 1
+          ? `The last ${blendSeconds(S.feather(segment))} s of segment ${from}'s motion `
+            + `carries across this cut, so the movement flows through instead of restarting `
+            + `from a still. That blended moment is redone at the start of segment ${index + 1} `
+            + `and removed from the final video, so it plays about `
+            + `${blendSeconds(S.feather(segment))} s shorter than its set length.`
+          : `This cut picks up from segment ${from}'s last frame. Click to blend a moment `
+            + `of its motion across instead — a smoother handoff, in exchange for segment `
+            + `${index + 1} playing slightly shorter.`),
+        onclick: (event) => this.pickFeather(event.currentTarget, segment, index),
+      }, [el("span", {
+        text: S.feather(segment) > 1
+          ? `blend ${blendSeconds(S.feather(segment))} s` : "no blend",
+      })])] : []),
     ]);
+  }
+
+  /** The seam's width. The options are the runs the video VAE can encode
+   *  standalone (state.FEATHER_GRID), named by what the user hears and sees:
+   *  how long a moment of motion crosses the cut. */
+  pickFeather(anchor, segment, index) {
+    const max = S.maxFeather(segment);
+    const label = (f) => (f === 1 ? "None — start from the last frame"
+      : `${{ 5: "Short", 22: "Medium", 39: "Long" }[f] ?? "Blend"}`
+        + ` · ${blendSeconds(f)} s of motion`);
+    openChoicePopover(anchor, {
+      title: `Blend into segment ${index + 1}`,
+      options: S.FEATHER_GRID.filter((f) => f <= max).map(label),
+      value: label(Math.min(S.feather(segment), max)),
+      onPick: (choice) => {
+        const width = S.FEATHER_GRID.find((f) => label(f) === choice) ?? 1;
+        if (width > 1) segment.feather = width;
+        else delete segment.feather;
+        this.commit();
+      },
+    });
   }
 
   /** The seam's source, chosen from every segment before this one. */

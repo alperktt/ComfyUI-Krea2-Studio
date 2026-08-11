@@ -45,6 +45,15 @@ MAX_SEGMENTS = 24
 DEFAULT_AUDIO_TAIL_S = 1.0
 MAX_AUDIO_TAIL_S = 4.0
 
+# How many of the source segment's last frames a seam may inherit — the counts
+# the H3 video VAE can encode standalone. Its temporal grid compresses runs of
+# (1, 4, 4, 4, 4) pixel frames per latent step, so only a run ending on a
+# whole cycle boundary encodes to steps that cover exactly the frames given:
+# 1, 5, 22 and 39 frames. Anything else would pin a run ending short of the
+# source's last frame, and the join would jump by the difference. Mirrored by
+# the seam's feather picker in `timeline.js`.
+FEATHER_GRID = (1, 5, 22, 39)
+
 HANDLE_RE = re.compile(r"@([A-Za-z]+-\d+)")
 
 # Whether a render whose first pass sits under the slider's canvas gets the
@@ -166,6 +175,13 @@ class Compiled:
     # Timeline only: the first frame is the previous segment's last frame, which
     # is a tensor produced mid-graph and so has no Asset and no filename.
     continues: bool = False
+    # How many of the source segment's last frames the seam inherits. 1 is the
+    # classic seam — the last frame becomes this segment's first. More pins the
+    # whole run as never-denoised context at the head of this segment's
+    # timeline, so the model reads real motion instead of guessing it from a
+    # still; those frames are re-generated and trimmed off after decode. Only
+    # the counts the video VAE's temporal grid can encode standalone.
+    feather: int = 1
     # Timeline only: the previous segment's audio tail rides in as a reference so
     # the sound carries across the seam. Independent of `continues` — a hard cut
     # whose music keeps playing is an ordinary thing to want.
@@ -352,31 +368,29 @@ def _parse_track(handle, kind, item):
 
 def _derive_mode(first_frame, last_frame, ref_images, ref_videos, ref_audios, continues=False):
     has_refs = bool(ref_images or ref_videos or ref_audios)
-    has_frames = first_frame is not None or last_frame is not None or continues
+    has_frames = first_frame is not None or last_frame is not None
 
-    # Continuing *is* having a start frame — it is the previous segment's last
+    # Continuing *is* having a start frame — it is the source segment's last
     # one — so a segment cannot also name a file for the slot.
     if continues and first_frame is not None:
         raise CompileError(
-            "this segment continues from the previous one, so its start frame is "
-            "already the previous segment's last frame — remove the start frame "
+            "this segment continues from an earlier one, so its start frame is "
+            "already the source segment's last frame — remove the start frame "
             "or turn continuation off"
         )
 
     # FL2VA and Ref2VA are two different DiT checkpoints. The hosted API can mix
     # a start frame with references in one call; the open weights cannot, so the
     # UI greys one out against the other. Refuse loudly rather than silently
-    # dropping whichever the user cared about less.
+    # dropping whichever the user cared about less. A *continuing* segment is
+    # the exception: its inherited frames ride in as pinned guides that
+    # payload.py places on the target timeline, which Ref2VA reads alongside
+    # its references — so a seam no longer forces a checkpoint choice.
     if has_refs and has_frames:
         raise CompileError(
-            ("continuing from the previous segment's last frame is a keyframe "
-             "generation (FL2VA) and references need the Ref2VA checkpoint, so "
-             "one segment cannot do both. Turn continuation off, or remove the "
-             "references."
-             ) if continues else
-            ("Start/end frames and references need different checkpoints "
-             "(FL2VA vs Ref2VA) and cannot be combined in one generation. "
-             "Remove the frames or remove the references.")
+            "Start/end frames and references need different checkpoints "
+            "(FL2VA vs Ref2VA) and cannot be combined in one generation. "
+            "Remove the frames or remove the references."
         )
 
     if has_refs:
@@ -600,7 +614,7 @@ def first_pass_edge(raw, short_edge):
 
 
 def compile_request(data, image_size_lookup=None, continues=False, canvas_spec=None,
-                    continues_audio=False, shots=1):
+                    continues_audio=False, shots=1, feather=1):
     """`creator_data` dict -> `Compiled`.
 
     `image_size_lookup(filename) -> (width, height)` supplies the keyframe
@@ -635,18 +649,25 @@ def compile_request(data, image_size_lookup=None, continues=False, canvas_spec=N
 
     mode = _derive_mode(first_frame, last_frame, ref_images, ref_videos, ref_audios, continues)
 
-    # A REF2VA segment already fills `minimax_refs` with its own ordered plan, and
-    # slotting the inherited sound into it means giving it an <Audio N> in that
-    # numbering rather than a line of its own. Worth doing; not done here, and
-    # refused rather than silently dropped so the seam never claims to carry
-    # sound it did not send.
-    if continues_audio and mode == "REF2VA":
+    feather = int(feather or 1)
+    if feather not in FEATHER_GRID:
         raise CompileError(
-            "continuing the sound is not yet supported on a segment with @ references — "
-            "the reference list owns the audio slots. Turn the sound seam off, or "
-            "remove the references."
+            f"a seam can inherit {', '.join(map(str, FEATHER_GRID))} frames — "
+            f"the runs the video VAE's temporal grid can encode — not {feather}"
+        )
+    if feather > 1 and not continues:
+        raise CompileError(
+            "feathering is a property of a continuing seam — this segment does "
+            "not continue from an earlier one"
         )
     audio_tail_s = audio_tail_seconds(data.get("audio_tail_s")) if continues_audio else 0.0
+    # A feathered seam pins the tail end-aligned with the inherited frames on
+    # this segment's own timeline, so a tail longer than the pinned run would
+    # reach back past the clip's origin into coordinates nothing was trained
+    # on. Clamped to the overlap instead — the two are the tail of the same
+    # source and should cover the same instants.
+    if feather > 1 and continues_audio:
+        audio_tail_s = min(audio_tail_s, feather / canvas.FPS)
 
     checkpoint, pinned = _resolve_checkpoint(mode, data.get("checkpoint"))
     if mode == "REF2VA":
@@ -680,6 +701,18 @@ def compile_request(data, image_size_lookup=None, continues=False, canvas_spec=N
     seconds_shown = data.get("duration_s", 6)
     frames = canvas.frames_for_seconds(seconds_shown)
     short_edge = data.get("short_edge", canvas.NATIVE_SHORT_EDGE)
+
+    # The inherited run is re-generated at the head of this segment and trimmed
+    # off after decode, so it spends this segment's frames without delivering
+    # any. It must stay a small fraction of the clip: at half or more, what is
+    # left after the trim is shorter than the overlap that produced it.
+    if frames < 2 * feather:
+        raise CompileError(
+            f"a {feather}-frame feather needs a segment of at least "
+            f"{2 * feather} frames (~{2 * feather / canvas.FPS:.1f} s) — the "
+            f"inherited run is trimmed off after decode, and this segment has "
+            f"only {frames}"
+        )
 
     # A render whose first pass sits under the slider goes one of two ways: one
     # pass at the slider's size ("direct" — past native, off-distribution), or
@@ -715,8 +748,13 @@ def compile_request(data, image_size_lookup=None, continues=False, canvas_spec=N
         mode, body, soundscape, music, canvas.seconds_for_frames(frames),
         # The inherited tail is presented to the tokenizer as <Audio 1>, so the
         # prompt has to say what it is or the label points at nothing. Phrased
-        # the way the reference guide defines its own labels.
-        preamble=contextir.AUDIO_SEAM_LINE if continues_audio else "",
+        # the way the reference guide defines its own labels. Only on the
+        # classic seam: a REF2VA segment's references own the audio numbering,
+        # and a feathered seam pins the tail on this segment's own timeline —
+        # in both, the tail rides unlabelled and the line would point at
+        # nothing.
+        preamble=contextir.AUDIO_SEAM_LINE
+                 if continues_audio and mode != "REF2VA" and feather == 1 else "",
         # Which shot the end frame is reached by. A one-pass render says so
         # outright — it assembled the description and counted the cards' shots —
         # and any body that numbers its own shots says so by carrying them, which
@@ -792,6 +830,7 @@ def compile_request(data, image_size_lookup=None, continues=False, canvas_spec=N
         continues=continues,
         continues_audio=continues_audio,
         audio_tail_s=audio_tail_s,
+        feather=feather,
         refine=refine,
     )
 
@@ -915,6 +954,7 @@ def timeline_payloads(data, image_size_lookup=None):
         request.pop("continue", None)
         request.pop("continue_audio", None)
         request.pop("continue_from", None)
+        request.pop("feather", None)
         request["prompt"] = _join_prompt(global_prompt, segment.get("prompt"))
         request["aspect"] = data.get("aspect", "16:9")
         request["short_edge"] = data.get("short_edge", canvas.NATIVE_SHORT_EDGE)
@@ -953,6 +993,17 @@ def timeline_payloads(data, image_size_lookup=None):
             source = _continue_source(segment.get("continue_from"), index)
             if source is not None:
                 payloads[-1]["continue_from"] = source
+        # The seam's width. Validated in compile_request, where the segment's
+        # frame count is known; only carried when it says something — absent
+        # means the classic single-frame seam, like the other seam keys.
+        if payloads[-1]["continue"]:
+            try:
+                feather = int(segment.get("feather") or 1)
+            except (TypeError, ValueError) as exc:
+                raise CompileError(f"segment {index + 1}: feather must be a "
+                                   f"number of frames") from exc
+            if feather > 1:
+                payloads[-1]["feather"] = feather
 
     # Resolved the way a lone generation would resolve it — segment 1 may take
     # its aspect from its own keyframe — then imposed on the rest.
@@ -1160,6 +1211,7 @@ def compile_segment(payload, image_size_lookup=None):
         continues=bool(payload.get("continue")),
         continues_audio=bool(payload.get("continue_audio")),
         shots=int(payload.get("shots", 1)),
+        feather=int(payload.get("feather", 1)),
         canvas_spec=CanvasSpec(**spec) if spec else None)
 
 

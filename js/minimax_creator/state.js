@@ -653,6 +653,12 @@ function syncCanvas(timeline) {
   timeline.segments.forEach((segment, index) => {
     const from = segment.continue_from;
     if (!Number.isInteger(from) || from < 1 || from >= index) delete segment.continue_from;
+    // A feather the duration can no longer afford — the overlap is trimmed
+    // off after decode, so it must stay under half the clip — is dropped the
+    // same way, rather than left to fail at queue time.
+    if (segment.feather && 2 * segment.feather > framesForSeconds(segment.duration_s)) {
+      delete segment.feather;
+    }
   });
   return timeline;
 }
@@ -694,6 +700,11 @@ export function parseTimeline(raw) {
         delete segment.continue_from;
         const from = Number(raw?.continue_from);
         if (Number.isInteger(from)) segment.continue_from = from;
+        // The seam's width. Off the grid means the classic single frame,
+        // which is also what absence means.
+        delete segment.feather;
+        const width = Number(raw?.feather);
+        if (FEATHER_GRID.includes(width) && width > 1) segment.feather = width;
         return segment;
       });
       return syncCanvas(timeline);
@@ -740,6 +751,9 @@ export function serializeTimeline(timeline) {
           && segment.continue_from >= 1 && segment.continue_from < index) {
         out.continue_from = segment.continue_from;
       }
+      // The seam's width — only on a live picture seam, and only past the
+      // classic single frame, which absence already says.
+      if (out.continue && feather(segment) > 1) out.feather = feather(segment);
       return out;
     }),
   }, null, 2);
@@ -784,7 +798,12 @@ export function shotTime(seconds) {
  */
 export function timelineFrames(timeline) {
   if (isSingle(timeline)) return framesForSeconds(cutTimes(timeline).total);
-  return timeline.segments.reduce((total, segment) => total + framesForSeconds(segment.duration_s), 0);
+  // A feathered seam re-generates its inherited run at the segment's head and
+  // trims it off after decode, so those frames are sampled but never delivered.
+  return timeline.segments.reduce((total, segment, index) => {
+    const overlap = index > 0 && continues(segment) && feather(segment) > 1 ? feather(segment) : 0;
+    return total + framesForSeconds(segment.duration_s) - overlap;
+  }, 0);
 }
 
 /** What the finished clip will run to. */
@@ -1377,6 +1396,24 @@ export function hasReferences(state) {
 /** A timeline segment that starts from the previous segment's last frame. */
 export const continues = (state) => state.continue === true;
 
+/** Mirrors compile.FEATHER_GRID: the seam widths the video VAE's temporal
+ *  grid can encode standalone. 1 is the classic single-frame seam; more pins
+ *  the source's last run as motion context, re-generated at this segment's
+ *  head and trimmed off after decode. */
+export const FEATHER_GRID = [1, 5, 22, 39];
+
+/** The seam's width in frames — a valid grid value, or the classic 1. */
+export function feather(segment) {
+  return FEATHER_GRID.includes(segment.feather) && segment.feather > 1 ? segment.feather : 1;
+}
+
+/** The widest feather this segment's duration allows. Mirrors compile: the
+ *  overlap is trimmed off after decode, so it must stay under half the clip. */
+export function maxFeather(segment) {
+  const frames = framesForSeconds(segment.duration_s);
+  return FEATHER_GRID.filter((f) => 2 * f <= frames).pop() ?? 1;
+}
+
 /** The 1-based number of the segment the seam in front of `index` inherits
  *  from — the previous one unless a valid `continue_from` names an earlier
  *  segment. Meaningless for index 0, which has no seam. */
@@ -1401,10 +1438,11 @@ export function remapContinueFrom(timeline, map) {
 /** ...and one whose sound carries on from it. Not implied by the above. */
 export const continuesAudio = (state) => state.continue_audio === true;
 
-/** Continuing *is* having a start frame — it is the previous segment's last one
- *  — which is why it locks out references exactly as a real keyframe does. */
-export function hasFrames(state) {
-  return continues(state) || !!(frameAsset(state, "first_frame") || frameAsset(state, "last_frame"));
+/** A frame the segment names itself — a file in a slot, not an inherited one.
+ *  This is what still locks references out: an inherited frame rides as a
+ *  pinned guide references can coexist with, a named file cannot. */
+export function frameFile(state) {
+  return !!(frameAsset(state, "first_frame") || frameAsset(state, "last_frame"));
 }
 
 export function mode(state) {
@@ -1470,11 +1508,11 @@ export function resolved(state, keyframeSize = null) {
  * out rather than letting the backend reject the graph at queue time.
  */
 export function blockedReason(state, action) {
-  if (action === "reference" && continues(state)) {
-    return "This segment continues from an earlier one, which is a keyframe generation on FL2VA — "
-         + "references need Ref2VA. Turn continuation off to attach references.";
-  }
-  if (action === "reference" && hasFrames(state)) {
+  // A continuing segment no longer locks references out (or the other way
+  // round): the inherited frames ride as pinned guides that payload.py places
+  // on the segment's own timeline, which Ref2VA reads alongside its
+  // references. Only a segment's *own* frame files still conflict with them.
+  if (action === "reference" && frameFile(state)) {
     return "Remove the start/end frame first — references use the Ref2VA checkpoint, frames use FL2VA.";
   }
   if (action === "first_frame" && continues(state)) {
@@ -1482,15 +1520,6 @@ export function blockedReason(state, action) {
   }
   if ((action === "first_frame" || action === "last_frame") && hasReferences(state)) {
     return "Remove the references first — start/end frames use the FL2VA checkpoint, references use Ref2VA.";
-  }
-  // Turning continuation *on* is refused by the same rule read the other way.
-  if (action === "continue" && hasReferences(state)) {
-    return "Remove this segment's references first — continuing from the last frame is an FL2VA "
-         + "generation and references need Ref2VA.";
-  }
-  if (action === "continue_audio" && hasReferences(state)) {
-    return "Remove this segment's references first — the reference list owns the audio slots, "
-         + "so the inherited soundtrack has nowhere to go.";
   }
   if (action === "continue" && frameAsset(state, "first_frame")) {
     return "Remove this segment's start frame first — continuing would replace it with the source "
