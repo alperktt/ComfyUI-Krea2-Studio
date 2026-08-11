@@ -57,7 +57,10 @@ CATEGORY = "Krea2/internal"
 #   4  styletransfer
 #   5  twostage
 #   6  dype         — DyPE and SEGA
-VENDORED: list[tuple[str, str, str]] = []
+VENDORED: list[tuple[str, str, str]] = [
+    ("K2S_SVDQuantW4A4Loader", "svdquant.svdquant_w4a4", "Krea2SVDQuantW4A4Loader"),
+    ("K2S_SVDQuantLoraLoader", "svdquant.svdquant_lora", "Krea2SVDQuantLoraLoader"),
+]
 
 
 def _wrap(node_id, source):

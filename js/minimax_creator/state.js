@@ -896,6 +896,37 @@ export const PRESTAGE_KREA_TURBO = { cfg: 1.0, sampler_name: "euler", scheduler:
 export const PRESTAGE_TURBO_QUALITIES = ["draft", "medium", "good"];
 export const PRESTAGE_TURBO_STEPS = { draft: 4, medium: 6, good: 8 };
 
+/** Which node loads the DiT. Mirrors compile_image.LOADERS.
+ *
+ *  Separate from the turbo pill because the two answer different questions:
+ *  turbo picks a distillation (how many steps, at what cfg), this picks a
+ *  precision. A checkpoint quantized from Turbo needs both answers, so under
+ *  `svdquant` the turbo pill keeps writing the sampler row and stops choosing
+ *  the file. */
+export const PRESTAGE_LOADERS = ["standard", "svdquant"];
+export const PRESTAGE_LOADER_LABEL = {
+  standard: "standard",
+  svdquant: "SVDQuant",
+};
+export const PRESTAGE_LOADER_HINT = {
+  standard: "Core's UNETLoader, at whatever dtype the weights popover says.",
+  svdquant: "The W4A4 loader: 4-bit blocks with an SVDQuant low-rank branch. "
+          + "Needs a checkpoint built with --format svdq, and takes no dtype — "
+          + "a quantized file has already decided that.",
+};
+
+/** What the SVDQuant LoRA loader does with an adapter that cannot fold into the
+ *  low-rank branch (LoKr, LoHa, OFT). A plain LoRA is free either way, which is
+ *  why this is per-entry. Mirrors compile_image.ADAPTER_MODES. */
+export const PRESTAGE_ADAPTER_MODES = ["bypass", "bake"];
+export const PRESTAGE_ADAPTER_LABEL = { bypass: "bypass", bake: "bake" };
+export const PRESTAGE_ADAPTER_HINT = {
+  bypass: "Exact: the adapter is computed every forward and the 4-bit weight is "
+        + "never touched. Costs about 1.8 s per model call on a full-block LoKr.",
+  bake: "Fast: ComfyUI rewrites the weight once, so there is no per-step cost — "
+      + "but the adapter's delta is quantized to 4 bits along with it.",
+};
+
 /** Ideogram's official preset table (V4_QUALITY_48 / V4_DEFAULT_20 /
  *  V4_TURBO_12). The presets own steps *and* the schedule shape; the widget cfg
  *  feeds the dual-model guider, 7 being the template's number. */
@@ -909,12 +940,13 @@ export const PRESTAGE_MIN_DENOISE = 0.05;
 /** Which weight fields each architecture has, in popover order. Mirrors
  *  render_image.ARCH_FIELDS. */
 export const PRESTAGE_FIELDS = {
-  krea2: ["model", "turbo_model", "clip", "vae"],
+  krea2: ["model", "turbo_model", "svdq_model", "clip", "vae"],
   ideogram4: ["model", "uncond_model", "clip", "vae"],
 };
 export const PRESTAGE_FIELD_LABEL = {
   model: "Checkpoint",
   turbo_model: "Turbo checkpoint",
+  svdq_model: "SVDQuant checkpoint",
   uncond_model: "Unconditional checkpoint",
   clip: "Text encoder",
   vae: "VAE",
@@ -923,6 +955,9 @@ export const PRESTAGE_FIELD_HINT = {
   krea2: {
     model: "Krea 2 RAW — the undistilled base. ~52 steps at cfg 3.5, and the one to train LoRAs against.",
     turbo_model: "Krea 2 Turbo — the 8-step distillation the turbo pill swaps in. LoRAs trained on RAW apply here too.",
+    svdq_model: "A checkpoint from quantize_krea2.py --format svdq, carrying the "
+              + "low-rank branch the W4A4 loader reads. Used only while the loader "
+              + "pill says SVDQuant; the turbo pill still sets its sampler row.",
     clip: "Qwen3-VL 4B, loaded as CLIPLoader type 'krea2'.",
     vae: "The Qwen image VAE.",
   },
@@ -937,7 +972,11 @@ export const PRESTAGE_FIELD_HINT = {
 
 /** Filename hints for `guessPreStageModels`, per arch per field. */
 const PRESTAGE_HINTS = {
-  krea2: { model: ["krea2_raw"], turbo_model: ["krea2_turbo"], clip: ["qwen3vl_4b"], vae: ["qwen_image_vae"] },
+  krea2: {
+    model: ["krea2_raw"], turbo_model: ["krea2_turbo"],
+    svdq_model: ["svdq", "svdquant"],
+    clip: ["qwen3vl_4b"], vae: ["qwen_image_vae"],
+  },
   ideogram4: {
     model: ["ideogram4"], uncond_model: ["ideogram4_unconditional"],
     clip: ["qwen3vl_8b"], vae: ["flux2"],
@@ -960,6 +999,9 @@ export function emptyPreStage() {
     // distilled checkpoint — but the pill keeps the H3 contract: it saves the
     // sampler row once per throw and puts it back exactly on release.
     turbo: { on: false, quality: "good", saved: null },
+    // Which node loads the DiT. Off — meaning core's — is the default, and off
+    // has to compile to exactly what it compiled to before the pill existed.
+    loader: "standard",
     // Ideogram's speed axis: which official preset shapes the schedule.
     quality: "default",
     // The H3 branch: its own settings, and its generation in the Creator's
@@ -975,6 +1017,13 @@ export function emptyPreStage() {
 export function emptyPreStageModels() {
   return { krea2: {}, ideogram4: {}, dtype: "default" };
 }
+
+/** Whether the dtype control means anything for this state.
+ *
+ *  The SVDQuant loader takes no `weight_dtype` — the checkpoint carries its own
+ *  precision — so the popover hides the row rather than offering a control that
+ *  is read by nobody. */
+export const preStageUsesDtype = (state) => state?.loader !== "svdquant";
 
 /** The two image architectures. The H3 branch keeps its weights inside its own
  *  request, in `models.Weights`' shape, so it is not one of these. */
@@ -1004,6 +1053,14 @@ export function parsePreStage(raw) {
           ? Math.min(1, Math.max(PRESTAGE_MIN_DENOISE, denoise)) : PRESTAGE_DEFAULT_DENOISE;
       }
       if (!PRESTAGE_IDEOGRAM_QUALITIES.includes(state.quality)) state.quality = "default";
+      if (!PRESTAGE_LOADERS.includes(state.loader)) state.loader = "standard";
+      // Only Krea 2 has a quantized loader; a blob that arrives with the pill
+      // on and the arch elsewhere would compile to a refusal, so it is settled
+      // here instead — the UI never shows the pill off-arch either.
+      if (state.loader === "svdquant" && state.arch !== "krea2") state.loader = "standard";
+      state.loras = state.loras.map((entry) => (
+        entry && typeof entry === "object" && !PRESTAGE_ADAPTER_MODES.includes(entry.adapters)
+          ? { ...entry, adapters: "bypass" } : entry));
       state.minimax = parseStill(state.minimax);
       const turbo = state.turbo && typeof state.turbo === "object" ? state.turbo : {};
       state.turbo = {
@@ -1066,6 +1123,7 @@ export function serializePreStage(state) {
 export function guessPreStageModels(models, byFolder) {
   const lists = {
     model: byFolder?.diffusion_models ?? [], turbo_model: byFolder?.diffusion_models ?? [],
+    svdq_model: byFolder?.diffusion_models ?? [],
     uncond_model: byFolder?.diffusion_models ?? [],
     clip: byFolder?.text_encoders ?? [], vae: byFolder?.vae ?? [],
   };
@@ -1080,6 +1138,13 @@ export function guessPreStageModels(models, byFolder) {
       // specific word belongs to the more specific field.
       if (field === "model" && arch === "ideogram4") {
         matched = matched.filter((name) => !name.toLowerCase().includes("unconditional"));
+      }
+      // A quantized checkpoint is usually named after what it was quantized
+      // *from* ("Krea2-Turbo-SVDQuant-W4A4-..."), so it would answer to the RAW
+      // and Turbo needles too. The more specific word wins, as above.
+      if (arch === "krea2" && field !== "svdq_model") {
+        matched = matched.filter((name) => !PRESTAGE_HINTS.krea2.svdq_model.some(
+          (needle) => name.toLowerCase().includes(needle)));
       }
       if (matched.length !== 1) continue;
       models[arch][field] = matched[0];
@@ -1141,8 +1206,20 @@ export function nextPreStageHandle(state) {
  *  warning — clip, vae and whichever DiT the turbo pill selects. */
 export function missingPreStageModels(state) {
   const side = state.models[state.arch] ?? {};
-  const dit = state.arch === "krea2" && state.turbo.on ? "turbo_model" : "model";
-  return [dit, "clip", "vae"].filter((field) => !side[field]);
+  return [preStageCheckpointField(state), "clip", "vae"].filter((field) => !side[field]);
+}
+
+/** Which weight field this state's DiT loads from. Mirrors the resolution in
+ *  `compile_image.compile_prestage`, and is the one place the UI decides it —
+ *  the popover greys the fields this does not name, and the missing-weights pill
+ *  asks for exactly the one that will be read.
+ *
+ *  The order matters: the quantized file is its own, so the loader pill settles
+ *  it before the turbo pill gets a say. Turbo still sets the sampler row. */
+export function preStageCheckpointField(state) {
+  if (state?.arch !== "krea2") return "model";
+  if (state.loader === "svdquant") return "svdq_model";
+  return state.turbo?.on ? "turbo_model" : "model";
 }
 
 /** Which of the eight identity hues (--mmc-tag-0..7) a handle wears, everywhere

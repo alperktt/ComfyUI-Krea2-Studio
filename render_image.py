@@ -48,6 +48,7 @@ FILENAME_PREFIX = outputs.IMAGE_PREFIX
 FOLDERS = {
     "model": "diffusion_models",
     "turbo_model": "diffusion_models",
+    "svdq_model": "diffusion_models",
     "uncond_model": "diffusion_models",
     "clip": "text_encoders",
     "vae": "vae",
@@ -56,7 +57,7 @@ FOLDERS = {
 # Which fields each architecture actually has. Ideogram has no distilled
 # checkpoint (its speed axis is the preset table); Krea has no second branch.
 ARCH_FIELDS = {
-    "krea2": ("model", "turbo_model", "clip", "vae"),
+    "krea2": ("model", "turbo_model", "svdq_model", "clip", "vae"),
     "ideogram4": ("model", "uncond_model", "clip", "vae"),
 }
 
@@ -65,10 +66,15 @@ CLIP_TYPE = {"krea2": "krea2", "ideogram4": "ideogram4"}
 LABEL = {
     "model": "the checkpoint",
     "turbo_model": "the Turbo checkpoint",
+    "svdq_model": "the SVDQuant checkpoint",
     "uncond_model": "the unconditional checkpoint",
     "clip": "the text encoder",
     "vae": "the VAE",
 }
+
+# The vendored SVDQuant pair, under the ids `nodes_vendor` registers them with.
+SVDQUANT_LOADER = "K2S_SVDQuantW4A4Loader"
+SVDQUANT_LORA = "K2S_SVDQuantLoraLoader"
 
 # The reference template's shift, applied only on the style-reference branch —
 # plain t2i leaves the shift the checkpoint detection already set (1.15).
@@ -179,14 +185,7 @@ def emit(payload, weights, sampling, unique_id, filename_prefix=FILENAME_PREFIX)
     clip = graph.node("CLIPLoader", clip_name=weights.get("clip"),
                       type=CLIP_TYPE[payload.arch]).out(0)
     vae = graph.node("VAELoader", vae_name=weights.get("vae")).out(0)
-    model = graph.node("UNETLoader", unet_name=weights.get(payload.checkpoint_field),
-                       weight_dtype=weights.dtype).out(0)
-    # Model-only, exactly as the official workflows patch these DiTs — there is
-    # no text-encoder half to a Krea or Ideogram LoRA.
-    for entry in payload.loras:
-        model = graph.node("LoraLoaderModelOnly", model=model,
-                           lora_name=entry["name"],
-                           strength_model=entry["strength"]).out(0)
+    model = _emit_model(graph, payload, weights)
 
     if payload.arch == "krea2":
         _emit_krea2(graph, payload, sampling, clip, vae, model, unique_id, filename_prefix)
@@ -194,6 +193,77 @@ def emit(payload, weights, sampling, unique_id, filename_prefix=FILENAME_PREFIX)
         _emit_ideogram4(graph, payload, sampling, weights, clip, vae, model, unique_id,
                         filename_prefix)
     return graph
+
+
+def _adapter_option(node, wanted):
+    """Our `bypass`/`bake` as the vendored loader's own option string.
+
+    Its options are prose with the measured trade-off in them — "bypass (exact,
+    slower)" — so matching by prefix rather than by literal means a reworded
+    label costs nothing here. The same trick `accel._block_cache_kwargs` plays
+    on the block-cache modes, and for the same reason: this module must not
+    carry a stale copy of somebody else's wording.
+    """
+    declared = node.INPUT_TYPES().get("optional", {}).get("adapters")
+    options = declared[0] if isinstance(declared, (tuple, list)) and declared else []
+    match = next((o for o in options if str(o).lower().startswith(wanted)), None)
+    if match is None:
+        raise ValueError(
+            f"The SVDQuant LoRA loader has no {wanted!r} adapter mode — it offers "
+            f"{list(options)}. The vendored pack has renamed its modes; "
+            f"re-vendor it or set the LoRA back to the other mode."
+        )
+    return match
+
+
+def _emit_model(graph, payload, weights):
+    """The DiT, loaded and patched with the LoRAs. Returns the MODEL link.
+
+    Two loaders, and the choice reaches the LoRAs as well as the checkpoint. A
+    plain `LoraLoaderModelOnly` on a 4-bit model would make ComfyUI rewrite the
+    quantized weight — dequantize, add, requantize — putting the LoRA's delta
+    through 4 bits along with everything else. The vendored loader folds it into
+    the low-rank branch instead, which is the whole point of the format, so the
+    two nodes move together and are never mixed.
+    """
+    if payload.loader != "svdquant":
+        model = graph.node("UNETLoader", unet_name=weights.get(payload.checkpoint_field),
+                           weight_dtype=weights.dtype).out(0)
+        # Model-only, exactly as the official workflows patch these DiTs — there
+        # is no text-encoder half to a Krea or Ideogram LoRA.
+        for entry in payload.loras:
+            model = graph.node("LoraLoaderModelOnly", model=model,
+                               lora_name=entry["name"],
+                               strength_model=entry["strength"]).out(0)
+        return model
+
+    from . import nodes_vendor
+
+    if nodes_vendor.missing(SVDQUANT_LOADER):
+        raise ValueError(
+            "The SVDQuant loader did not load — see the ComfyUI log for why "
+            "vendor/svdquant could not be imported. Set the loader pill back to "
+            "standard to render on the stock loader."
+        )
+    import nodes
+
+    # No `weight_dtype`: the checkpoint carries its own precision, and the dtype
+    # pill has nothing to say about a file that is already quantized.
+    model = graph.node(SVDQUANT_LOADER,
+                       model_name=weights.get(payload.checkpoint_field)).out(0)
+    lora_node = nodes.NODE_CLASS_MAPPINGS.get(SVDQUANT_LORA)
+    for entry in payload.loras:
+        if lora_node is None:
+            raise ValueError(
+                "The SVDQuant LoRA loader did not load, so this LoRA would be "
+                "baked into the 4-bit weight instead of folded into the low-rank "
+                "branch. Remove the LoRA, or set the loader pill back to standard."
+            )
+        model = graph.node(SVDQUANT_LORA, model=model,
+                           lora_name=entry["name"],
+                           strength=entry["strength"],
+                           adapters=_adapter_option(lora_node, entry["adapters"])).out(0)
+    return model
 
 
 def _latent(graph, payload, vae, empty_node):

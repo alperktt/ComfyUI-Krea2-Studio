@@ -557,6 +557,63 @@ expect_error("keyframes and references together are refused",
              ]})),
              "cannot be combined")
 
+# ---- the SVDQuant loader ------------------------------------------------------
+#
+# The two loaders are a pair, not a checkpoint swap: a plain LoraLoaderModelOnly
+# on a 4-bit model makes ComfyUI rewrite the quantized weight, which puts the
+# LoRA's delta through 4 bits with it. So what these check is that choosing one
+# loader moves the LoRAs too, and that choosing neither leaves the graph exactly
+# as it was.
+
+SVDQ_MODELS = {**MODELS, "krea2": {**MODELS["krea2"],
+                                   "svdq_model": "krea2_turbo_svdq_w4a4_rank256.safetensors"}}
+
+
+def svdq_blob(**overrides):
+    data = json.loads(blob())
+    data["loader"] = "svdquant"
+    data["models"] = dict(SVDQ_MODELS)
+    data.update(overrides)
+    return json.dumps(data)
+
+
+nodes_by_class = by_class(build(svdq_blob()).expand)
+check("the SVDQuant loader replaces UNETLoader",
+      "UNETLoader" in nodes_by_class, False)
+check("and loads the quantized checkpoint by name",
+      nodes_by_class[ri.SVDQUANT_LOADER][0][1]["model_name"],
+      SVDQ_MODELS["krea2"]["svdq_model"])
+check("with no dtype, which a quantized file has already decided",
+      "weight_dtype" in nodes_by_class[ri.SVDQUANT_LOADER][0][1], False)
+
+lora_graph = by_class(build(svdq_blob(loras=[
+    {"name": "grain.safetensors", "strength": 0.8},
+    {"name": "face.safetensors", "strength": 1.0, "adapters": "bake"},
+])).expand)
+check("core's LoRA loader never appears on the quantized path",
+      "LoraLoaderModelOnly" in lora_graph, False)
+check("both LoRAs go through the SVDQuant loader",
+      len(lora_graph[ri.SVDQUANT_LORA]), 2)
+modes = sorted(inputs["adapters"] for _, inputs in lora_graph[ri.SVDQUANT_LORA])
+check("each entry keeps its own adapter mode, matched to the pack's wording",
+      [str(m).split(" ")[0] for m in modes], ["bake", "bypass"])
+
+# The pill is off by default, and off has to mean *unchanged* — this is the
+# whole no-regression claim, checked rather than asserted in a comment.
+check("the default blob still loads through core's UNETLoader",
+      ri.SVDQUANT_LOADER in by_class(build().expand), False)
+check("and still patches LoRAs with core's loader",
+      "LoraLoaderModelOnly" in by_class(build(blob(loras=[
+          {"name": "grain.safetensors", "strength": 0.8}])).expand), True)
+
+expect_error("an unpicked quantized checkpoint is named, with its folder",
+             lambda: build(svdq_blob(models={**SVDQ_MODELS, "krea2": {
+                 k: v for k, v in SVDQ_MODELS["krea2"].items() if k != "svdq_model"}})),
+             "models/diffusion_models")
+expect_error("the SVDQuant loader is refused on Ideogram",
+             lambda: build(svdq_blob(arch="ideogram4")),
+             "Krea 2")
+
 if FAILURES:
     print(f"{len(FAILURES)} failure(s):")
     for failure in FAILURES:

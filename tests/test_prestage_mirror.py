@@ -12,6 +12,7 @@ Skips itself if node is not installed.
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -49,6 +50,10 @@ for (const name of ["PRESTAGE_CANVAS_MULTIPLE", "PRESTAGE_MIN_EDGE", "PRESTAGE_M
   out.constants[name] = s[name];
 }
 out.arches = [...s.PRESTAGE_ARCHES];
+out.loaders = [...s.PRESTAGE_LOADERS];
+out.adapters = [...s.PRESTAGE_ADAPTER_MODES];
+out.fields = s.PRESTAGE_FIELDS;
+out.defaults = { loader: s.emptyPreStage().loader };
 out.image_arches = [...s.PRESTAGE_IMAGE_ARCHES];
 out.presets = s.PRESTAGE_ASPECTS.map(([label]) => label).sort();
 for (const [label] of s.PRESTAGE_ASPECTS) {
@@ -124,6 +129,20 @@ for quality, steps in mirror["ideogram"].items():
 
 check("turbo steps", mirror["turbo"], ci.TURBO_STEPS)
 check("krea RAW row", mirror["krea_raw"], ci.KREA_RAW)
+
+check("loaders", mirror["loaders"], list(ci.LOADERS))
+check("adapter modes", mirror["adapters"], list(ci.ADAPTER_MODES))
+check("the default loader", mirror["defaults"]["loader"], ci.DEFAULT_LOADER)
+
+# The weight fields the popover offers have to be the ones the emitter reads, or
+# a file picked in the UI lands in a key nothing loads. `render_image` imports
+# ComfyUI, which this test exists to do without, so its table is read as text.
+source = open(os.path.join(ROOT, "render_image.py"), encoding="utf-8").read()
+block = re.search(r"ARCH_FIELDS = \{(.*?)\n\}", source, re.S).group(1)
+py_fields = {arch: re.findall(r'"(\w+)"', fields)
+             for arch, fields in re.findall(r'"(\w+)": \((.*?)\),', block)}
+for arch, fields in mirror["fields"].items():
+    check(f"{arch} weight fields", fields, py_fields[arch])
 
 if FAILURES:
     print(f"{len(FAILURES)} disagreement(s):")

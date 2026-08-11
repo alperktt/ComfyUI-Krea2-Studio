@@ -15,3 +15,6 @@ docs/vid/
 .idea/
 .vscode/
 *.swp
+
+# Scratch ComfyUI database from a local verification run (--database-url)
+.verify.db*

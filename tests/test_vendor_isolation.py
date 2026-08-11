@@ -115,9 +115,11 @@ elif isinstance(table.value, ast.List):
 for node_id, module_name, class_name in entries:
     if PREFIX and not node_id.startswith(PREFIX):
         fail(f"{node_id!r} does not start with {PREFIX!r}")
-    path = os.path.join(VENDOR, module_name)
+    # `module_name` is dotted, the way `importlib` takes it: "svdquant.foo" is
+    # vendor/svdquant/foo.py.
+    path = os.path.join(VENDOR, *module_name.split("."))
     if not (os.path.isdir(path) or os.path.isfile(path + ".py")):
-        fail(f"{node_id!r} names vendor/{module_name}, which does not exist")
+        fail(f"{node_id!r} names vendor/{module_name.replace('.', '/')}, which does not exist")
 
 
 # --- 4. no vendored pack's own ids end up registered -------------------------

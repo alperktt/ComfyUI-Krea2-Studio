@@ -237,7 +237,7 @@ export class PreStageEditor {
       ...this.widgetIO(),
       set: (name, value) => { this.widgetIO().set(name, value); this.render(); },
       perSegment: false,
-      turbo: state.arch === "krea2" ? this.renderTurbo() : [],
+      turbo: state.arch === "krea2" ? [...this.renderLoader(), ...this.renderTurbo()] : [],
       trailing: [this.renderWeightsPill()],
     }));
   }
@@ -312,6 +312,26 @@ export class PreStageEditor {
     ]);
   }
 
+  /** How this LoRA reaches a 4-bit model: exactly, or fast.
+   *
+   *  A two-state toggle rather than a popover — there are two options and both
+   *  fit in the label, so a menu would be a click to read what the button
+   *  already says. It only exists while the SVDQuant loader is chosen. */
+  renderAdapterButton(entry) {
+    const mode = S.PRESTAGE_ADAPTER_MODES.includes(entry.adapters) ? entry.adapters : "bypass";
+    return el("button", {
+      class: "mmc-ghost",
+      style: { fontSize: "11px" },
+      title: S.PRESTAGE_ADAPTER_HINT[mode] + "\n\nClick to switch.",
+      text: S.PRESTAGE_ADAPTER_LABEL[mode],
+      onclick: () => {
+        const modes = S.PRESTAGE_ADAPTER_MODES;
+        entry.adapters = modes[(modes.indexOf(mode) + 1) % modes.length];
+        this.commit();
+      },
+    });
+  }
+
   renderLoras() {
     const chip = (entry) => el("div", { class: "mmc-asset", title: entry.name }, [
       el("span", { class: "mmc-asset-thumb" }, [svg(ICONS.effect, 15)]),
@@ -323,6 +343,10 @@ export class PreStageEditor {
         text: Number(entry.strength ?? 1).toFixed(2),
         onclick: () => this.manageLoras(),
       }),
+      // Only on the quantized path, because it is the only place it means
+      // anything: core's loader has no such choice, and offering one that does
+      // nothing is worse than not offering it.
+      ...(this.state.loader === "svdquant" ? [this.renderAdapterButton(entry)] : []),
       el("button", {
         class: "mmc-asset-x", text: "✕", title: `Remove ${entry.name}`,
         onclick: () => { S.removeLora(this.state, entry.name); this.commit(); },
@@ -402,6 +426,32 @@ export class PreStageEditor {
     }
 
     return el("div", { class: "mmc-pills" }, pills);
+  }
+
+  // ---- loader (Krea 2) -------------------------------------------------------
+
+  /** Which node loads the DiT: core's, or the vendored W4A4 one.
+   *
+   *  A segment rather than a toggle, on the turbo segment's own classes, because
+   *  it is a choice between two named things and not a thing being switched on —
+   *  and because "standard" has to read as a real, chosen position rather than
+   *  as the absence of a setting.
+   *
+   *  It sits left of the turbo pill for the same reason it sits before it in the
+   *  graph: this picks the file, turbo picks the schedule. */
+  renderLoader() {
+    const state = this.state;
+    return [el("div", { class: "mmc-pill mmc-turbo-seg" }, S.PRESTAGE_LOADERS.map((loader) =>
+      el("button", {
+        class: "mmc-turbo-opt",
+        "aria-pressed": state.loader === loader,
+        title: S.PRESTAGE_LOADER_HINT[loader],
+        onclick: () => {
+          if (state.loader === loader) return;
+          state.loader = loader;
+          this.commit();
+        },
+      }, [el("span", { text: S.PRESTAGE_LOADER_LABEL[loader] })])))];
   }
 
   // ---- turbo (Krea 2) --------------------------------------------------------
@@ -502,6 +552,7 @@ export class PreStageEditor {
       const byFolder = catalogByFolder();
       const lists = {
         model: byFolder.diffusion_models ?? [], turbo_model: byFolder.diffusion_models ?? [],
+        svdq_model: byFolder.diffusion_models ?? [],
         uncond_model: byFolder.diffusion_models ?? [],
         clip: byFolder.text_encoders ?? [], vae: byFolder.vae ?? [],
       };
@@ -529,21 +580,26 @@ export class PreStageEditor {
         }),
       ]));
 
-      rows.push(el("div", { class: "mmc-weight-row" }, [
-        el("span", { class: "mmc-weight-name", text: "Precision" }),
-        el("button", {
-          class: "mmc-weight-file",
-          title: "How the checkpoints are loaded. fp8 halves the weights in VRAM at some cost "
-               + "in fidelity; 'default' loads them as they were saved.",
-          text: state.models.dtype,
-          onclick: (event) => openChoicePopover(event.currentTarget, {
-            title: "Precision",
-            options: S.MODEL_DTYPES,
-            value: state.models.dtype,
-            onPick: (picked) => { state.models.dtype = picked; this.commit(); render(); },
+      // The SVDQuant loader takes no `weight_dtype` — a quantized checkpoint has
+      // already decided its precision — so the row is left out rather than shown
+      // as a control nothing reads.
+      if (S.preStageUsesDtype(state)) {
+        rows.push(el("div", { class: "mmc-weight-row" }, [
+          el("span", { class: "mmc-weight-name", text: "Precision" }),
+          el("button", {
+            class: "mmc-weight-file",
+            title: "How the checkpoints are loaded. fp8 halves the weights in VRAM at some cost "
+                 + "in fidelity; 'default' loads them as they were saved.",
+            text: state.models.dtype,
+            onclick: (event) => openChoicePopover(event.currentTarget, {
+              title: "Precision",
+              options: S.MODEL_DTYPES,
+              value: state.models.dtype,
+              onPick: (picked) => { state.models.dtype = picked; this.commit(); render(); },
+            }),
           }),
-        }),
-      ]));
+        ]));
+      }
 
       body.replaceChildren(...rows);
     };

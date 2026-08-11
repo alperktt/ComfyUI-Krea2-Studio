@@ -73,6 +73,29 @@ KREA_TURBO = {"cfg": 1.0, "sampler_name": "euler", "scheduler": "simple"}
 TURBO_STEPS = {"draft": 4, "medium": 6, "good": 8}
 DEFAULT_TURBO_QUALITY = "good"
 
+# Which loader builds the DiT. "standard" is core's `UNETLoader` and is what
+# this has always done; "svdquant" is the W4A4 loader vendored under
+# `vendor/svdquant`, which reads a checkpoint carrying an SVDQuant low-rank
+# branch (`*.svdq_l1` / `*.svdq_l2`) and runs the blocks at 4 bits.
+#
+# It is a separate field rather than a third entry in the turbo pill because
+# the two say different things. The turbo pill picks a *distillation* — how many
+# steps the schedule takes and at what cfg — and an SVDQuant checkpoint is
+# quantized from RAW or from Turbo, so it still needs that answer. This picks a
+# *precision*, and the file it names is its own.
+LOADERS = ("standard", "svdquant")
+DEFAULT_LOADER = "standard"
+
+# What `Krea2SVDQuantLoraLoader` does with a LoRA that cannot fold into the
+# low-rank branch — LoKr, LoHa, OFT. A plain LoRA is free either way, which is
+# why this is per-entry and why the default is the exact one.
+#
+# These are our names, not the vendored node's: its options are prose
+# ("bypass (exact, slower)"), matched by prefix at emit time so a reworded label
+# does not break the graph.
+ADAPTER_MODES = ("bypass", "bake")
+DEFAULT_ADAPTER = "bypass"
+
 # Ideogram's official preset table, verbatim from the shipped ComfyUI template
 # (V4_QUALITY_48 / V4_DEFAULT_20 / V4_TURBO_12). mu and std shape the
 # resolution-shifted schedule, so they belong to the preset, not to the user.
@@ -103,10 +126,14 @@ class ImagePayload:
     prompt: str
     width: int
     height: int
-    # Which weights field the DiT loads from — "model" or "turbo_model". Resolved
-    # here rather than in the emitter so the payload states which file runs.
+    # Which weights field the DiT loads from — "model", "turbo_model" or
+    # "svdq_model". Resolved here rather than in the emitter so the payload
+    # states which file runs.
     checkpoint_field: str
-    loras: list = field(default_factory=list)        # [{"name", "strength"}]
+    # Which node loads it. "standard" is core's; "svdquant" is the vendored W4A4
+    # loader, which also swaps every LoRA onto its own loader.
+    loader: str = DEFAULT_LOADER
+    loras: list = field(default_factory=list)        # [{"name", "strength", "adapters"}]
     refs: list = field(default_factory=list)         # filenames, krea2 only
     init: dict = None                                # {"filename", "denoise"} or None
     # Ideogram's schedule shape, None on krea2.
@@ -137,6 +164,21 @@ def active_image_loras(entries):
             continue
         active.append(entry)
     return active
+
+
+def _parse_adapters(raw):
+    """A LoRA entry's adapter mode, defaulted and validated.
+
+    Carried on every entry rather than only on the SVDQuant path so that
+    flipping the loader pill back and forth does not lose what was chosen —
+    the same reason the weights block keeps both architectures' files.
+    """
+    if raw is None:
+        return DEFAULT_ADAPTER
+    if raw not in ADAPTER_MODES:
+        raise CompileError(
+            f"unknown adapter mode {raw!r} — it is one of {', '.join(ADAPTER_MODES)}")
+    return raw
 
 
 def clamp_ratio(ratio):
@@ -234,8 +276,22 @@ def compile_prestage(data, image_size_lookup=None):
     if not prompt:
         raise CompileError("describe the image first — the prompt is empty")
 
+    loader = data.get("loader", DEFAULT_LOADER)
+    if loader not in LOADERS:
+        raise CompileError(f"unknown loader {loader!r}")
+    if loader == "svdquant" and arch != "krea2":
+        # Refused rather than ignored: the W4A4 loader reads Krea 2's block
+        # layout by name, and pointing it at another architecture's checkpoint
+        # fails deep inside the loader with a message about tensor names.
+        raise CompileError(
+            "the SVDQuant loader is Krea 2's — switch the model pill to Krea 2, "
+            "or the loader pill back to standard"
+        )
+
     active = active_image_loras(data.get("loras"))
-    loras = [{"name": e["name"], "strength": float(e.get("strength", 1.0))} for e in active]
+    loras = [{"name": e["name"],
+              "strength": float(e.get("strength", 1.0)),
+              "adapters": _parse_adapters(e.get("adapters"))} for e in active]
     # Trigger words in front of the prompt, same construction and same dedup as
     # the video compile — a word only counts if its LoRA is actually in the run.
     triggers = collect_triggers(active)
@@ -271,7 +327,13 @@ def compile_prestage(data, image_size_lookup=None):
     mu = std = None
     if arch == "krea2":
         turbo = data.get("turbo") or {}
-        if turbo.get("on"):
+        if loader == "svdquant":
+            # The quantized file is its own, so the turbo pill stops choosing a
+            # checkpoint here — but it keeps choosing the schedule, because a
+            # checkpoint quantized from Turbo still wants Turbo's steps and cfg
+            # and the loader has no way to say which one it came from.
+            checkpoint_field = "svdq_model"
+        elif turbo.get("on"):
             checkpoint_field = "turbo_model"
     else:
         quality = data.get("quality", DEFAULT_IDEOGRAM_QUALITY)
@@ -282,6 +344,7 @@ def compile_prestage(data, image_size_lookup=None):
 
     return ImagePayload(
         arch=arch, prompt=prompt, width=width, height=height,
-        checkpoint_field=checkpoint_field, loras=loras, refs=refs, init=init,
+        checkpoint_field=checkpoint_field, loader=loader,
+        loras=loras, refs=refs, init=init,
         mu=mu, std=std, ratio_clamped=ratio_clamped,
     )
