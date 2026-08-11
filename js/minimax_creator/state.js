@@ -335,6 +335,27 @@ export const CHECKPOINT_LABEL = { fl2va: "FL2VA", ref2va: "Ref2VA" };
 export const CHECKPOINT_CHOICES = ["auto", ...CHECKPOINTS];
 export const DEFAULT_STRENGTH = 1.0;
 
+/** Mirrors compile.UPSCALE_MODES and the refine-denoise clamp. What a render
+ *  past the native short edge does about being there: sample at 768 and refine
+ *  up ("two_pass", the default), or one off-distribution pass at the slider's
+ *  size ("direct"). Only meaningful past native — under it the two modes are
+ *  the same render, which is why the popover only offers the choice there. */
+export const UPSCALE_MODES = ["two_pass", "direct"];
+export const DEFAULT_REFINE_DENOISE = 0.5;
+export const MIN_REFINE_DENOISE = 0.1;
+export const MAX_REFINE_DENOISE = 0.9;
+
+/** Whether this canvas owner renders in two passes. `target` is anything with
+ *  `short_edge` and `upscale` — a state or a timeline. */
+export const twoPass = (target) =>
+  target.short_edge > NATIVE_SHORT_EDGE && target.upscale !== "direct";
+
+const clampRefineDenoise = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return DEFAULT_REFINE_DENOISE;
+  return Math.min(MAX_REFINE_DENOISE, Math.max(MIN_REFINE_DENOISE, n));
+};
+
 /** A fresh generation. `prefix` is where its renders land when the blob does
  *  not say — the video default, or the stills folder for the pre-stage's H3
  *  branch, whose request is one of these too. */
@@ -356,6 +377,10 @@ export function emptyState() {
     duration_s: 6,
     aspect: "16:9",
     short_edge: NATIVE_SHORT_EDGE,
+    // The two-pass choice and its one knob. Owned wherever the canvas is
+    // owned; both are inert until the slider is past the native edge.
+    upscale: UPSCALE_MODES[0],
+    refine_denoise: DEFAULT_REFINE_DENOISE,
     // "auto" follows the mode. Pinning it runs the same payload on the other
     // weights; compile.py decides which pins it will accept.
     checkpoint: "auto",
@@ -381,6 +406,8 @@ export function parseState(raw) {
         if (typeof state[key] !== "string") state[key] = "";
       }
       if (!CHECKPOINT_CHOICES.includes(state.checkpoint)) state.checkpoint = "auto";
+      if (!UPSCALE_MODES.includes(state.upscale)) state.upscale = UPSCALE_MODES[0];
+      state.refine_denoise = clampRefineDenoise(state.refine_denoise);
       state.models = parseModels(state.models);
       state.turbo = parseTurbo(state.turbo);
       normalizeCheckpoint(state);
@@ -495,6 +522,10 @@ export function serializeState(state) {
     ...serializeCommon(state),
     aspect: state.aspect,
     short_edge: state.short_edge,
+    // Absent means the default, so a blob that never left native adds nothing.
+    ...(state.upscale !== UPSCALE_MODES[0] ? { upscale: state.upscale } : {}),
+    ...(state.refine_denoise !== DEFAULT_REFINE_DENOISE
+      ? { refine_denoise: state.refine_denoise } : {}),
     // Not in serializeCommon: the weights belong to the node, and a timeline
     // segment goes through that function too. The turbo switch likewise.
     ...serializeModels(state.models),
@@ -557,6 +588,9 @@ export function emptyTimeline() {
     refined: null,
     aspect: "16:9",
     short_edge: NATIVE_SHORT_EDGE,
+    // The two-pass choice rides with the canvas, which is the timeline's.
+    upscale: UPSCALE_MODES[0],
+    refine_denoise: DEFAULT_REFINE_DENOISE,
     // Patched onto every segment, in front of whatever that segment adds. What
     // a turbo LoRA is for: you want it on the whole clip, not shot by shot.
     loras: [],
@@ -583,6 +617,8 @@ function syncCanvas(timeline) {
   for (const segment of timeline.segments) {
     segment.aspect = timeline.aspect;
     segment.short_edge = timeline.short_edge;
+    segment.upscale = timeline.upscale;
+    segment.refine_denoise = timeline.refine_denoise;
   }
   // Segment 1 has nothing in front of it. Kept in step here rather than guarded
   // at every read, so reordering cannot leave a stale flag behind.
@@ -609,6 +645,8 @@ export function parseTimeline(raw) {
         if (typeof timeline[key] !== "string") timeline[key] = "";
       }
       if (!timeline.refined || typeof timeline.refined !== "object") timeline.refined = null;
+      if (!UPSCALE_MODES.includes(timeline.upscale)) timeline.upscale = UPSCALE_MODES[0];
+      timeline.refine_denoise = clampRefineDenoise(timeline.refine_denoise);
       timeline.models = parseModels(timeline.models);
       timeline.turbo = parseTurbo(timeline.turbo);
       const segments = Array.isArray(parsed.segments) ? parsed.segments : [];
@@ -646,6 +684,9 @@ export function serializeTimeline(timeline) {
     ...serializeRefined(timeline.refined),
     aspect: timeline.aspect,
     short_edge: timeline.short_edge,
+    ...(timeline.upscale !== UPSCALE_MODES[0] ? { upscale: timeline.upscale } : {}),
+    ...(timeline.refine_denoise !== DEFAULT_REFINE_DENOISE
+      ? { refine_denoise: timeline.refine_denoise } : {}),
     loras: serializeLoras(timeline.loras ?? []),
     audio_tail_s: clampTail(timeline.audio_tail_s),
     ...serializeModels(timeline.models),

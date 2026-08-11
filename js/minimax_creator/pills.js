@@ -7,6 +7,8 @@
 
 import { el, icon, dismissable, placeNear } from "./dom.js";
 import { ASPECT_PRESETS, MIN_SHORT_EDGE, MAX_SHORT_EDGE, NATIVE_SHORT_EDGE, CANVAS_MULTIPLE } from "./canvas.js";
+import { UPSCALE_MODES, DEFAULT_REFINE_DENOISE, MIN_REFINE_DENOISE, MAX_REFINE_DENOISE,
+         twoPass } from "./state.js";
 
 /**
  * A −/value/+ pill. The same shape as the duration control, because a number
@@ -195,6 +197,10 @@ export function edgeSlider({ min, max, step, value, mark, markLabel, apply, desc
     ]),
     note,
   ]);
+  // For content living under the slider in the same popover: repainting the
+  // readout is the only way it can react to its own edits, because `describe`
+  // is where the caller redraws it.
+  body.repaint = paint;
   paint();
   return body;
 }
@@ -206,13 +212,68 @@ export function edgeSlider({ min, max, step, value, mark, markLabel, apply, desc
  * @param {() => void} commit         called on release, not on every pixel
  */
 export function openResolutionPopover(anchor, target, geometry, commit) {
+  // Past the native edge the render can go two ways, and this is where the
+  // choice lives — on the warning it answers, nowhere else. At or under native
+  // the section is empty and the popover is exactly the slider it always was.
+  const section = el("div");
+
+  const renderSection = () => {
+    if (target.short_edge <= NATIVE_SHORT_EDGE) {
+      section.className = "";
+      section.replaceChildren();
+      return;
+    }
+    const { width, height } = geometry();
+    const option = (mode, label, sub) => el("button", {
+      class: "mmc-opt",
+      "aria-checked": target.upscale === mode,
+      onclick: () => {
+        target.upscale = mode;
+        body.repaint();          // redraws this section and the note above it
+        commit();
+      },
+    }, [
+      el("span", { class: "mmc-opt-label mmc-opt-col" }, [
+        el("span", { text: label }),
+        el("span", { class: "mmc-opt-sub", text: sub }),
+      ]),
+      el("span", { class: "mmc-radio" }),
+    ]);
+    section.className = "mmc-twopass";
+    section.replaceChildren(
+      option(UPSCALE_MODES[0], "two passes",
+             `${NATIVE_SHORT_EDGE} px first, refined up to ${width} × ${height}`),
+      option("direct", "direct",
+             `one pass at ${width} × ${height} — off-distribution`),
+      ...(twoPass(target) ? [el("div", { class: "mmc-refine-row" }, [
+        el("span", { class: "mmc-refine-label", text: "refine" }),
+        stepperPill({
+          value: Number(target.refine_denoise ?? DEFAULT_REFINE_DENOISE),
+          min: MIN_REFINE_DENOISE, max: MAX_REFINE_DENOISE, step: 0.05, width: "40px",
+          title: "How much of the schedule the second pass re-runs. Lower keeps more "
+               + "of the first pass; higher resolves more detail and drifts further from it.",
+          format: (n) => n.toFixed(2),
+          onChange: (next) => { target.refine_denoise = next; body.repaint(); commit(); },
+        }),
+      ])] : []),
+    );
+  };
+
   const body = edgeSlider({
     min: MIN_SHORT_EDGE, max: MAX_SHORT_EDGE, step: CANVAS_MULTIPLE,
     value: target.short_edge, mark: NATIVE_SHORT_EDGE, markLabel: "native",
     apply: (edge) => { target.short_edge = edge; },
     describe: () => {
+      renderSection();
       const { width, height } = geometry();
       const over = target.short_edge > NATIVE_SHORT_EDGE;
+      if (over && twoPass(target)) {
+        return {
+          size: `${width} × ${height}`,
+          warn: false,
+          note: `Sampled at the trained ${NATIVE_SHORT_EDGE} px, then a second pass refines up to this size.`,
+        };
+      }
       return {
         size: `${width} × ${height}`,
         warn: over,
@@ -225,7 +286,7 @@ export function openResolutionPopover(anchor, target, geometry, commit) {
     },
     commit,
   });
-  const pop = el("div", { class: "mmc-pop mmc-slider" }, [body]);
+  const pop = el("div", { class: "mmc-pop mmc-slider" }, [body, section]);
   document.body.appendChild(pop);
   placeNear(pop, anchor);
   dismissable(pop);

@@ -20,17 +20,17 @@ def _load():
     package.__path__ = [ROOT]
     sys.modules["mmc"] = package
     modules = {}
-    for name in ("canvas", "contextir", "compile"):
+    for name in ("canvas", "contextir", "compile", "compile_still"):
         spec = importlib.util.spec_from_file_location(f"mmc.{name}", os.path.join(ROOT, f"{name}.py"))
         module = importlib.util.module_from_spec(spec)
         sys.modules[f"mmc.{name}"] = module
         setattr(package, name, module)
         spec.loader.exec_module(module)
         modules[name] = module
-    return modules["canvas"], modules["compile"]
+    return modules["canvas"], modules["compile"], modules["compile_still"]
 
 
-canvas, compiler = _load()
+canvas, compiler, still = _load()
 
 FAILURES = []
 
@@ -887,6 +887,67 @@ check("one pass uses each shot's rewrite as its shot body",
 
 check("an absent render mode means chained", compiler.render_mode({}), "chained")
 expect_error("an unknown render mode", lambda: compiler.render_mode({"render": "stitched"}), "unknown render mode")
+
+# --- two-pass upscale --------------------------------------------------------
+
+# At or under the native edge there is nothing to refine to, whatever the blob says.
+check("no refine at native", build().refine, None)
+check("no refine under native", build(short_edge=512).refine, None)
+check("no refine at native even when asked", build(upscale="two_pass").refine, None)
+
+over = build(short_edge=1152)
+check("past native, pass one samples at the native canvas",
+      (over.width, over.height), canvas.resolve_canvas(16 / 9, 768))
+check("...and the refine target is the slider's canvas",
+      (over.refine.width, over.refine.height), canvas.resolve_canvas(16 / 9, 1152))
+check("...at the default denoise", over.refine.denoise, compiler.DEFAULT_REFINE_DENOISE)
+
+direct = build(short_edge=1152, upscale="direct")
+check("direct keeps the one-pass canvas and carries no refine",
+      ((direct.width, direct.height), direct.refine),
+      (canvas.resolve_canvas(16 / 9, 1152), None))
+expect_error("an unknown upscale mode", lambda: build(upscale="bigger"), "unknown upscale mode")
+
+check("refine_denoise clamps rather than raising",
+      (build(short_edge=1152, refine_denoise=2).refine.denoise,
+       build(short_edge=1152, refine_denoise=0).refine.denoise),
+      (compiler.MAX_REFINE_DENOISE, compiler.MIN_REFINE_DENOISE))
+expect_error("a non-number refine_denoise",
+             lambda: build(short_edge=1152, refine_denoise="lots"), "refine_denoise")
+
+# The adaptive canvas: the keyframe still owns the ratio, and both passes share it.
+adaptive = build(assets=[image("img-1", "first_frame")], short_edge=1152)
+check("adaptive two-pass samples at native with the keyframe's ratio",
+      (adaptive.width, adaptive.height), canvas.canvas_from_image(1500, 1000, 768)[:2])
+check("...and refines to the same ratio at the slider",
+      (adaptive.refine.width, adaptive.refine.height),
+      canvas.resolve_canvas(1500 / 1000, 1152))
+
+# A timeline holds every segment to the pass-one canvas, and every segment
+# refines to the same target — the concatenation happens after both passes.
+two_pass_tl = timeline([segment(), segment()], short_edge=1152)
+check("a two-pass timeline pins pass one at native",
+      {(c.width, c.height) for c in two_pass_tl}, {canvas.resolve_canvas(16 / 9, 768)})
+check("...and refines every segment to the same target",
+      {(c.refine.width, c.refine.height) for c in two_pass_tl},
+      {canvas.resolve_canvas(16 / 9, 1152)})
+direct_tl = timeline([segment()], short_edge=1152, upscale="direct")[0]
+check("a direct timeline is the old render",
+      ((direct_tl.width, direct_tl.height), direct_tl.refine),
+      (canvas.resolve_canvas(16 / 9, 1152), None))
+
+check("one pass inherits the timeline's two-pass choice",
+      single([segment("a shot")], short_edge=1152).refine is not None, True)
+check("...and its direct choice",
+      single([segment("a shot")], short_edge=1152, upscale="direct").refine, None)
+
+# The still branch pins "direct": it upscales through the single-image VAE and
+# its graph has no refine pass — left unpinned, the slider above native would
+# quietly sample at 768 and change nothing.
+still_request = still._request({"request": {"prompt": "a poster", "short_edge": 2048}}, 5)
+check("a still compiles direct past native", still_request.get("upscale"), "direct")
+check("...and samples at the slider's own size",
+      compiler.compile_request({**still_request, "aspect": "16:9"}).refine, None)
 
 if FAILURES:
     print(f"{len(FAILURES)} failure(s):")

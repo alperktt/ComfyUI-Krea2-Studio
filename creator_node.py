@@ -41,8 +41,8 @@ import json
 
 from comfy_api.latest import ComfyExtension, io
 
-from . import (accel, canvas, lora, media, models, outputs, prestage, render,
-               settings, timeline)
+from . import (accel, canvas, hires, lora, media, models, outputs, prestage,
+               render, settings, timeline)
 
 DEFAULT_DATA = json.dumps({
     "version": 1,
@@ -179,7 +179,7 @@ class MiniMaxH3Creator(io.ComfyNode):
 
 class MiniMaxCreatorExtension(ComfyExtension):
     async def get_node_list(self):
-        return [MiniMaxH3Creator, *timeline.NODES, *prestage.NODES]
+        return [MiniMaxH3Creator, *timeline.NODES, *prestage.NODES, *hires.NODES]
 
 
 async def comfy_entrypoint() -> MiniMaxCreatorExtension:

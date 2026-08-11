@@ -48,6 +48,7 @@ from comfy_execution.graph_utils import GraphBuilder
 from . import accel, canvas, compile as compiler, media, models, outputs, settings
 
 SEGMENT_NODE = "MiniMaxH3TimelineSegment"
+REFINE_NODE = "MiniMaxH3RefinePass"
 LAST_FRAME_NODE = "MiniMaxH3LastFrame"
 AUDIO_TAIL_NODE = "MiniMaxH3AudioTail"
 JOIN_NODE = "MiniMaxH3TimelineJoin"
@@ -205,6 +206,41 @@ def emit(payloads, labels, weights, sampling, acceleration, unique_id,
             sampler_name=sampling.sampler_name, scheduler=sampling.scheduler,
             denoise=1.0,
         )
+
+        if one.refine:
+            # The two-pass upscale: the first pass sampled at the native edge,
+            # and this regenerates it at the target size from the same context.
+            # A second segment node, pinned to the target canvas, re-encodes
+            # the keyframes and references at that size so their condition
+            # latents match the upscaled video latent — then the refine pass
+            # interpolates the picture up, re-noises it partway down the
+            # schedule, and samples again with the soundtrack riding through
+            # un-noised. Pinning the canvas also ends the recursion: a pinned
+            # target compiles with nothing left to refine to.
+            spec = {"width": one.refine.width, "height": one.refine.height,
+                    "ratio": one.ratio, "label": one.ratio_label,
+                    "from_image": one.ratio_from_image, "clamped": one.ratio_clamped}
+            refine_inputs = dict(inputs)
+            refine_inputs["segment_data"] = json.dumps(
+                {**payloads[index], "canvas": spec}, sort_keys=True)
+            second = graph.node(SEGMENT_NODE, **refine_inputs)
+            # Patched the same way as the first pass, because it is the same
+            # run at a different size: cfg 1.0 skips the negative, the LoRAs
+            # come with the segment node, the accelerators and the preview
+            # decoder sit in the same places.
+            refine_against = graph.node(
+                "ConditioningZeroOut", conditioning=second.out(1)).out(0)
+            refine_model = accel.graph_apply(graph, second.out(0), acceleration)
+            refine_model = models.graph_preview(graph, refine_model, weights)
+            sampled = graph.node(
+                REFINE_NODE,
+                model=refine_model, positive=second.out(1), negative=refine_against,
+                latent=sampled.out(0),
+                width=one.refine.width, height=one.refine.height,
+                seed=sampling.seed + index, steps=sampling.steps, cfg=sampling.cfg,
+                sampler_name=sampling.sampler_name, scheduler=sampling.scheduler,
+                denoise=one.refine.denoise,
+            )
 
         # The H3 latent is a nested (video, audio) pair; core's two decoders each
         # unbind the half they want. `VAEDecodeAudio` rather than

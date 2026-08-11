@@ -475,6 +475,20 @@ button.mmc-mode:hover { background: var(--mmc-surface-2); border-color: var(--mm
 .mmc-native { color: var(--mmc-dim); font-size: 11px; line-height: 1.45; min-height: 32px; }
 .mmc-native.over { color: #e0743c; }
 
+/* The two-pass section under the slider, drawn only past the native edge. Its
+   option rows are the aspect popover's; only the second line is its own. */
+.mmc-twopass {
+  border-top: 1px solid var(--mmc-line); margin-top: 10px; padding-top: 6px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.mmc-opt-col { flex-direction: column; align-items: flex-start; gap: 2px; }
+.mmc-opt-sub { color: var(--mmc-dim); font-size: 11px; }
+.mmc-refine-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 4px 10px 0;
+}
+.mmc-refine-label { color: var(--mmc-dim); font-size: 12px; }
+
 /* --- picker modal --------------------------------------------------------- */
 .mmc-overlay {
   position: fixed; inset: 0; z-index: 1400; background: rgba(0,0,0,.62);

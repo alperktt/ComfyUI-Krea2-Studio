@@ -162,6 +162,11 @@ def _request(block, frames):
     # The duration the video side speaks in. `frames` is already snapped, so
     # `frames_for_seconds` inside `compile_request` lands back on it exactly.
     request["duration_s"] = canvas.seconds_for_frames(frames)
+    # Never two-pass: a still past the native edge upscales through the
+    # single-image VAE decode, and the still graph has no refine pass to hand
+    # a capped canvas to — left unpinned, `compile_request` would sample at
+    # 768 and the slider above it would quietly do nothing.
+    request["upscale"] = "direct"
     return request
 
 

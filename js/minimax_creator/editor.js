@@ -25,7 +25,7 @@ import { weightsPill, loadCatalog, catalogFiles } from "./models.js";
 import * as Turbo from "./turbo.js";
 import { viewUrl, probeAudio } from "./api.js";
 import * as S from "./state.js";
-import { MIN_SECONDS, MAX_SECONDS, describeRatio, isTrainedLength } from "./canvas.js";
+import { MIN_SECONDS, MAX_SECONDS, NATIVE_SHORT_EDGE, describeRatio, isTrainedLength } from "./canvas.js";
 
 const HANDLE_RE = /@([A-Za-z]+-\d+)/g;
 
@@ -772,14 +772,22 @@ export class CreatorEditor {
          el("span", { class: "mmc-pill-sub", text: "from image" })]
       : [aspectGlyph(geometry.ratio, PILL_GLYPH), el("span", { text: state.aspect })]);
 
+    // Past native with two passes on, the sub says so in one glance: sampled at
+    // the trained edge, refined up to the size beside it.
+    const refined = S.twoPass(state);
     const resPill = el("button", {
       class: "mmc-pill",
-      title: "Short edge. Lower is faster; 768 is what the open weights were trained at.",
+      title: refined
+        ? `Sampled at the trained ${NATIVE_SHORT_EDGE} px short edge, refined up to `
+          + `${geometry.width} × ${geometry.height} by a second pass.`
+        : "Short edge. Lower is faster; 768 is what the open weights were trained at.",
       onclick: (event) => this.openResolution(event.currentTarget),
     }, [
       icon("res", 16),
       el("span", { text: `${state.short_edge}p` }),
-      el("span", { class: "mmc-pill-sub", text: `${geometry.width} × ${geometry.height}` }),
+      el("span", { class: "mmc-pill-sub", text: refined
+        ? `${NATIVE_SHORT_EDGE} → ${geometry.width} × ${geometry.height}`
+        : `${geometry.width} × ${geometry.height}` }),
     ]);
 
     return el("div", { class: "mmc-pills" }, [

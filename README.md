@@ -213,8 +213,19 @@ count:
 | frames | 124 | 141 | 175 | 192 | 209 | 243 | 294 | 362 |
 | real | 5.17 | 5.88 | 7.29 | 8.00 | 8.71 | 10.13 | 12.25 | 15.08 |
 
-The resolution slider sets the **short edge** (384–896, native 768); both axes snap
+The resolution slider sets the **short edge** (384–2048, native 768); both axes snap
 to 32. In the image modes the aspect comes from the keyframe.
+
+Past 768 the popover offers a choice, because the open weights were trained at a
+768 px short edge and going above it directly is off-distribution. **Two passes**
+(the default) samples at the native canvas, then a second pass interpolates the
+video latent up to the slider's size, re-noises it partway down the schedule
+(the `refine` stepper, default 0.50) and samples again — against conditioning
+rebuilt at the target size, so keyframes and references are re-encoded to match.
+The soundtrack is never re-noised: the sound you got at 768 is the sound in the
+file. **Direct** is the old behaviour, one pass at the slider's size, warning
+and all. At or under 768 the choice does not exist and the popover is just the
+slider.
 
 ## Where files go
 
@@ -309,6 +320,11 @@ This pack is glue. The work underneath it belongs to other people:
   Mamad8 — the experimental single-image decoder the PreStage's H3 branch reads a
   still through. Trained with H3's own encoder frozen, which is what lets one file
   both encode the references and decode the picture.
+- **[ComfyUI-MiniMaxH3_LatentUpscaler](https://github.com/Tr1dae/ComfyUI-MiniMaxH3_LatentUpscaler)**
+  by Tr1dae — pioneered the two-pass workflow the resolution popover's "two
+  passes" option is built on: upscale the video half of the AV latent between
+  two samplers, leave the audio out of the re-noise. Our refine pass is an
+  independent implementation of that idea, wired into the render graph.
 - **[taehv](https://github.com/madebyollin/taehv)** by madebyollin — the tiny decoder
   that makes the preview look like the video.
 - **larryvrh** and **lightx2v** — the H3 distillation LoRAs behind turbo.

@@ -598,6 +598,53 @@ check("both sample identically",
       {k: v for k, v in tl_kinds["KSampler"][0][1].items() if k not in ("model", "positive", "negative", "latent_image")},
       {k: v for k, v in sampler.items() if k not in ("model", "positive", "negative", "latent_image")})
 
+# --- the two-pass upscale ----------------------------------------------------
+#
+# Past the native short edge the render grows a refine pass: a second segment
+# node pinned to the target canvas, and a MiniMaxH3RefinePass resuming the first
+# sampler's latent. At or under native — every graph above — none of it exists.
+
+canvas_mod = importlib.import_module(f"{PACKAGE}.canvas")
+TARGET = canvas_mod.resolve_canvas(16 / 9, 1152)
+
+check("no refine pass at native", "MiniMaxH3RefinePass" in kinds, False)
+
+hires_kinds = by_class(build(data=json.dumps({**json.loads(DATA), "short_edge": 1152})).expand)
+hires_graph = {nid: dict(inputs=i, class_type=c) for c, nodes_ in hires_kinds.items()
+               for nid, i in nodes_}
+
+check("past native there are two segment nodes",
+      len(hires_kinds["MiniMaxH3TimelineSegment"]), 2)
+check("...one first-pass sampler", len(hires_kinds["KSampler"]), 1)
+check("...and one refine pass", len(hires_kinds["MiniMaxH3RefinePass"]), 1)
+
+refine_inputs = hires_kinds["MiniMaxH3RefinePass"][0][1]
+check("the refine pass resumes the first sampler's latent",
+      hires_graph[refine_inputs["latent"][0]]["class_type"], "KSampler")
+check("...conditioned by the second segment",
+      hires_graph[refine_inputs["positive"][0]]["class_type"], "MiniMaxH3TimelineSegment")
+check("...at the slider's canvas",
+      (refine_inputs["width"], refine_inputs["height"]), TARGET)
+check("...with the sampler row's settings and the default refine denoise",
+      (refine_inputs["steps"], refine_inputs["sampler_name"], refine_inputs["denoise"]),
+      (20, "res_multistep", compiler.DEFAULT_REFINE_DENOISE))
+
+pinned = [json.loads(i["segment_data"]) for _, i in hires_kinds["MiniMaxH3TimelineSegment"]
+          if "canvas" in json.loads(i["segment_data"])]
+check("exactly the refine segment is pinned, to the target canvas",
+      [(p["canvas"]["width"], p["canvas"]["height"]) for p in pinned], [TARGET])
+
+for decode in ("VAEDecode", "VAEDecodeAudio"):
+    check(f"{decode} reads the refined latent",
+          hires_graph[hires_kinds[decode][0][1]["samples"][0]]["class_type"],
+          "MiniMaxH3RefinePass")
+
+direct_kinds = by_class(build(data=json.dumps(
+    {**json.loads(DATA), "short_edge": 1152, "upscale": "direct"})).expand)
+check("direct past native is the old one-pass graph",
+      ("MiniMaxH3RefinePass" in direct_kinds, len(direct_kinds["MiniMaxH3TimelineSegment"])),
+      (False, 1))
+
 if FAILURES:
     print(f"{len(FAILURES)} failure(s):")
     for failure in FAILURES:

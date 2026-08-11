@@ -47,6 +47,21 @@ MAX_AUDIO_TAIL_S = 4.0
 
 HANDLE_RE = re.compile(r"@([A-Za-z]+-\d+)")
 
+# What a render past the native short edge does about being there. "two_pass"
+# samples at the trained 768 px edge and lets a second pass refine up to the
+# slider's canvas; "direct" is the old behaviour, one off-distribution pass at
+# the slider's size. Mirrored by the resolution popover in `pills.js`.
+UPSCALE_MODES = ("two_pass", "direct")
+
+# How much of the schedule the refine pass runs. 0.5 keeps the first pass's
+# composition and motion while re-resolving the detail the interpolation
+# blurred; the ceiling stays under 1.0 because at 1.0 the pass is a fresh
+# generation that owes the first one nothing — and because the audio ride-along
+# divides by (1 - the starting sigma), which full denoise would send to zero.
+DEFAULT_REFINE_DENOISE = 0.5
+MIN_REFINE_DENOISE = 0.1
+MAX_REFINE_DENOISE = 0.9
+
 CHECKPOINTS = ("fl2va", "ref2va")
 
 # Which of a reference video's streams are actually referenced. "sound" drops the
@@ -108,6 +123,18 @@ class CanvasSpec:
     clamped: bool
 
 
+@dataclass(frozen=True)
+class Refine:
+    """The second half of a two-pass render: the canvas the refinement lands on
+    and how much of the schedule it runs. On `Compiled` only when the slider is
+    past the native edge and the mode says "two_pass" — at or under native the
+    two modes are the same render and there is nothing to refine up to.
+    """
+    width: int
+    height: int
+    denoise: float
+
+
 @dataclass
 class Compiled:
     mode: str
@@ -141,6 +168,11 @@ class Compiled:
     # whose music keeps playing is an ordinary thing to want.
     continues_audio: bool = False
     audio_tail_s: float = 0.0
+    # The two-pass upscale, when the resolution slider is past the native edge
+    # and the user has not chosen "direct". `width`/`height` above are then the
+    # native-capped canvas the first pass samples at; this is where the second
+    # pass takes it.
+    refine: Refine | None = None
 
 
 def lora_modes(entry):
@@ -509,6 +541,17 @@ def audio_tail_seconds(raw):
     return min(seconds, MAX_AUDIO_TAIL_S)
 
 
+def refine_denoise(raw):
+    """The blob's `refine_denoise`, defaulted and clamped. Raises on non-numbers."""
+    if raw is None:
+        return DEFAULT_REFINE_DENOISE
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise CompileError(f"refine_denoise must be a number (got {raw!r})")
+    return min(MAX_REFINE_DENOISE, max(MIN_REFINE_DENOISE, value))
+
+
 def compile_request(data, image_size_lookup=None, continues=False, canvas_spec=None,
                     continues_audio=False, shots=1):
     """`creator_data` dict -> `Compiled`.
@@ -591,6 +634,18 @@ def compile_request(data, image_size_lookup=None, continues=False, canvas_spec=N
     frames = canvas.frames_for_seconds(seconds_shown)
     short_edge = data.get("short_edge", canvas.NATIVE_SHORT_EDGE)
 
+    # Past the native edge a render goes one of two ways: one pass at the
+    # slider's size, off-distribution ("direct"), or a pass at the trained edge
+    # that a second pass refines up to the target ("two_pass", the default —
+    # the popover only offers the choice past native, because under it they are
+    # the same render). The still branch pins "direct": it upscales through the
+    # single-image VAE instead and has no refine pass to hand this to.
+    mode_raw = str(data.get("upscale") or UPSCALE_MODES[0])
+    if mode_raw not in UPSCALE_MODES:
+        raise CompileError(f"unknown upscale mode {mode_raw!r}")
+    two_pass = short_edge > canvas.NATIVE_SHORT_EDGE and mode_raw == "two_pass"
+    sample_edge = canvas.NATIVE_SHORT_EDGE if two_pass else short_edge
+
     # The instruction line carries the real duration to two decimals, so this has
     # to come after the frame count and never off `duration_s`.
     #
@@ -639,16 +694,25 @@ def compile_request(data, image_size_lookup=None, continues=False, canvas_spec=N
         ratio, clamped, ratio_from_image = canvas_spec.ratio, canvas_spec.clamped, canvas_spec.from_image
     elif anchor is not None and image_size_lookup is not None:
         source_w, source_h = image_size_lookup(anchor.filename)
-        width, height, ratio, clamped = canvas.canvas_from_image(source_w, source_h, short_edge)
+        width, height, ratio, clamped = canvas.canvas_from_image(source_w, source_h, sample_edge)
         ratio_from_image = True
     else:
         label = data.get("aspect", "16:9")
         if label not in canvas.ASPECT_PRESETS:
             raise CompileError(f"unknown aspect ratio {label!r}")
         ratio = canvas.ASPECT_PRESETS[label]
-        width, height = canvas.resolve_canvas(ratio, short_edge)
+        width, height = canvas.resolve_canvas(ratio, sample_edge)
         clamped = False
         ratio_from_image = False
+
+    # The refine target is resolved off the same ratio the first pass settled
+    # on — a pinned timeline canvas included — so the two passes always agree
+    # about the shape and disagree only about the scale.
+    refine = None
+    if two_pass:
+        target = canvas.resolve_canvas(ratio, short_edge)
+        if target != (width, height):
+            refine = Refine(*target, denoise=refine_denoise(data.get("refine_denoise")))
 
     return Compiled(
         mode=mode,
@@ -677,6 +741,7 @@ def compile_request(data, image_size_lookup=None, continues=False, canvas_spec=N
         continues=continues,
         continues_audio=continues_audio,
         audio_tail_s=audio_tail_s,
+        refine=refine,
     )
 
 
@@ -787,6 +852,11 @@ def timeline_payloads(data, image_size_lookup=None):
         request["prompt"] = _join_prompt(global_prompt, segment.get("prompt"))
         request["aspect"] = data.get("aspect", "16:9")
         request["short_edge"] = data.get("short_edge", canvas.NATIVE_SHORT_EDGE)
+        # The two-pass choice travels with the canvas it is a property of.
+        for key in ("upscale", "refine_denoise"):
+            request.pop(key, None)
+            if key in data:
+                request[key] = data[key]
         request["loras"] = merge_loras(data.get("loras"), segment.get("loras"))
         # The soundscape and the score are properties of the piece, not of one
         # shot — a cut is not where the room tone changes. A segment may still
@@ -979,6 +1049,8 @@ def single_payload(data):
         "duration_s": at,
         "aspect": data.get("aspect", "16:9"),
         "short_edge": data.get("short_edge", canvas.NATIVE_SHORT_EDGE),
+        # The two-pass choice is the timeline's, like the canvas it belongs to.
+        **{key: data[key] for key in ("upscale", "refine_denoise") if key in data},
     }
     for key in ("soundscape", "music"):
         request[key] = _agree(

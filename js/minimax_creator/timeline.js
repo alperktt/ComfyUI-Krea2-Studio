@@ -20,6 +20,7 @@ import * as S from "./state.js";
 import * as Turbo from "./turbo.js";
 import {
   framesForSeconds, secondsForFrames, resolveCanvas, ASPECT_PRESETS, describeRatio, isTrainedLength,
+  NATIVE_SHORT_EDGE,
 } from "./canvas.js";
 
 /**
@@ -221,13 +222,18 @@ class Timeline {
           el("span", { class: "mmc-pill-sub", text: describeRatio(ratio) })]),
       el("button", {
         class: "mmc-pill",
-        title: "Short edge. Lower is faster; 768 is what the open weights were trained at.",
+        title: S.twoPass(this.timeline)
+          ? `Sampled at the trained ${NATIVE_SHORT_EDGE} px short edge, refined up to `
+            + `${width} × ${height} by a second pass — every segment alike.`
+          : "Short edge. Lower is faster; 768 is what the open weights were trained at.",
         onclick: (event) => openResolutionPopover(
           event.currentTarget, this.timeline, () => this.geometry(), () => this.commit()),
       }, [
         icon("res", 16),
         el("span", { text: `${this.timeline.short_edge}p` }),
-        el("span", { class: "mmc-pill-sub", text: `${width} × ${height}` }),
+        el("span", { class: "mmc-pill-sub", text: S.twoPass(this.timeline)
+          ? `${NATIVE_SHORT_EDGE} → ${width} × ${height}`
+          : `${width} × ${height}` }),
       ]),
       // Global LoRAs sit on the bar with the canvas rather than inside a
       // segment, because that is what they are: patched onto every segment,
