@@ -169,12 +169,25 @@ export function mountOverlay(overlay, onEscape) {
 
 /** Anchor a popover to a pill, kept inside the viewport. */
 export function placeNear(popover, anchor, { above = true } = {}) {
-  const rect = anchor.getBoundingClientRect();
-  const box = popover.getBoundingClientRect();
-  const left = Math.max(8, Math.min(rect.left, window.innerWidth - box.width - 8));
-  const top = above && rect.top - box.height - 8 > 8
-    ? rect.top - box.height - 8
-    : Math.min(rect.bottom + 8, window.innerHeight - box.height - 8);
-  popover.style.left = `${left}px`;
-  popover.style.top = `${Math.max(8, top)}px`;
+  const place = () => {
+    const rect = anchor.getBoundingClientRect();
+    const box = popover.getBoundingClientRect();
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - box.width - 8));
+    const top = above && rect.top - box.height - 8 > 8
+      ? rect.top - box.height - 8
+      : Math.min(rect.bottom + 8, window.innerHeight - box.height - 8);
+    popover.style.left = `${left}px`;
+    popover.style.top = `${Math.max(8, top)}px`;
+  };
+  place();
+  // A popover is not a fixed-size thing: the refiner's lists arrive after
+  // placement, and its folds open on click. Whenever the box changes size it
+  // is placed again, so growth slides it up against the viewport edge — where
+  // the max-height on .mmc-pop turns whatever still does not fit into its own
+  // scrollbar — instead of running past the bottom of a 1080p screen.
+  const observer = new ResizeObserver(() => {
+    if (!popover.isConnected) { observer.disconnect(); return; }
+    place();
+  });
+  observer.observe(popover);
 }

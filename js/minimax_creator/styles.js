@@ -369,6 +369,10 @@ button.mmc-mode:hover { background: var(--mmc-surface-2); border-color: var(--mm
   position: fixed; z-index: 1300; background: #141414; border: 1px solid var(--mmc-line);
   border-radius: 16px; padding: 8px; min-width: 190px;
   box-shadow: 0 18px 48px rgba(0,0,0,.6);
+  /* Never taller than the screen: on a 1080p display the refine popover's
+     stacked sections can outgrow the viewport, and placeNear can only clamp
+     the top edge. The popover scrolls instead of the bottom clipping off. */
+  max-height: calc(100vh - 16px); overflow-y: auto;
 }
 .mmc-pop-title { color: var(--mmc-dim); font-size: 12px; padding: 6px 10px 8px; }
 
