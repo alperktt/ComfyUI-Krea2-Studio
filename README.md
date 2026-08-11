@@ -40,7 +40,7 @@ Then put the weights where ComfyUI already looks:
 | preview decoder | `models/vae_approx` — [`taeh3.safetensors`](https://github.com/madebyollin/taehv) |
 | refiner (optional) | `models/text_encoders` — any Qwen3-VL, 4B is plenty |
 | Krea 2 / Ideogram 4.0 (optional) | `models/diffusion_models`, `models/text_encoders`, `models/vae` |
-| single-image H3 VAE (optional) | `models/vae` — for H3 stills, see [PreStage](#prestage) |
+| single-image H3 VAE (optional) | `models/vae` — [MiniMax-H3-Image-VAE](https://huggingface.co/Mamad8/MiniMax-H3-Image-VAE), for H3 stills |
 
 You pick the files in the node itself, on the **weights** pill. Anything a render
 needs and does not have is refused before the queue starts, naming the field and
@@ -150,7 +150,9 @@ will run at.
 
 It is a video generation with one frame kept. The node samples the shortest legal
 clip, takes one temporal slice of the latent, and decodes it with an
-image-specialised H3 VAE (`minimax_h3_t1_image_vae_*`), whose decoder was
+image-specialised H3 VAE —
+[MiniMax-H3-Image-VAE](https://huggingface.co/Mamad8/MiniMax-H3-Image-VAE) by
+Mamad8 (`minimax_h3_t1_image_vae_*`) — whose decoder was
 fine-tuned to turn a single temporal latent into a picture while its encoder was
 left frozen. That is why one file does both jobs here: the encoder that reads your
 references is still the stock H3 one, bit for bit.
@@ -303,6 +305,10 @@ This pack is glue. The work underneath it belongs to other people:
   live preview a real decoder. Kijai's turbo conversions are in the switch too.
 - **[ComfyUI-MultiGPU](https://github.com/pollockjj/ComfyUI-MultiGPU)** by pollockjj —
   puts a device chip on every row of the weights popover.
+- **[MiniMax-H3-Image-VAE](https://huggingface.co/Mamad8/MiniMax-H3-Image-VAE)** by
+  Mamad8 — the experimental single-image decoder the PreStage's H3 branch reads a
+  still through. Trained with H3's own encoder frozen, which is what lets one file
+  both encode the references and decode the picture.
 - **[taehv](https://github.com/madebyollin/taehv)** by madebyollin — the tiny decoder
   that makes the preview look like the video.
 - **larryvrh** and **lightx2v** — the H3 distillation LoRAs behind turbo.
