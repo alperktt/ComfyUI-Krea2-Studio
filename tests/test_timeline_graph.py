@@ -336,10 +336,17 @@ check("no seam survives into the payload",
 # The loader inputs matter here for the same reason they do when chained.
 one_loaders = {node_id for kind in ("UNETLoader", "CLIPLoader", "VAELoader")
                for node_id, _ in built[kind]}
-for socket in ("clip", "vae", "audio_vae", "model_fl2va"):
+for socket in ("clip", "model_fl2va"):
     value = built["MiniMaxH3TimelineSegment"][0][1].get(socket)
     if not (isinstance(value, list) and len(value) == 2 and value[0] in one_loaders):
         FAILURES.append(f"one-pass segment input {socket!r} is not a link to a loader: {value!r}")
+# This pass is plain text: it encodes no keyframe and no sound, so neither VAE is
+# wired into the encoder. Both are decode-time loaders here — the save above
+# reads a VAEDecode and a VAEDecodeAudio — and wiring them into the segment would
+# load them before the first sampling step for an encode that never touches them.
+for socket in ("vae", "audio_vae"):
+    check(f"a text-only pass leaves {socket!r} off the encoder",
+          socket in built["MiniMaxH3TimelineSegment"][0][1], False)
 
 # One segment is the degenerate case: nothing to join, nothing to continue from.
 lone = build(blob(segments=[{"prompt": "x", "duration_s": 6}])).expand

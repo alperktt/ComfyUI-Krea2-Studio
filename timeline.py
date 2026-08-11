@@ -222,12 +222,18 @@ class MiniMaxH3TimelineSegment(io.ComfyNode):
             is_dev_only=True,
             inputs=[
                 io.Clip.Input("clip"),
-                io.Vae.Input("vae"),
-                # Optional because the PreStage's still branch emits this node
-                # without one: a still decodes picture only, and nothing on the
+                # Optional because a text-only segment encodes no picture: the
+                # video VAE is reached for only when there is a keyframe or a
+                # visual reference to turn into a condition latent, so the graph
+                # leaves it unwired otherwise and the loader stays a decode-time
+                # cost. Absent when it *is* needed raises below rather than
+                # reaching a None inside the encoder.
+                io.Vae.Input("vae", optional=True),
+                # Optional for the same reason on the sound side: nothing on the
                 # encode path touches the audio VAE unless the request carries
-                # reference audio or a sound seam. Both of those raise below if
-                # it is missing rather than reaching a None.
+                # reference audio or a sound seam. The PreStage's still branch
+                # emits this node without one either way. Both raise below if it
+                # is missing rather than reaching a None.
                 io.Vae.Input("audio_vae", optional=True),
                 io.String.Input("segment_data", multiline=True),
                 io.Model.Input("model_fl2va", optional=True),
@@ -253,17 +259,23 @@ class MiniMaxH3TimelineSegment(io.ComfyNode):
             return (segment_data, ())
 
     @classmethod
-    def execute(cls, clip, vae, segment_data, audio_vae=None,
+    def execute(cls, clip, segment_data, vae=None, audio_vae=None,
                 model_fl2va=None, model_ref2va=None,
                 prev_image=None, prev_audio=None) -> io.NodeOutput:
         payload = _parse(segment_data)
         compiled = compiler.compile_segment(payload, image_size_lookup=media.image_size)
 
-        # Everything that would reach for the audio VAE, named before any of it
-        # runs. A video render always wires one; the still branch never does,
-        # and a hand-built graph should hear which input is missing rather than
-        # meet a None inside the encoder.
-        if audio_vae is None and (compiled.continues_audio or compiled.ref_audios):
+        # Both VAEs are wired only when the encoder will actually reach for them
+        # (`render` gates on the same two predicates), so a missing one here is a
+        # graph that decided this segment needs no encode with it. Named before
+        # any of it runs: a hand-built graph should hear which input is missing
+        # rather than meet a None inside the encoder.
+        if vae is None and compiled.encodes_video():
+            raise ValueError(
+                "This generation encodes a keyframe or a visual reference, so it "
+                "needs the video VAE on 'vae'."
+            )
+        if audio_vae is None and compiled.encodes_audio():
             raise ValueError(
                 "This generation carries sound — reference audio, or a seam "
                 "continuing the previous segment's — so it needs the audio VAE "

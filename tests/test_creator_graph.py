@@ -185,12 +185,23 @@ check("both VAEs are loaded",
 segment_id, segment_inputs = kinds["MiniMaxH3TimelineSegment"][0]
 loader_ids = {node_id for node_id, _ in
               kinds["UNETLoader"] + kinds["CLIPLoader"] + kinds["VAELoader"]}
-for socket in ("clip", "vae", "audio_vae", "model_fl2va"):
+for socket in ("clip", "model_fl2va"):
     value = segment_inputs.get(socket)
     if not (isinstance(value, list) and len(value) == 2 and value[0] in loader_ids):
         FAILURES.append(f"segment input {socket!r} is not a link to a loader: {value!r}")
 check("the checkpoint nothing routes to is not wired either",
       "model_ref2va" in segment_inputs, False)
+# Both VAEs are built above (the decodes need them), but a T2VA render encodes
+# no picture and no sound, so neither is wired into the *encoder*: they load at
+# decode, after sampling, where they no longer take room the DiT wanted. This is
+# the same VRAM claim the checkpoint routing makes, carried onto the VAEs.
+for socket in ("vae", "audio_vae"):
+    check(f"the encoder is handed no {socket!r} on a text-only render",
+          socket in segment_inputs, False)
+check("the video decode still reads the video VAE loader",
+      graph[kinds["VAEDecode"][0][1]["vae"][0]]["class_type"], "VAELoader")
+check("the audio decode still reads the audio VAE loader",
+      graph[kinds["VAEDecodeAudio"][0][1]["vae"][0]]["class_type"], "VAELoader")
 
 # ---- the tail ---------------------------------------------------------------
 #

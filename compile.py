@@ -177,6 +177,33 @@ class Compiled:
     # pass takes it.
     refine: Refine | None = None
 
+    def encodes_video(self):
+        """Whether building this segment's conditioning calls `vae.encode`.
+
+        True when there is a keyframe or a visual reference to turn into a
+        condition latent — the encoder reaches for the video VAE only inside
+        `if keyframes:`. A text-only segment encodes no picture and so needs the
+        video VAE at decode time only, which is why `render` gates the loader on
+        this rather than wiring it in unconditionally: an unused VAE resident
+        during sampling is VRAM the DiT could have had.
+        """
+        return bool(self.continues or self.first_frame or self.last_frame
+                    or self.ref_images or self.ref_videos)
+
+    def encodes_audio(self):
+        """Whether building this segment's conditioning calls `audio_vae.encode`.
+
+        True for a continuing sound seam, a reference-audio block, or a reference
+        video cited with its soundtrack — the three things the encoder turns into
+        an audio latent (`_encode_ref_audio`). A picture-only video reference does
+        not count, which is the same line `render_still` draws when it decides
+        whether to build the audio loader at all. Otherwise the audio VAE is a
+        decode-time loader only — the counterpart to `encodes_video`, gated the
+        same way for the same reason.
+        """
+        return bool(self.continues_audio or self.ref_audios
+                    or any(v.track == "picture+sound" for v in self.ref_videos))
+
 
 def lora_modes(entry):
     """The checkpoints a LoRA entry claims. Missing or unrecognised means both."""

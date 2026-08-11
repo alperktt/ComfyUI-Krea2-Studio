@@ -160,11 +160,21 @@ def emit(payloads, labels, weights, sampling, acceleration, unique_id,
 
     for index, one in enumerate(compiled):
         inputs = {
-            "clip": links.clip, "vae": links.vae, "audio_vae": links.audio_vae,
+            "clip": links.clip,
             # sort_keys so an unchanged payload serialises identically every
             # time — this string is the segment node's cache key.
             "segment_data": json.dumps(payloads[index], sort_keys=True),
         }
+        # The VAEs are wired into the encoder only when this segment actually
+        # encodes with them — a keyframe or a sound seam. A text-only segment
+        # touches neither until decode, and a decode node runs after sampling
+        # where the DiT no longer needs the room. Wiring them here regardless
+        # would load both before the first step and, on tight VRAM, push part of
+        # the model into per-step recompute for no encode that uses them.
+        if one.encodes_video():
+            inputs["vae"] = links.vae
+        if one.encodes_audio():
+            inputs["audio_vae"] = links.audio_vae
         if links.model_fl2va is not None:
             inputs["model_fl2va"] = links.model_fl2va
         if links.model_ref2va is not None:

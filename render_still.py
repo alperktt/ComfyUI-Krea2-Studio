@@ -70,12 +70,18 @@ def emit(plan, weights, sampling, unique_id, filename_prefix=FILENAME_PREFIX):
     links = models.emit_links(graph, weights, set(where), audio=audio)
 
     inputs = {
-        "clip": links.clip, "vae": links.vae,
+        "clip": links.clip,
         # sort_keys so an unchanged payload serialises identically every time —
         # this string is the segment node's cache key.
         "segment_data": json.dumps(payloads[0], sort_keys=True),
     }
-    if links.audio_vae is not None:
+    # Wire each VAE into the encoder only when this still encodes with it — a
+    # keyframe or a cited reference. A text-only still needs the video VAE at
+    # decode only (line below), so leaving it unwired keeps the loader off the
+    # pre-sampling path exactly as the video render does.
+    if compiled[0].encodes_video():
+        inputs["vae"] = links.vae
+    if links.audio_vae is not None and compiled[0].encodes_audio():
         inputs["audio_vae"] = links.audio_vae
     if links.model_fl2va is not None:
         inputs["model_fl2va"] = links.model_fl2va
