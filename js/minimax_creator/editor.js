@@ -535,42 +535,49 @@ export class CreatorEditor {
         onclick: () => this.addReferences(kind),
       }, [el("span", { class: "mmc-tool-icon" }, [icon(iconName)]), el("span", { text: label })]);
 
+    // Two clusters, split by the whole width of the node: everything on the
+    // left acts on this generation, and the pair on the right belongs to the
+    // machine — the Gallery is what this ComfyUI has already made, Settings is
+    // how it writes the next one, and neither moves whatever the prompt says.
+    // Seven equal siblings said none of that.
     return el("div", { class: "mmc-rail" }, [
-      tool("image", "Add image", "image"),
-      tool("video", "Add video", "video"),
-      tool("audio", "Add audio", "audio"),
-      // Not gated by hasFrames: LoRAs sit on the checkpoint, not in the
-      // reference slots, so they are the one thing frames and references share.
-      el("button", {
-        class: "mmc-tool",
-        title: "Manage the LoRAs patched onto the routed checkpoint",
-        onclick: () => this.manageLoras(),
-      }, [el("span", { class: "mmc-tool-icon" }, [icon("effect")]), el("span", { text: "Add LoRA" })]),
-      // Also ungated, and here rather than only on the stage: the stage grows a
-      // Gallery chip when a render finishes, which is exactly the moment you do
-      // not need one — before the first render of a session there was no way
-      // into the output folder at all, and organizing what is already there is
-      // not something you should have to queue a render to reach.
-      el("button", {
-        class: "mmc-tool",
-        title: "Browse, organize and attach finished renders and pre-stage stills",
-        onclick: () => this.openGallery(),
-      }, [el("span", { class: "mmc-tool-icon" }, [icon("gallery")]), el("span", { text: "Gallery" })]),
-      // Beside the Gallery because it is the same kind of thing: neither one
-      // touches this generation. The Gallery is what this ComfyUI has already
-      // made and this is how it writes the next one, and both stay where they
-      // are whatever the prompt says. Absent where it would be a control over
-      // nothing — see `settingsTool`.
-      ...(this.settingsTool ? [el("button", {
-        class: "mmc-tool",
-        title: "Preferences for this ComfyUI — output quality. Not saved into the workflow.",
-        onclick: () => openSettings(),
-      }, [el("span", { class: "mmc-tool-icon" }, [icon("gear")]), el("span", { text: "Settings" })])] : []),
-      ...(this.extraTools?.() ?? []),
-      // Last in the rail because it is the step after everything else: the
-      // rewrite is written against the references and the duration, so it wants
-      // them settled first.
-      ...(this.refineTarget ? [refineButton({ run: () => this.refine() })] : []),
+      el("div", { class: "mmc-rail-group" }, [
+        tool("image", "Add image", "image"),
+        tool("video", "Add video", "video"),
+        tool("audio", "Add audio", "audio"),
+        // Not gated by hasFrames: LoRAs sit on the checkpoint, not in the
+        // reference slots, so they are the one thing frames and references share.
+        el("button", {
+          class: "mmc-tool",
+          title: "Manage the LoRAs patched onto the routed checkpoint",
+          onclick: () => this.manageLoras(),
+        }, [el("span", { class: "mmc-tool-icon" }, [icon("effect")]), el("span", { text: "Add LoRA" })]),
+        // With the adds because they are one: the PreStage's frame grab puts an
+        // init image on this generation, whatever tool the host lends the rail.
+        ...(this.extraTools?.() ?? []),
+        // Last of the cluster because it is the step after the rest of it: the
+        // rewrite is written against the references and the duration, so it
+        // wants them settled first.
+        ...(this.refineTarget ? [refineButton({ run: () => this.refine() })] : []),
+      ]),
+      el("div", { class: "mmc-rail-group" }, [
+        // Ungated, and here rather than only on the stage: the stage grows a
+        // Gallery chip when a render finishes, which is exactly the moment you
+        // do not need one — before the first render of a session there was no
+        // way into the output folder at all, and organizing what is already
+        // there is not something you should have to queue a render to reach.
+        el("button", {
+          class: "mmc-tool",
+          title: "Browse, organize and attach finished renders and pre-stage stills",
+          onclick: () => this.openGallery(),
+        }, [el("span", { class: "mmc-tool-icon" }, [icon("gallery")]), el("span", { text: "Gallery" })]),
+        // Absent where it would be a control over nothing — see `settingsTool`.
+        ...(this.settingsTool ? [el("button", {
+          class: "mmc-tool",
+          title: "Preferences for this ComfyUI — output quality. Not saved into the workflow.",
+          onclick: () => openSettings(),
+        }, [el("span", { class: "mmc-tool-icon" }, [icon("gear")]), el("span", { text: "Settings" })])] : []),
+      ]),
     ]);
   }
 
