@@ -51,7 +51,7 @@ const CSS = `
 
 /* The pre-stage's outer body. It holds whichever editor the architecture calls
    for and is swapped when that changes, so it has to be the full height the DOM
-   widget gave it — the editor inside is the `.mmc-root` doing the layout. */
+   widget gave it — the .mmc-root inside is what does the layout. */
 .mmc-prestage-host { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .mmc-prestage-host > * { flex: 1 1 auto; min-height: 0; }
 
