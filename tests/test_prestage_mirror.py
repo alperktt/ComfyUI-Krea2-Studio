@@ -53,7 +53,11 @@ out.arches = [...s.PRESTAGE_ARCHES];
 out.loaders = [...s.PRESTAGE_LOADERS];
 out.adapters = [...s.PRESTAGE_ADAPTER_MODES];
 out.fields = s.PRESTAGE_FIELDS;
-out.defaults = { loader: s.emptyPreStage().loader };
+out.defaults = { loader: s.emptyPreStage().loader,
+                 moodboard_on: s.emptyPreStage().moodboard.on,
+                 moodboard_strength: s.emptyPreStage().moodboard.strength };
+out.moodboard_strengths = [...s.PRESTAGE_MOODBOARD_STRENGTHS];
+out.moodboard_collections = [...s.PRESTAGE_MOODBOARD_COLLECTIONS];
 out.image_arches = [...s.PRESTAGE_IMAGE_ARCHES];
 out.presets = s.PRESTAGE_ASPECTS.map(([label]) => label).sort();
 for (const [label] of s.PRESTAGE_ASPECTS) {
@@ -133,6 +137,13 @@ check("krea RAW row", mirror["krea_raw"], ci.KREA_RAW)
 check("loaders", mirror["loaders"], list(ci.LOADERS))
 check("adapter modes", mirror["adapters"], list(ci.ADAPTER_MODES))
 check("the default loader", mirror["defaults"]["loader"], ci.DEFAULT_LOADER)
+check("moodboard strengths", mirror["moodboard_strengths"], list(ci.MOODBOARD_STRENGTHS))
+check("moodboard collections", mirror["moodboard_collections"], list(ci.MOODBOARD_COLLECTIONS))
+check("the default moodboard strength", mirror["defaults"]["moodboard_strength"],
+      ci.DEFAULT_MOODBOARD_STRENGTH)
+# Off is the whole no-regression claim: an untouched pill never opens the
+# 9 MB catalog and never touches the prompt.
+check("the moodboard pill starts off", mirror["defaults"]["moodboard_on"], False)
 
 # The weight fields the popover offers have to be the ones the emitter reads, or
 # a file picked in the UI lands in a key nothing loads. `render_image` imports

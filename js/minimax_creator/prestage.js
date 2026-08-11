@@ -28,7 +28,7 @@ import { CreatorEditor } from "./editor.js";
 import { samplingBar } from "./sampling.js";
 import { Stage } from "./stage.js";
 import { loadCatalog, catalogByFolder } from "./models.js";
-import { viewUrl } from "./api.js";
+import { viewUrl, listMoodboards } from "./api.js";
 import * as S from "./state.js";
 
 const QUALITY_TITLE = {
@@ -367,6 +367,142 @@ export class PreStageEditor {
     return el("div", { class: "mmc-lora-block" }, parts);
   }
 
+  // ---- moodboard --------------------------------------------------------------
+
+  /** A Krea moodboard folded into the prompt. Off by default.
+   *
+   *  Not a rail tool, because it attaches nothing — no file, no handle, no chip.
+   *  It is a property of the prompt, so it reads as a pill beside the aspect and
+   *  resolution, and it says which board is on it. */
+  moodboardPill() {
+    const board = this.state.moodboard;
+    return el("button", {
+      class: `mmc-pill${board.on ? " accel-on" : ""}`,
+      title: board.on
+        ? `Moodboard — "${board.title || board.board}" at ${board.strength} strength, `
+          + "appended to the prompt as style guidance. Click to change or clear."
+        : "Fold one of 3,549 Krea moodboards into the prompt: a look chosen instead "
+          + "of described. Off — the prompt goes as typed.",
+      onclick: (event) => this.openMoodboard(event.currentTarget),
+    }, [
+      icon("effect", 16),
+      el("span", { text: board.on ? (board.title || board.board).slice(0, 28) : "moodboard" }),
+      ...(board.on ? [el("span", { class: "mmc-pill-sub", text: board.strength })] : []),
+    ]);
+  }
+
+  openMoodboard(anchor) {
+    const state = this.state;
+    const board = state.moodboard;
+    const pop = el("div", { class: "mmc-pop mmc-weights-pop" });
+    const results = el("div");
+    let query = "";
+    let timer = null;
+
+    const pick = (item) => {
+      board.on = true;
+      board.board = item.uuid || item.slug || item.title;
+      board.title = item.title || "";
+      board.collection = item.collection || board.collection;
+      this.commit();
+      render();
+    };
+
+    const load = () => {
+      listMoodboards({ query, collection: board.collection }).then((payload) => {
+        if (!pop.isConnected) return;
+        if (!payload.available) {
+          results.replaceChildren(el("div", {
+            class: "mmc-warn",
+            text: "The moodboard catalog is not installed — vendor/moodboards/data is missing.",
+          }));
+          return;
+        }
+        results.replaceChildren(...(payload.items.length
+          ? payload.items.map((item) => el("button", {
+              class: "mmc-opt",
+              "aria-checked": board.on && board.board === item.uuid,
+              title: item.source_summary || item.title,
+              onclick: () => pick(item),
+            }, [
+              el("span", { class: "mmc-opt-label" }, [
+                el("span", { text: item.title }),
+                ...(item.keywords?.length
+                  ? [el("span", { class: "mmc-pill-sub", text: item.keywords.slice(0, 3).join(" · ") })]
+                  : []),
+              ]),
+              el("span", { class: "mmc-radio" }),
+            ]))
+          : [el("div", { class: "mmc-note", text: "No moodboard matched that." })]));
+      });
+    };
+
+    const render = () => {
+      const rows = [];
+
+      rows.push(el("input", {
+        class: "mmc-search",
+        type: "text",
+        placeholder: "Search 3,549 boards — “film noir”, “kodachrome”, “brutalist”",
+        value: query,
+        oninput: (event) => {
+          query = event.target.value;
+          // Every keystroke is a scan of the whole catalog on the server, so it
+          // waits for the typing to stop rather than racing it.
+          clearTimeout(timer);
+          timer = setTimeout(load, 250);
+        },
+      }));
+      rows.push(results);
+
+      if (board.on) {
+        rows.push(el("div", { class: "mmc-weight-row" }, [
+          el("span", { class: "mmc-weight-name", text: "Strength" }),
+          el("div", { class: "mmc-pill mmc-turbo-seg" }, S.PRESTAGE_MOODBOARD_STRENGTHS.map((level) =>
+            el("button", {
+              class: "mmc-turbo-opt",
+              "aria-pressed": board.strength === level,
+              title: S.PRESTAGE_MOODBOARD_HINT[level],
+              onclick: () => { board.strength = level; this.commit(); render(); },
+            }, [el("span", { text: level })]))),
+        ]));
+        // A board's negative guidance becomes the render's actual negative
+        // conditioning. Worth a switch, and worth saying that Turbo skips it.
+        rows.push(el("div", { class: "mmc-weight-row" }, [
+          el("span", { class: "mmc-weight-name", text: "Negative guidance" }),
+          el("button", {
+            class: "mmc-weight-file",
+            title: "The board's own list of what the look is not, encoded as the negative "
+                 + "conditioning. At cfg 1 — which is where Turbo runs — the sampler skips "
+                 + "the unconditional branch, so it costs nothing and does nothing there.",
+            text: board.use_negative ? "used" : "ignored",
+            onclick: () => { board.use_negative = !board.use_negative; this.commit(); render(); },
+          }),
+        ]));
+        rows.push(el("button", {
+          class: "mmc-opt",
+          onclick: () => {
+            board.on = false;
+            board.board = "";
+            board.title = "";
+            this.commit();
+            render();
+          },
+        }, [el("span", { class: "mmc-opt-label" }, [el("span", { text: "Clear the moodboard" })])]));
+      }
+
+      body.replaceChildren(...rows);
+    };
+
+    const body = el("div");
+    pop.append(el("div", { class: "mmc-pop-title", text: "Moodboard" }), body);
+    render();
+    load();
+    document.body.appendChild(pop);
+    placeNear(pop, anchor);
+    dismissable(pop);
+  }
+
   renderPills() {
     const state = this.state;
     const geometry = S.resolvedPreStage(state, state.init ? this.sizes.get(state.init.filename) : null);
@@ -394,7 +530,7 @@ export class PreStageEditor {
       el("span", { class: "mmc-pill-sub", text: `${geometry.width} × ${geometry.height}` }),
     ]);
 
-    const pills = [archPill, aspectPill, resPill];
+    const pills = [archPill, aspectPill, resPill, this.moodboardPill()];
 
     if (state.arch === "ideogram4") {
       // Ideogram's speed axis. The preset owns the schedule shape as well as

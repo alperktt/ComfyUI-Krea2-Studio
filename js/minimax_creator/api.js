@@ -166,6 +166,27 @@ export async function listModels({ force = false } = {}) {
   return modelsInFlight;
 }
 
+/** One page of the Krea moodboard catalog: `{available, items, total}`.
+ *
+ *  Not cached, unlike the model listing: this is a search, so every query is a
+ *  different answer and the picker debounces the typing instead. `available`
+ *  false means the 9 MB catalog is not on disk — the picker says so rather than
+ *  showing an empty grid.
+ *
+ *  A failed request resolves to the same empty shape rather than throwing. The
+ *  moodboard is one optional line of a prompt; a picker that cannot reach the
+ *  server should say nothing matched, not take the editor down with it. */
+export async function listMoodboards({ query = "", collection = "krea", pageSize = 24 } = {}) {
+  const params = new URLSearchParams({ q: query, collection, page_size: String(pageSize) });
+  try {
+    const response = await api.fetchApi(`/minimax_creator/moodboards?${params}`);
+    if (!response.ok) throw new Error(`moodboard listing failed (${response.status})`);
+    return await response.json();
+  } catch (error) {
+    return { available: false, items: [], total: 0, error: String(error) };
+  }
+}
+
 /** Core's /view, pointed at output rather than input — how a finished render is
  *  played back in the node body. Takes a `SavedResult` verbatim, which is what
  *  the `executed` message carries. */

@@ -21,6 +21,8 @@ and only the server can hand both ends the same path.
 """
 
 import asyncio
+import functools
+import logging
 import os
 
 from aiohttp import web
@@ -28,7 +30,7 @@ from aiohttp import web
 import folder_paths
 from server import PromptServer
 
-from . import lorameta, models, preview, settings
+from . import lorameta, models, moodboard, preview, settings
 
 # The picker builds its grid lazily and paginates, so the cap only bounds the
 # listing's JSON payload (~2 MB at this size). Newest first, so when a folder
@@ -360,6 +362,45 @@ async def list_models(request):
     # the websocket held up behind it.
     loop = asyncio.get_running_loop()
     return web.json_response(await loop.run_in_executor(None, models.available))
+
+
+@PromptServer.instance.routes.get("/minimax_creator/moodboards")
+async def list_moodboards(request):
+    """One page of the moodboard picker: `?q=`, `?page=`, `?collection=`.
+
+    The catalog is 9 MB of JSON parsed on first touch, and every page after that
+    is a scan of 3,549 boards, so both go to the executor for the reason
+    `list_models` does: this is the loop the prompt queue runs on.
+
+    An install with the catalog trimmed away answers `available: false` rather
+    than 500ing — the pill reads it and says the catalog is missing instead of
+    offering a picker with nothing in it.
+    """
+    if not moodboard.available():
+        return web.json_response({"available": False, "items": [], "total": 0})
+
+    query = request.query.get("q", "")
+    collection = request.query.get("collection", moodboard.DEFAULT_COLLECTION)
+    if collection not in moodboard.COLLECTIONS:
+        return web.json_response({"error": f"unknown collection {collection!r}"}, status=400)
+    try:
+        page = max(1, int(request.query.get("page", 1)))
+        page_size = max(1, min(100, int(request.query.get("page_size", 30))))
+    except ValueError:
+        return web.json_response({"error": "page and page_size must be whole numbers"}, status=400)
+
+    loop = asyncio.get_running_loop()
+    try:
+        payload = await loop.run_in_executor(
+            None, functools.partial(moodboard.search, query, page, page_size, collection))
+    except Exception as exc:  # noqa: BLE001 — a broken catalog is not a broken server
+        logging.exception("[krea2-studio] moodboard catalog failed to load")
+        return web.json_response({"available": False, "items": [], "total": 0,
+                                  "error": str(exc)})
+    return web.json_response({"available": True,
+                              "strengths": list(moodboard.STRENGTHS),
+                              "collections": list(moodboard.COLLECTIONS),
+                              **payload})
 
 
 @PromptServer.instance.routes.get("/minimax_creator/assets")

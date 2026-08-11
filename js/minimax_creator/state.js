@@ -918,6 +918,16 @@ export const PRESTAGE_LOADER_HINT = {
 /** What the SVDQuant LoRA loader does with an adapter that cannot fold into the
  *  low-rank branch (LoKr, LoHa, OFT). A plain LoRA is free either way, which is
  *  why this is per-entry. Mirrors compile_image.ADAPTER_MODES. */
+/** How much of a moodboard's prose is folded into the prompt, and which
+ *  catalog a board id is looked up in. Mirrors compile_image. */
+export const PRESTAGE_MOODBOARD_STRENGTHS = ["concise", "normal", "strong"];
+export const PRESTAGE_MOODBOARD_COLLECTIONS = ["krea", "andrometa"];
+export const PRESTAGE_MOODBOARD_HINT = {
+  concise: "The board's prompt guidance alone — one sentence of treatment.",
+  normal: "The guidance plus the board's style keywords. The usual amount.",
+  strong: "Guidance, taste profile and keywords. Takes over the look; leaves the subject alone.",
+};
+
 export const PRESTAGE_ADAPTER_MODES = ["bypass", "bake"];
 export const PRESTAGE_ADAPTER_LABEL = { bypass: "bypass", bake: "bake" };
 export const PRESTAGE_ADAPTER_HINT = {
@@ -1002,6 +1012,12 @@ export function emptyPreStage() {
     // Which node loads the DiT. Off — meaning core's — is the default, and off
     // has to compile to exactly what it compiled to before the pill existed.
     loader: "standard",
+    // A Krea moodboard folded into the prompt. Off, and off means the catalog
+    // is never even opened. `board` is whatever the picker stored — a uuid.
+    moodboard: {
+      on: false, board: "", title: "", strength: "normal",
+      collection: "krea", use_negative: true,
+    },
     // Ideogram's speed axis: which official preset shapes the schedule.
     quality: "default",
     // The H3 branch: its own settings, and its generation in the Creator's
@@ -1061,6 +1077,18 @@ export function parsePreStage(raw) {
       state.loras = state.loras.map((entry) => (
         entry && typeof entry === "object" && !PRESTAGE_ADAPTER_MODES.includes(entry.adapters)
           ? { ...entry, adapters: "bypass" } : entry));
+      const board = state.moodboard && typeof state.moodboard === "object" ? state.moodboard : {};
+      state.moodboard = {
+        // On with nothing chosen is not a state the compile accepts, so it is
+        // not a state that can be loaded either.
+        on: board.on === true && typeof board.board === "string" && board.board !== "",
+        board: typeof board.board === "string" ? board.board : "",
+        title: typeof board.title === "string" ? board.title : "",
+        strength: PRESTAGE_MOODBOARD_STRENGTHS.includes(board.strength) ? board.strength : "normal",
+        collection: PRESTAGE_MOODBOARD_COLLECTIONS.includes(board.collection)
+          ? board.collection : "krea",
+        use_negative: board.use_negative !== false,
+      };
       state.minimax = parseStill(state.minimax);
       const turbo = state.turbo && typeof state.turbo === "object" ? state.turbo : {};
       state.turbo = {

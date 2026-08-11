@@ -57,8 +57,31 @@ def blob(**overrides):
     return data
 
 
-def compile(**overrides):
-    return ci.compile_prestage(blob(**overrides))
+# A stand-in for `moodboard.style`, so this stays off disk: the real catalog is
+# 9 MB of JSON and the thing under test is what the compile does with what comes
+# back, not the catalog.
+BOARDS = {
+    "noir-1": {"positive": "Style-only guidance: hard chiaroscuro, deep blacks.",
+               "negative": "flat lighting, contrastless gray midtones",
+               "title": "Cinematic Chiaroscuro Noir"},
+    "quiet-1": {"positive": "Style-only guidance: soft daylight, low saturation.",
+                "negative": "", "title": "Quiet Daylight"},
+}
+
+
+def fake_lookup(board, strength, collection):
+    if board not in BOARDS:
+        raise LookupError(f"no moodboard matches {board!r}")
+    found = dict(BOARDS[board])
+    # The real catalog folds more prose in at higher strengths; enough of that
+    # shows here for the tests to tell the levels apart.
+    if strength == "strong":
+        found["positive"] += " Style keywords: noir, graphic, high contrast."
+    return found
+
+
+def compile(lookup=fake_lookup, **overrides):
+    return ci.compile_prestage(blob(**overrides), moodboard_lookup=lookup)
 
 
 # ---- off by default ----------------------------------------------------------
@@ -126,6 +149,63 @@ expect_error("an unknown adapter mode is refused, listing the real ones",
 # cannot reach the graph either — the existing filter, still doing its job.
 check("a zero-strength LoRA is dropped before its mode matters",
       compile(loras=[{"name": "g.safetensors", "strength": 0.0, "adapters": "bake"}]).loras, [])
+
+
+# ---- moodboards ---------------------------------------------------------------
+#
+# A moodboard never reaches the graph: the catalog is read through an injected
+# lookup and its guidance is merged into the prompt here, next to the LoRA
+# trigger words. So everything worth checking is a string.
+
+check("a default blob has no moodboard and no negative",
+      (base.prompt, base.negative_prompt), (blob()["prompt"], None))
+# Off must mean the catalog is never opened at all — passing no lookup and
+# leaving the pill off has to compile, or an install with the 9 MB catalog
+# trimmed away would break for people who never asked for a board.
+check("and compiles with no lookup supplied at all",
+      ci.compile_prestage(blob()).prompt, blob()["prompt"])
+
+styled = compile(moodboard={"on": True, "board": "noir-1"})
+check("the board's guidance is appended, not prepended — the subject stays first",
+      styled.prompt.startswith(blob()["prompt"]), True)
+check("and it is the board's own text",
+      BOARDS["noir-1"]["positive"] in styled.prompt, True)
+check("the board's negative becomes real negative conditioning",
+      styled.negative_prompt, BOARDS["noir-1"]["negative"])
+
+check("strength reaches the lookup",
+      "Style keywords" in compile(moodboard={"on": True, "board": "noir-1",
+                                             "strength": "strong"}).prompt, True)
+check("a board with no negative guidance leaves the zeroed one alone",
+      compile(moodboard={"on": True, "board": "quiet-1"}).negative_prompt, None)
+check("and the negative can be declined without losing the look",
+      [compile(moodboard={"on": True, "board": "noir-1", "use_negative": False}).negative_prompt,
+       BOARDS["noir-1"]["positive"] in compile(
+           moodboard={"on": True, "board": "noir-1", "use_negative": False}).prompt],
+      [None, True])
+
+# Trigger words and a moodboard are both prompt edits and must compose: the
+# LoRA's words go in front of the subject, the board's prose after it.
+both = compile(loras=[{"name": "g.safetensors", "strength": 1.0, "triggers": ["gxace"]}],
+               moodboard={"on": True, "board": "noir-1"})
+check("triggers stay in front and the board stays behind",
+      (both.prompt.startswith("gxace, "), both.prompt.rstrip().endswith(BOARDS["noir-1"]["positive"])),
+      (True, True))
+
+expect_error("a moodboard pill with no board chosen is refused",
+             lambda: compile(moodboard={"on": True, "board": ""}), "no board is chosen")
+expect_error("an unknown strength is refused, listing the real ones",
+             lambda: compile(moodboard={"on": True, "board": "noir-1", "strength": "loud"}),
+             "concise")
+expect_error("an unknown collection is refused",
+             lambda: compile(moodboard={"on": True, "board": "noir-1", "collection": "mine"}),
+             "unknown moodboard collection")
+expect_error("a board that is not in the catalog names itself",
+             lambda: compile(moodboard={"on": True, "board": "does-not-exist"}),
+             "does-not-exist")
+expect_error("and a chosen board with no catalog installed says so",
+             lambda: compile(lookup=None, moodboard={"on": True, "board": "noir-1"}),
+             "catalog is not available")
 
 
 if FAILURES:

@@ -614,6 +614,43 @@ expect_error("the SVDQuant loader is refused on Ideogram",
              lambda: build(svdq_blob(arch="ideogram4")),
              "Krea 2")
 
+# ---- the moodboard's negative --------------------------------------------------
+#
+# A moodboard never reaches the graph except here. Its positive half is merged
+# into the prompt in `compile_image` and arrives as text, but a board that says
+# what its look is *not* has to become real conditioning, and this pipeline's
+# negative has always been `ConditioningZeroOut`. Emitted directly rather than
+# through a blob so the check does not depend on which boards ship in the 9 MB
+# catalog.
+
+
+def emitted(payload, weights=None):
+    graph = ri.emit(payload, weights or ri.ImageWeights(arch="krea2", files=MODELS["krea2"]),
+                    render_mod.Sampling(seed=1, steps=52, cfg=3.5,
+                                        sampler_name="euler", scheduler="simple"), NODE_ID)
+    return by_class(graph.finalize())
+
+
+plain = ci.compile_prestage({"arch": "krea2", "prompt": "p", "aspect": "1:1", "short_edge": 1024})
+zeroed = emitted(plain)
+check("with no board the negative is still the zeroed positive",
+      ("ConditioningZeroOut" in zeroed, len(zeroed["CLIPTextEncode"])), (True, 1))
+
+with_negative = ci.compile_prestage(
+    {"arch": "krea2", "prompt": "p", "aspect": "1:1", "short_edge": 1024,
+     "moodboard": {"on": True, "board": "b"}},
+    moodboard_lookup=lambda board, strength, collection: {
+        "positive": "hard chiaroscuro", "negative": "flat lighting", "title": "t"})
+negged = emitted(with_negative)
+check("a board's negative guidance is encoded instead of zeroed",
+      ("ConditioningZeroOut" in negged, len(negged["CLIPTextEncode"])), (False, 2))
+check("and it is the board's own words",
+      sorted(i["text"] for _, i in negged["CLIPTextEncode"])[0], "flat lighting")
+check("the positive still carries the prompt and the board's prose",
+      [t.startswith("p") and "hard chiaroscuro" in t
+       for t in sorted((i["text"] for _, i in negged["CLIPTextEncode"]), reverse=True)][0],
+      True)
+
 if FAILURES:
     print(f"{len(FAILURES)} failure(s):")
     for failure in FAILURES:

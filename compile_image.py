@@ -96,6 +96,13 @@ DEFAULT_LOADER = "standard"
 ADAPTER_MODES = ("bypass", "bake")
 DEFAULT_ADAPTER = "bypass"
 
+# How much of a moodboard's prose is folded into the prompt. The vendored
+# catalog's own three levels, named here so `state.js` can mirror them.
+MOODBOARD_STRENGTHS = ("concise", "normal", "strong")
+DEFAULT_MOODBOARD_STRENGTH = "normal"
+MOODBOARD_COLLECTIONS = ("krea", "andrometa")
+DEFAULT_MOODBOARD_COLLECTION = "krea"
+
 # Ideogram's official preset table, verbatim from the shipped ComfyUI template
 # (V4_QUALITY_48 / V4_DEFAULT_20 / V4_TURBO_12). mu and std shape the
 # resolution-shifted schedule, so they belong to the preset, not to the user.
@@ -136,6 +143,10 @@ class ImagePayload:
     loras: list = field(default_factory=list)        # [{"name", "strength", "adapters"}]
     refs: list = field(default_factory=list)         # filenames, krea2 only
     init: dict = None                                # {"filename", "denoise"} or None
+    # The moodboard's negative fragment, or None. The positive half is already
+    # in `prompt`; this one needs a conditioning of its own, so it travels
+    # separately — see `render_image._emit_krea2`.
+    negative_prompt: str = None
     # Ideogram's schedule shape, None on krea2.
     mu: float = None
     std: float = None
@@ -257,7 +268,33 @@ def _parse_refs(raw):
     return refs
 
 
-def compile_prestage(data, image_size_lookup=None):
+def _parse_moodboard(raw):
+    """The moodboard block, validated. `None` when the pill is off.
+
+    Off is the default and off means the block never reaches the lookup, so a
+    catalog that is missing or trimmed costs nothing to anyone who has not asked
+    for a board.
+    """
+    if not isinstance(raw, dict) or not raw.get("on"):
+        return None
+    board = str(raw.get("board") or "").strip()
+    if not board:
+        raise CompileError("the moodboard pill is on but no board is chosen")
+    strength = raw.get("strength", DEFAULT_MOODBOARD_STRENGTH)
+    if strength not in MOODBOARD_STRENGTHS:
+        raise CompileError(
+            f"unknown moodboard strength {strength!r} — it is one of "
+            f"{', '.join(MOODBOARD_STRENGTHS)}")
+    collection = raw.get("collection", DEFAULT_MOODBOARD_COLLECTION)
+    if collection not in MOODBOARD_COLLECTIONS:
+        raise CompileError(f"unknown moodboard collection {collection!r}")
+    return {"board": board, "strength": strength, "collection": collection,
+            # A board's negative guidance is its own opinion about what the look
+            # is not. Kept separable because at cfg 1 nothing reads it.
+            "use_negative": raw.get("use_negative", True) is not False}
+
+
+def compile_prestage(data, image_size_lookup=None, moodboard_lookup=None):
     """`prestage_data` dict -> `ImagePayload`.
 
     `image_size_lookup(filename) -> (width, height)` supplies the init image's
@@ -297,6 +334,26 @@ def compile_prestage(data, image_size_lookup=None):
     triggers = collect_triggers(active)
     if triggers:
         prompt = f"{', '.join(triggers)}, {prompt}"
+
+    # The moodboard's guidance goes *after* the prompt: the subject is what the
+    # user typed, and the board describes how it should look. Resolved through
+    # an injected lookup for the same reason the init image's size is — this
+    # module reads no disk, and the catalog is 9 MB of it.
+    negative_prompt = None
+    board = _parse_moodboard(data.get("moodboard"))
+    if board is not None:
+        if moodboard_lookup is None:
+            raise CompileError(
+                "the moodboard catalog is not available — reinstall the package "
+                "with vendor/moodboards/data intact, or switch the moodboard pill off")
+        try:
+            look = moodboard_lookup(board["board"], board["strength"], board["collection"])
+        except LookupError as exc:
+            raise CompileError(f"moodboard {board['board']!r}: {exc}") from exc
+        if look.get("positive"):
+            prompt = f"{prompt}\n\n{look['positive']}"
+        if board["use_negative"] and look.get("negative"):
+            negative_prompt = look["negative"]
 
     refs = _parse_refs(data.get("refs"))
     if refs and arch == "ideogram4":
@@ -345,6 +402,6 @@ def compile_prestage(data, image_size_lookup=None):
     return ImagePayload(
         arch=arch, prompt=prompt, width=width, height=height,
         checkpoint_field=checkpoint_field, loader=loader,
-        loras=loras, refs=refs, init=init,
+        loras=loras, refs=refs, init=init, negative_prompt=negative_prompt,
         mu=mu, std=std, ratio_clamped=ratio_clamped,
     )

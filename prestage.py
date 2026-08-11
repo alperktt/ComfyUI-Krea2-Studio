@@ -35,8 +35,8 @@ import json
 
 from comfy_api.latest import io
 
-from . import (canvas, compile_image, compile_still, media, outputs, render,
-               render_image, render_still, settings)
+from . import (canvas, compile_image, compile_still, media, moodboard, outputs,
+               render, render_image, render_still, settings)
 
 DEFAULT_DATA = json.dumps({
     "version": 1,
@@ -171,7 +171,11 @@ class MiniMaxH3PreStage(io.ComfyNode):
             return render.expanded(graph)
 
         try:
-            payload = compile_image.compile_prestage(data, media.image_size)
+            payload = compile_image.compile_prestage(
+                data, media.image_size,
+                # Injected rather than imported by the compiler: the catalog is
+                # 9 MB on disk and `compile_image` reads none.
+                moodboard_lookup=moodboard.lookup() if moodboard.available() else None)
         except compile_image.CompileError as exc:
             raise ValueError(str(exc)) from exc
 

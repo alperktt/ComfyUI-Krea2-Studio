@@ -266,6 +266,25 @@ def _emit_model(graph, payload, weights):
     return model
 
 
+def _negative(graph, payload, clip, positive):
+    """The unconditional branch: zeroed conditioning, or a real negative prompt.
+
+    Zeroed is what this has always emitted and is still the default, because
+    RAW at cfg 3.5 wants an unconditional rather than a second prompt and Turbo
+    at cfg 1.0 skips the branch outright.
+
+    A moodboard can supply the exception. A board that says what its look is
+    *not* — no bokeh, no lens flare — is stating conditioning, and dropping it
+    on the floor because this pipeline happens to have no negative box would be
+    ignoring half of what the board says. So when one is carried, it is encoded
+    and used. At cfg 1 the sampler still skips it, which is correct rather than
+    broken: a negative that nothing reads costs nothing.
+    """
+    if payload.negative_prompt:
+        return graph.node("CLIPTextEncode", clip=clip, text=payload.negative_prompt).out(0)
+    return graph.node("ConditioningZeroOut", conditioning=positive).out(0)
+
+
 def _latent(graph, payload, vae, empty_node):
     """The starting latent: empty for t2i, the encoded init image for img2img.
 
@@ -305,10 +324,7 @@ def _emit_krea2(graph, payload, sampling, clip, vae, model, unique_id, filename_
     else:
         positive = graph.node("CLIPTextEncode", clip=clip, text=payload.prompt).out(0)
 
-    # Zeroed-out conditioning as the negative on both checkpoints: at Turbo's
-    # cfg 1.0 it is skipped outright, and RAW's cfg 3.5 wants an unconditional,
-    # not a second prompt.
-    negative = graph.node("ConditioningZeroOut", conditioning=positive).out(0)
+    negative = _negative(graph, payload, clip, positive)
 
     latent, denoise = _latent(graph, payload, vae, "EmptySD3LatentImage")
     sampled = graph.node(
@@ -323,7 +339,7 @@ def _emit_krea2(graph, payload, sampling, clip, vae, model, unique_id, filename_
 def _emit_ideogram4(graph, payload, sampling, weights, clip, vae, model, unique_id,
                     filename_prefix):
     positive = graph.node("CLIPTextEncode", clip=clip, text=payload.prompt).out(0)
-    negative = graph.node("ConditioningZeroOut", conditioning=positive).out(0)
+    negative = _negative(graph, payload, clip, positive)
 
     # The late-cfg drop wraps the conditional model, after the LoRAs — it is a
     # sampling wrapper, not a weight patch.
