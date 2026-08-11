@@ -218,14 +218,17 @@ to 32. In the image modes the aspect comes from the keyframe.
 
 Past 768 the popover offers a choice, because the open weights were trained at a
 768 px short edge and going above it directly is off-distribution. **Two passes**
-(the default) samples at the native canvas, then a second pass interpolates the
-video latent up to the slider's size, re-noises it partway down the schedule
-(the `refine` stepper, default 0.50) and samples again — against conditioning
-rebuilt at the target size, so keyframes and references are re-encoded to match.
-The soundtrack is never re-noised: the sound you got at 768 is the sound in the
+(the default) samples at the first-pass canvas — native, unless the `sampled at`
+stepper lowers it — then a second pass interpolates the video latent up to the
+slider's size, re-noises it partway down the schedule (the `refine` stepper,
+default 0.50) and samples again — against conditioning rebuilt at the target
+size, so keyframes and references are re-encoded to match. The soundtrack is
+never re-noised: the sound you got from the first pass is the sound in the
 file. **Direct** is the old behaviour, one pass at the slider's size, warning
-and all. At or under 768 the choice does not exist and the popover is just the
-slider.
+and all. At or under 768 there is no warning to answer, but the `sampled at`
+stepper is still there: lowering it under the slider buys the first pass's
+speed at any size — sample at 512, refine up to 768 — and is itself the
+two-pass opt-in.
 
 ## Where files go
 

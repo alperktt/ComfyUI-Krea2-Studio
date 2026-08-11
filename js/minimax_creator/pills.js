@@ -8,7 +8,7 @@
 import { el, icon, dismissable, placeNear } from "./dom.js";
 import { ASPECT_PRESETS, MIN_SHORT_EDGE, MAX_SHORT_EDGE, NATIVE_SHORT_EDGE, CANVAS_MULTIPLE } from "./canvas.js";
 import { UPSCALE_MODES, DEFAULT_REFINE_DENOISE, MIN_REFINE_DENOISE, MAX_REFINE_DENOISE,
-         twoPass } from "./state.js";
+         twoPass, sampleEdge } from "./state.js";
 
 /**
  * A −/value/+ pill. The same shape as the duration control, because a number
@@ -212,18 +212,17 @@ export function edgeSlider({ min, max, step, value, mark, markLabel, apply, desc
  * @param {() => void} commit         called on release, not on every pixel
  */
 export function openResolutionPopover(anchor, target, geometry, commit) {
-  // Past the native edge the render can go two ways, and this is where the
-  // choice lives — on the warning it answers, nowhere else. At or under native
-  // the section is empty and the popover is exactly the slider it always was.
+  // The two-pass section. Past the native edge it is the choice the warning
+  // asks for — two passes or one, off-distribution. At or under native there
+  // is no warning to answer, but the first pass can still be lowered under
+  // the slider, which is the same trade at a smaller size: faster sampling,
+  // refined up. Lowering the edge there *is* choosing two passes.
   const section = el("div");
 
   const renderSection = () => {
-    if (target.short_edge <= NATIVE_SHORT_EDGE) {
-      section.className = "";
-      section.replaceChildren();
-      return;
-    }
     const { width, height } = geometry();
+    const over = target.short_edge > NATIVE_SHORT_EDGE;
+    const cap = Math.min(NATIVE_SHORT_EDGE, target.short_edge);
     const option = (mode, label, sub) => el("button", {
       class: "mmc-opt",
       "aria-checked": target.upscale === mode,
@@ -239,13 +238,36 @@ export function openResolutionPopover(anchor, target, geometry, commit) {
       ]),
       el("span", { class: "mmc-radio" }),
     ]);
-    section.className = "mmc-twopass";
-    section.replaceChildren(
-      option(UPSCALE_MODES[0], "two passes",
-             `${NATIVE_SHORT_EDGE} px first, refined up to ${width} × ${height}`),
-      option("direct", "direct",
-             `one pass at ${width} × ${height} — off-distribution`),
-      ...(twoPass(target) ? [el("div", { class: "mmc-refine-row" }, [
+    const rows = [];
+    if (over) {
+      rows.push(
+        option(UPSCALE_MODES[0], "two passes",
+               `${sampleEdge(target)} px first, refined up to ${width} × ${height}`),
+        option("direct", "direct",
+               `one pass at ${width} × ${height} — off-distribution`));
+    }
+    // The first-pass edge, whenever there is room under the slider for one and
+    // the mode is not pinned to a single pass.
+    if (cap > MIN_SHORT_EDGE && (!over || target.upscale !== "direct")) {
+      rows.push(el("div", { class: "mmc-refine-row" }, [
+        el("span", { class: "mmc-refine-label", text: "sampled at" }),
+        stepperPill({
+          value: sampleEdge(target),
+          min: MIN_SHORT_EDGE, max: cap, step: CANVAS_MULTIPLE, width: "56px",
+          title: "The short edge the first pass samples at. At the slider's size it is "
+               + "the only pass; under it, a second pass refines up to the slider.",
+          format: (n) => `${n} px`,
+          onChange: (next) => {
+            target.sample_edge = next;
+            // Under native the stepper is the opt-in, so it also picks the mode.
+            if (!over) target.upscale = UPSCALE_MODES[0];
+            body.repaint(); commit();
+          },
+        }),
+      ]));
+    }
+    if (twoPass(target)) {
+      rows.push(el("div", { class: "mmc-refine-row" }, [
         el("span", { class: "mmc-refine-label", text: "refine" }),
         stepperPill({
           value: Number(target.refine_denoise ?? DEFAULT_REFINE_DENOISE),
@@ -255,8 +277,10 @@ export function openResolutionPopover(anchor, target, geometry, commit) {
           format: (n) => n.toFixed(2),
           onChange: (next) => { target.refine_denoise = next; body.repaint(); commit(); },
         }),
-      ])] : []),
-    );
+      ]));
+    }
+    section.className = rows.length ? "mmc-twopass" : "";
+    section.replaceChildren(...rows);
   };
 
   const body = edgeSlider({
@@ -267,11 +291,11 @@ export function openResolutionPopover(anchor, target, geometry, commit) {
       renderSection();
       const { width, height } = geometry();
       const over = target.short_edge > NATIVE_SHORT_EDGE;
-      if (over && twoPass(target)) {
+      if (twoPass(target)) {
         return {
           size: `${width} × ${height}`,
           warn: false,
-          note: `Sampled at the trained ${NATIVE_SHORT_EDGE} px, then a second pass refines up to this size.`,
+          note: `Sampled at ${sampleEdge(target)} px, then a second pass refines up to this size.`,
         };
       }
       return {

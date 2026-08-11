@@ -20,7 +20,6 @@ import * as S from "./state.js";
 import * as Turbo from "./turbo.js";
 import {
   framesForSeconds, secondsForFrames, resolveCanvas, ASPECT_PRESETS, describeRatio, isTrainedLength,
-  NATIVE_SHORT_EDGE,
 } from "./canvas.js";
 
 /**
@@ -223,7 +222,7 @@ class Timeline {
       el("button", {
         class: "mmc-pill",
         title: S.twoPass(this.timeline)
-          ? `Sampled at the trained ${NATIVE_SHORT_EDGE} px short edge, refined up to `
+          ? `Sampled at a ${S.sampleEdge(this.timeline)} px short edge, refined up to `
             + `${width} × ${height} by a second pass — every segment alike.`
           : "Short edge. Lower is faster; 768 is what the open weights were trained at.",
         onclick: (event) => openResolutionPopover(
@@ -232,7 +231,7 @@ class Timeline {
         icon("res", 16),
         el("span", { text: `${this.timeline.short_edge}p` }),
         el("span", { class: "mmc-pill-sub", text: S.twoPass(this.timeline)
-          ? `${NATIVE_SHORT_EDGE} → ${width} × ${height}`
+          ? `${S.sampleEdge(this.timeline)} → ${width} × ${height}`
           : `${width} × ${height}` }),
       ]),
       // Global LoRAs sit on the bar with the canvas rather than inside a

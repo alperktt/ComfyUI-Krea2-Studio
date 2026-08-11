@@ -2,7 +2,8 @@
 // Mirrors compile.py: it validates here so the user sees the problem while
 // editing rather than at queue time, but compile.py stays authoritative.
 
-import { ASPECT_PRESETS, FPS, NATIVE_SHORT_EDGE, framesForSeconds, secondsForFrames, resolveCanvas } from "./canvas.js";
+import { ASPECT_PRESETS, FPS, MIN_SHORT_EDGE, NATIVE_SHORT_EDGE, CANVAS_MULTIPLE,
+         framesForSeconds, secondsForFrames, resolveCanvas } from "./canvas.js";
 // Where files land is not in the blob any more — it is a preference of this
 // machine, in `settings.js`, so a shared workflow does not carry one person's
 // folder names onto another person's disk.
@@ -335,20 +336,34 @@ export const CHECKPOINT_LABEL = { fl2va: "FL2VA", ref2va: "Ref2VA" };
 export const CHECKPOINT_CHOICES = ["auto", ...CHECKPOINTS];
 export const DEFAULT_STRENGTH = 1.0;
 
-/** Mirrors compile.UPSCALE_MODES and the refine-denoise clamp. What a render
- *  past the native short edge does about being there: sample at 768 and refine
- *  up ("two_pass", the default), or one off-distribution pass at the slider's
- *  size ("direct"). Only meaningful past native — under it the two modes are
- *  the same render, which is why the popover only offers the choice there. */
+/** Mirrors compile.UPSCALE_MODES, first_pass_edge and the refine-denoise
+ *  clamp. A render whose first pass sits under the slider goes one of two
+ *  ways: sample at the first-pass edge and refine up ("two_pass", the
+ *  default), or one pass at the slider's size ("direct" — past native,
+ *  off-distribution). The first-pass edge is native unless lowered, so past
+ *  native two passes happen on their own, and under it only when the user
+ *  lowers the edge — a blob without the key keeps meaning what it meant. */
 export const UPSCALE_MODES = ["two_pass", "direct"];
 export const DEFAULT_REFINE_DENOISE = 0.5;
 export const MIN_REFINE_DENOISE = 0.1;
 export const MAX_REFINE_DENOISE = 0.9;
 
+const clampSampleEdge = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return NATIVE_SHORT_EDGE;
+  const snapped = Math.round(n / CANVAS_MULTIPLE) * CANVAS_MULTIPLE;
+  return Math.min(NATIVE_SHORT_EDGE, Math.max(MIN_SHORT_EDGE, snapped));
+};
+
+/** The short edge the first of two passes samples at: the stored edge, capped
+ *  by the slider — at the cap the two passes collapse into one render. */
+export const sampleEdge = (target) =>
+  Math.min(clampSampleEdge(target.sample_edge), target.short_edge);
+
 /** Whether this canvas owner renders in two passes. `target` is anything with
- *  `short_edge` and `upscale` — a state or a timeline. */
+ *  `short_edge`, `sample_edge` and `upscale` — a state or a timeline. */
 export const twoPass = (target) =>
-  target.short_edge > NATIVE_SHORT_EDGE && target.upscale !== "direct";
+  sampleEdge(target) < target.short_edge && target.upscale !== "direct";
 
 const clampRefineDenoise = (value) => {
   const n = Number(value);
@@ -377,9 +392,10 @@ export function emptyState() {
     duration_s: 6,
     aspect: "16:9",
     short_edge: NATIVE_SHORT_EDGE,
-    // The two-pass choice and its one knob. Owned wherever the canvas is
-    // owned; both are inert until the slider is past the native edge.
+    // The two-pass choice and its two knobs. Owned wherever the canvas is
+    // owned; all inert while the first-pass edge is not under the slider.
     upscale: UPSCALE_MODES[0],
+    sample_edge: NATIVE_SHORT_EDGE,
     refine_denoise: DEFAULT_REFINE_DENOISE,
     // "auto" follows the mode. Pinning it runs the same payload on the other
     // weights; compile.py decides which pins it will accept.
@@ -407,6 +423,7 @@ export function parseState(raw) {
       }
       if (!CHECKPOINT_CHOICES.includes(state.checkpoint)) state.checkpoint = "auto";
       if (!UPSCALE_MODES.includes(state.upscale)) state.upscale = UPSCALE_MODES[0];
+      state.sample_edge = clampSampleEdge(state.sample_edge);
       state.refine_denoise = clampRefineDenoise(state.refine_denoise);
       state.models = parseModels(state.models);
       state.turbo = parseTurbo(state.turbo);
@@ -524,6 +541,7 @@ export function serializeState(state) {
     short_edge: state.short_edge,
     // Absent means the default, so a blob that never left native adds nothing.
     ...(state.upscale !== UPSCALE_MODES[0] ? { upscale: state.upscale } : {}),
+    ...(state.sample_edge !== NATIVE_SHORT_EDGE ? { sample_edge: state.sample_edge } : {}),
     ...(state.refine_denoise !== DEFAULT_REFINE_DENOISE
       ? { refine_denoise: state.refine_denoise } : {}),
     // Not in serializeCommon: the weights belong to the node, and a timeline
@@ -590,6 +608,7 @@ export function emptyTimeline() {
     short_edge: NATIVE_SHORT_EDGE,
     // The two-pass choice rides with the canvas, which is the timeline's.
     upscale: UPSCALE_MODES[0],
+    sample_edge: NATIVE_SHORT_EDGE,
     refine_denoise: DEFAULT_REFINE_DENOISE,
     // Patched onto every segment, in front of whatever that segment adds. What
     // a turbo LoRA is for: you want it on the whole clip, not shot by shot.
@@ -618,6 +637,7 @@ function syncCanvas(timeline) {
     segment.aspect = timeline.aspect;
     segment.short_edge = timeline.short_edge;
     segment.upscale = timeline.upscale;
+    segment.sample_edge = timeline.sample_edge;
     segment.refine_denoise = timeline.refine_denoise;
   }
   // Segment 1 has nothing in front of it. Kept in step here rather than guarded
@@ -646,6 +666,7 @@ export function parseTimeline(raw) {
       }
       if (!timeline.refined || typeof timeline.refined !== "object") timeline.refined = null;
       if (!UPSCALE_MODES.includes(timeline.upscale)) timeline.upscale = UPSCALE_MODES[0];
+      timeline.sample_edge = clampSampleEdge(timeline.sample_edge);
       timeline.refine_denoise = clampRefineDenoise(timeline.refine_denoise);
       timeline.models = parseModels(timeline.models);
       timeline.turbo = parseTurbo(timeline.turbo);
@@ -685,6 +706,7 @@ export function serializeTimeline(timeline) {
     aspect: timeline.aspect,
     short_edge: timeline.short_edge,
     ...(timeline.upscale !== UPSCALE_MODES[0] ? { upscale: timeline.upscale } : {}),
+    ...(timeline.sample_edge !== NATIVE_SHORT_EDGE ? { sample_edge: timeline.sample_edge } : {}),
     ...(timeline.refine_denoise !== DEFAULT_REFINE_DENOISE
       ? { refine_denoise: timeline.refine_denoise } : {}),
     loras: serializeLoras(timeline.loras ?? []),

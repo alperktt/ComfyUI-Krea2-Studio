@@ -208,8 +208,9 @@ def emit(payloads, labels, weights, sampling, acceleration, unique_id,
         )
 
         if one.refine:
-            # The two-pass upscale: the first pass sampled at the native edge,
-            # and this regenerates it at the target size from the same context.
+            # The two-pass upscale: the first pass sampled at the smaller
+            # first-pass canvas, and this regenerates it at the target size
+            # from the same context.
             # A second segment node, pinned to the target canvas, re-encodes
             # the keyframes and references at that size so their condition
             # latents match the upscaled video latent — then the refine pass

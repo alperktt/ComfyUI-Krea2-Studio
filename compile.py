@@ -47,10 +47,11 @@ MAX_AUDIO_TAIL_S = 4.0
 
 HANDLE_RE = re.compile(r"@([A-Za-z]+-\d+)")
 
-# What a render past the native short edge does about being there. "two_pass"
-# samples at the trained 768 px edge and lets a second pass refine up to the
-# slider's canvas; "direct" is the old behaviour, one off-distribution pass at
-# the slider's size. Mirrored by the resolution popover in `pills.js`.
+# Whether a render whose first pass sits under the slider's canvas gets the
+# second, refining pass. "two_pass" samples at `sample_edge` — the trained
+# 768 px edge unless the blob lowers it — and refines up to the slider;
+# "direct" is the old behaviour, one pass at the slider's size, which past
+# native is off-distribution. Mirrored by the resolution popover in `pills.js`.
 UPSCALE_MODES = ("two_pass", "direct")
 
 # How much of the schedule the refine pass runs. 0.5 keeps the first pass's
@@ -126,9 +127,11 @@ class CanvasSpec:
 @dataclass(frozen=True)
 class Refine:
     """The second half of a two-pass render: the canvas the refinement lands on
-    and how much of the schedule it runs. On `Compiled` only when the slider is
-    past the native edge and the mode says "two_pass" — at or under native the
-    two modes are the same render and there is nothing to refine up to.
+    and how much of the schedule it runs. On `Compiled` only when the first
+    pass samples under the slider's canvas — past native by default, or
+    anywhere the blob's `sample_edge` sits below the slider — and the mode says
+    "two_pass". With the two edges equal the passes collapse into one render
+    and there is nothing to refine up to.
     """
     width: int
     height: int
@@ -552,6 +555,23 @@ def refine_denoise(raw):
     return min(MAX_REFINE_DENOISE, max(MIN_REFINE_DENOISE, value))
 
 
+def first_pass_edge(raw, short_edge):
+    """The short edge the first of two passes samples at: the blob's
+    `sample_edge`, defaulted to the native edge and clamped between the
+    canvas floor and the lower of the target and native. The first pass
+    exists to stay on-distribution, so above native it buys nothing, and
+    above the target there would be nothing left to refine up to.
+    """
+    ceiling = min(int(short_edge), canvas.NATIVE_SHORT_EDGE)
+    if raw is None:
+        return ceiling
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise CompileError(f"sample_edge must be a number (got {raw!r})")
+    return max(canvas.MIN_SHORT_EDGE, min(ceiling, value))
+
+
 def compile_request(data, image_size_lookup=None, continues=False, canvas_spec=None,
                     continues_audio=False, shots=1):
     """`creator_data` dict -> `Compiled`.
@@ -634,17 +654,21 @@ def compile_request(data, image_size_lookup=None, continues=False, canvas_spec=N
     frames = canvas.frames_for_seconds(seconds_shown)
     short_edge = data.get("short_edge", canvas.NATIVE_SHORT_EDGE)
 
-    # Past the native edge a render goes one of two ways: one pass at the
-    # slider's size, off-distribution ("direct"), or a pass at the trained edge
-    # that a second pass refines up to the target ("two_pass", the default —
-    # the popover only offers the choice past native, because under it they are
-    # the same render). The still branch pins "direct": it upscales through the
-    # single-image VAE instead and has no refine pass to hand this to.
+    # A render whose first pass sits under the slider goes one of two ways: one
+    # pass at the slider's size ("direct" — past native, off-distribution), or
+    # a pass at the first-pass edge that a second pass refines up to the target
+    # ("two_pass", the default). The first-pass edge is native unless the blob
+    # lowers it, so past native two passes happen on their own, and under it
+    # only when `sample_edge` asks — which is how a blob written before the
+    # setting existed keeps meaning what it meant. The still branch pins
+    # "direct": it upscales through the single-image VAE instead and has no
+    # refine pass to hand this to.
     mode_raw = str(data.get("upscale") or UPSCALE_MODES[0])
     if mode_raw not in UPSCALE_MODES:
         raise CompileError(f"unknown upscale mode {mode_raw!r}")
-    two_pass = short_edge > canvas.NATIVE_SHORT_EDGE and mode_raw == "two_pass"
-    sample_edge = canvas.NATIVE_SHORT_EDGE if two_pass else short_edge
+    first_edge = first_pass_edge(data.get("sample_edge"), short_edge)
+    two_pass = first_edge < short_edge and mode_raw == "two_pass"
+    sample_edge = first_edge if two_pass else short_edge
 
     # The instruction line carries the real duration to two decimals, so this has
     # to come after the frame count and never off `duration_s`.
@@ -853,7 +877,7 @@ def timeline_payloads(data, image_size_lookup=None):
         request["aspect"] = data.get("aspect", "16:9")
         request["short_edge"] = data.get("short_edge", canvas.NATIVE_SHORT_EDGE)
         # The two-pass choice travels with the canvas it is a property of.
-        for key in ("upscale", "refine_denoise"):
+        for key in ("upscale", "sample_edge", "refine_denoise"):
             request.pop(key, None)
             if key in data:
                 request[key] = data[key]
@@ -1050,7 +1074,7 @@ def single_payload(data):
         "aspect": data.get("aspect", "16:9"),
         "short_edge": data.get("short_edge", canvas.NATIVE_SHORT_EDGE),
         # The two-pass choice is the timeline's, like the canvas it belongs to.
-        **{key: data[key] for key in ("upscale", "refine_denoise") if key in data},
+        **{key: data[key] for key in ("upscale", "sample_edge", "refine_denoise") if key in data},
     }
     for key in ("soundscape", "music"):
         request[key] = _agree(

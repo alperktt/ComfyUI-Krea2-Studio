@@ -915,6 +915,27 @@ check("refine_denoise clamps rather than raising",
 expect_error("a non-number refine_denoise",
              lambda: build(short_edge=1152, refine_denoise="lots"), "refine_denoise")
 
+# The first pass can also sit under native — `sample_edge` lowers it, native
+# stays both the default and the ceiling, and the target can be anywhere above.
+low = build(short_edge=1152, sample_edge=512)
+check("a lowered sample_edge moves pass one under native",
+      (low.width, low.height), canvas.resolve_canvas(16 / 9, 512))
+check("...and still refines to the slider's canvas",
+      (low.refine.width, low.refine.height), canvas.resolve_canvas(16 / 9, 1152))
+under = build(short_edge=768, sample_edge=512)
+check("under native, sample_edge is what turns two passes on",
+      ((under.width, under.height), (under.refine.width, under.refine.height)),
+      (canvas.resolve_canvas(16 / 9, 512), canvas.resolve_canvas(16 / 9, 768)))
+check("sample_edge clamps to native and to the canvas floor",
+      (build(short_edge=1152, sample_edge=2000).width,
+       build(short_edge=768, sample_edge=100).width),
+      (canvas.resolve_canvas(16 / 9, 768)[0], canvas.resolve_canvas(16 / 9, 384)[0]))
+check("a sample_edge at the slider is the one-pass render",
+      build(short_edge=512, sample_edge=512).refine, None)
+check("direct ignores sample_edge",
+      build(short_edge=512, sample_edge=384, upscale="direct").refine, None)
+expect_error("a non-number sample_edge", lambda: build(sample_edge="small"), "sample_edge")
+
 # The adaptive canvas: the keyframe still owns the ratio, and both passes share it.
 adaptive = build(assets=[image("img-1", "first_frame")], short_edge=1152)
 check("adaptive two-pass samples at native with the keyframe's ratio",
@@ -931,6 +952,10 @@ check("a two-pass timeline pins pass one at native",
 check("...and refines every segment to the same target",
       {(c.refine.width, c.refine.height) for c in two_pass_tl},
       {canvas.resolve_canvas(16 / 9, 1152)})
+low_tl = timeline([segment()], short_edge=1152, sample_edge=512)[0]
+check("a timeline's sample_edge reaches its segments",
+      ((low_tl.width, low_tl.height), (low_tl.refine.width, low_tl.refine.height)),
+      (canvas.resolve_canvas(16 / 9, 512), canvas.resolve_canvas(16 / 9, 1152)))
 direct_tl = timeline([segment()], short_edge=1152, upscale="direct")[0]
 check("a direct timeline is the old render",
       ((direct_tl.width, direct_tl.height), direct_tl.refine),
@@ -938,6 +963,8 @@ check("a direct timeline is the old render",
 
 check("one pass inherits the timeline's two-pass choice",
       single([segment("a shot")], short_edge=1152).refine is not None, True)
+check("...and its sample_edge",
+      single([segment("a shot")], short_edge=768, sample_edge=512).refine is not None, True)
 check("...and its direct choice",
       single([segment("a shot")], short_edge=1152, upscale="direct").refine, None)
 
