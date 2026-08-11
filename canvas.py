@@ -27,7 +27,15 @@ NATIVE_SHORT_EDGE = 768
 NATIVE_MAX_PIXELS = 768 * 1344
 
 MIN_SHORT_EDGE = 384
-MAX_SHORT_EDGE = 896  # past NATIVE is off the trained distribution, not just slower
+# The slider's ceiling, not a statement about the weights. `NATIVE_SHORT_EDGE`
+# is what the released checkpoints were trained at and anything above it is
+# off-distribution — the pill says so from 768 up, and that does not change
+# here. What changed is that there is now a reason to go there: the pre-stage's
+# H3 branch decodes one latent frame as a still, where the single-image VAE
+# holds up to around 3 MP, and a 2K checkpoint is expected. A ceiling the
+# hardware and the warning already govern is better than one that has to be
+# raised again the day those weights land.
+MAX_SHORT_EDGE = 2048
 
 # Official H3 aspect envelope: 21:9 through 9:16.
 MIN_RATIO = 9 / 16

@@ -40,7 +40,7 @@ for (const name of ["CANVAS_MULTIPLE", "FPS", "NATIVE_SHORT_EDGE", "NATIVE_MAX_P
 }
 for (let s = c.MIN_SECONDS; s <= c.MAX_SECONDS; s++) out.frames[s] = c.framesForSeconds(s);
 for (const [label, ratio] of c.ASPECT_PRESETS) {
-  for (const edge of [384, 512, 640, 768, 896]) {
+  for (const edge of [384, 512, 640, 768, 896, 1024, 1536, 2048]) {
     out.canvases[label + "@" + edge] = c.resolveCanvas(ratio, edge);
   }
 }

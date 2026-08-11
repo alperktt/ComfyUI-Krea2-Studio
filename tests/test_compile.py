@@ -61,7 +61,7 @@ check("1:1 @768", canvas.resolve_canvas(1.0, 768), (768, 768))
 check("9:16 @768", canvas.resolve_canvas(9 / 16, 768), (768, 1344))
 
 for label, ratio in canvas.ASPECT_PRESETS.items():
-    for edge in (384, 512, 640, 768, 896):
+    for edge in (384, 512, 640, 768, 896, 1024, 1536, 2048):
         width, height = canvas.resolve_canvas(ratio, edge)
         cap = canvas.NATIVE_MAX_PIXELS * (edge / canvas.NATIVE_SHORT_EDGE) ** 2
         if width % 32 or height % 32:

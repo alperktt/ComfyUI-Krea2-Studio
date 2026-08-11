@@ -8,7 +8,9 @@ export const FPS = 24;
 export const NATIVE_SHORT_EDGE = 768;
 export const NATIVE_MAX_PIXELS = 768 * 1344;
 export const MIN_SHORT_EDGE = 384;
-export const MAX_SHORT_EDGE = 896;
+// The slider's ceiling rather than a claim about the weights — see canvas.py.
+// Everything above NATIVE_SHORT_EDGE is off-distribution and the pill says so.
+export const MAX_SHORT_EDGE = 2048;
 
 export const MIN_RATIO = 9 / 16;
 export const MAX_RATIO = 21 / 9;
