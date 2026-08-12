@@ -1,4 +1,4 @@
-# MiniMax H3 Creator
+# Krea 2 Studio
 
 Write a sentence, attach your media with `@`, press Run. One node holds the whole
 generation and hands back a finished clip with its sound already in it — no
@@ -6,6 +6,14 @@ conditioning sockets, no sampler to re-assemble, no VAE to remember to connect.
 
 Local open weights only, through core's `comfy_extras/nodes_minimax_h3.py`. No API
 key, nothing uploaded.
+
+> A fork of **[ComfyUI-MiniMax-Creator](https://github.com/roadmaus/ComfyUI-MiniMax-Creator)**
+> by roadmaus, which is all of the H3 video side and most of what follows. What
+> this fork adds is on the Krea 2 half: six community packs vendored in and driven
+> from the PreStage's own pills — 4-bit rendering, in-context editing, style
+> transfer, moodboards, a two-stage sampler and 4K. See
+> [The Krea 2 side](#the-krea-2-side). Every one of them is off by default, and off
+> renders exactly what it rendered before.
 
 ![Sampling, then the finished clip playing beside the node](docs/img/preview.gif)
 
@@ -24,11 +32,19 @@ That is the whole workflow. Drop the node, type, run.
 
 ```
 cd ComfyUI/custom_nodes
-git clone https://github.com/roadmaus/comfyui-minimax-creator ComfyUI-MiniMax-Creator
+git clone https://github.com/alperktt/ComfyUI-Krea2-Studio
 ```
 
 Restart ComfyUI. Nothing to `pip install`. You need a ComfyUI new enough to ship
 `comfy_extras/nodes_minimax_h3.py`, since that is where the model lives.
+
+> **Do not run this alongside the upstream Creator.** It is a fork and it keeps
+> upstream's node ids on purpose, so existing workflows load unchanged — which
+> also means ComfyUI would see each id twice and silently keep one. Rename the old
+> directory to `ComfyUI-MiniMax-Creator.disabled` (a suffix ComfyUI skips) and
+> everything you already built keeps working. The six *vendored* packs are a
+> different matter: those are renamed, so having any of them installed separately
+> is fine.
 
 Then put the weights where ComfyUI already looks:
 
@@ -189,6 +205,38 @@ mentions, FL2VA/Ref2VA routing, the taeh3 preview. Two pills are its own:
 Reconstruction is soft compared to a dedicated image model: fine text, thin
 contours and hair are where it shows first. It is an experiment, marked as one in
 the UI, and the video VAE is not a substitute for it in either direction.
+
+### The Krea 2 side
+
+Six community packs are vendored into `vendor/` and driven from the PreStage's own
+pills, so a Krea 2 still can be a 4-bit render, an edit, a style transfer, a
+two-pass base-into-Turbo run and a 4K frame without a second workflow. Nothing
+needs installing separately and nothing registers a node you have to find.
+
+| pill | what it does | cost |
+|---|---|---|
+| `standard` / `SVDQuant` | W4A4 4-bit blocks with a low-rank branch, from [Krea-2-SVDQuant](https://github.com/alperktt/Krea-2-SVDQuant-ComfyUI). Moves every LoRA onto its own loader too — a plain one would rewrite the quantized weight. | 40 s → 26 s at 1024 |
+| `moodboard` | One of 3,549 [Krea moodboards](https://github.com/Andro-Meta/ComfyUI-Krea-Moodboards) folded into the prompt as style guidance. No node reaches the graph — the catalog is read as data. | free |
+| `edit` | In-context editing via [krea2edit](https://github.com/lbouaraba/comfyui-krea2edit): the source goes in as frame=1 tokens *and* grounds the instruction through the vision encoder. Needs the Identity Edit LoRA, which the panel picks. | ~1.75× a plain render |
+| `style` | RF-inversion [style transfer](https://github.com/nkxx188/ComfyUI-Krea2-StyleTransfer), one reference or two. | ~4× |
+| `2 stages` / `3 stages` | Base model into Turbo, from [Krea-2-Two-Stage-Sampler](https://github.com/Auryg/Krea-2-Two-Stage-Sampler). The base gives variation between seeds that a distillation does not. Its dual-resolution route cuts the cost of that by more than half. | 61 s, or 26 s at half first-stage scale |
+| `dype` / `sega` | [DyPE](https://github.com/wildminder/ComfyUI-DyPE) extrapolates the position encoding, which is what lifts the resolution ceiling from 2048 to 4096; SEGA sharpens attention from the latent's spectrum. | 3840×2160 in 149 s on a 3090 |
+
+Every one of them is **off by default, and off adds nothing to the graph** — a
+blob that touches none of them compiles to exactly the graph it compiled to
+before, which `tests/test_prestage_graph.py` checks rather than assumes.
+
+Three pairs are mutually exclusive, and the pill that would create the pair is
+disabled rather than left to fail: an edit and style references (both build the
+positive conditioning), style transfer and style references (two different
+reference paths), and a multi-stage run with an init image (the sampler has no
+denoise input at all). A multi-stage run also needs two checkpoints, so it does
+not run on the quantized loader.
+
+Each vendored tree carries an `ORIGIN.md`: the source, the commit, what was left
+out, and the things worth knowing before re-vendoring it — including where a
+pack's own default is *not* the one its release recommends, and where Krea 2 works
+through a path that was not written for it.
 
 ## Timeline
 
@@ -357,8 +405,29 @@ This pack is glue. The work underneath it belongs to other people:
 - **larryvrh** and **lightx2v** — the H3 distillation LoRAs behind turbo.
 - **CiviMeta** — the sidecar format the LoRA cards read.
 
-All four packs are optional and none of them is required. If they are installed, the
-matching pills light up.
+The four packs above are optional and none of them is required. If they are
+installed, the matching pills light up.
+
+The six behind the Krea 2 pills are **vendored** instead — copied into `vendor/`
+under their own licences, so nothing has to be installed and nothing can drift
+out from under the UI. They are not ours and the pills only call them:
+
+- **[Krea-2-SVDQuant-ComfyUI](https://github.com/alperktt/Krea-2-SVDQuant-ComfyUI)** —
+  the W4A4 loader and its LoRA loader.
+- **[comfyui-krea2edit](https://github.com/lbouaraba/comfyui-krea2edit)** by
+  lbouaraba — the in-context edit path, both halves of it.
+- **[ComfyUI-Krea2-StyleTransfer](https://github.com/nkxx188/ComfyUI-Krea2-StyleTransfer)**
+  by nkxx188 — RF-inversion style transfer.
+- **[ComfyUI-Krea-Moodboards](https://github.com/Andro-Meta/ComfyUI-Krea-Moodboards)**
+  by Andro-Meta — the 3,549-board catalog and the prose that turns one into prompt
+  guidance.
+- **[Krea-2-Two-Stage-Sampler](https://github.com/Auryg/Krea-2-Two-Stage-Sampler)**
+  by Auryg — base into Turbo, with the dual-resolution route.
+- **[ComfyUI-DyPE](https://github.com/wildminder/ComfyUI-DyPE)** by wildminder —
+  DyPE and SEGA, and therefore 4K.
+
+Each is registered under a `K2S_` id and hidden from the node menu, so having the
+original installed alongside this package shadows nothing in either direction.
 
 ## Tests
 
@@ -367,6 +436,8 @@ python3 tests/test_compile.py         # canvas math, modes, limits, ordering
 python3 tests/test_refine.py
 python3 tests/test_outputs.py         # what an output prefix may be
 python3 tests/test_settings.py        # what the settings file may hold
+python3 tests/test_compile_image.py   # every Krea 2 pill, and every refusal
+python3 tests/test_vendor_isolation.py  # no vendored pack keeps its author's node id
 python3 tests/test_canvas_mirror.py   # canvas.js against canvas.py
 python3 tests/test_prestage_mirror.py
 python3 tests/test_outputs_mirror.py  # outputs.js against outputs.py
