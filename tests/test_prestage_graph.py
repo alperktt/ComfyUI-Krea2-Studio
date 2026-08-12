@@ -778,6 +778,75 @@ check("and the other dials arrive from the pack's own defaults",
 for absent in (ri.STYLE_REFERENCE, ri.STYLE_TRANSFER, ri.STYLE_TWO_TRANSFER):
     check(f"no {absent} without the style pill", absent in by_class(build().expand), False)
 
+# ---- the multi-stage sampler ----------------------------------------------------
+#
+# It replaces `KSampler` outright and takes two models. The mapping onto this
+# package's single sampler row is the load-bearing decision: stage 1 takes the
+# widgets, stage 2 takes the Turbo preset — which is what the turbo pill has
+# always meant.
+
+STAGE_MODELS = {**MODELS, "krea2": {**MODELS["krea2"]}}
+
+
+def staged(count=2, **overrides):
+    payload = ci.compile_prestage(
+        {"arch": "krea2", "prompt": "p", "aspect": "1:1", "short_edge": 1024,
+         "turbo": {"on": False, "quality": "good"},
+         "stages": {"count": count, **overrides}})
+    return by_class(ri.emit(payload, ri.ImageWeights(arch="krea2", files=STAGE_MODELS["krea2"]),
+                            render_mod.Sampling(seed=7, steps=52, cfg=4.0,
+                                                sampler_name="euler", scheduler="simple"),
+                            NODE_ID).finalize())
+
+
+two = staged(2)
+check("the two-stage node replaces KSampler",
+      ("KSampler" in two, len(two[ri.TWO_STAGE])), (False, 1))
+node = two[ri.TWO_STAGE][0][1]
+check("stage 1 takes the widget row verbatim",
+      (node["stage1_steps"], node["stage1_cfg"], node["stage1_sampler_name"],
+       node["stage1_scheduler"]),
+      (52, 4.0, "euler", "simple"))
+check("stage 2 takes the Turbo preset, at the pill's quality",
+      (node["stage2_steps"], node["stage2_cfg"], node["stage2_sampler_name"]),
+      (ci.TURBO_STEPS["good"], ci.KREA_TURBO["cfg"], ci.KREA_TURBO["sampler_name"]))
+check("the handoff arrives from the payload", node["handoff_percent"], ci.DEFAULT_HANDOFF)
+check("stage 1 runs the base checkpoint",
+      [i["unet_name"] for _, i in two["UNETLoader"]][0], MODELS["krea2"]["model"])
+check("and a second loader is built for the Turbo file",
+      sorted(i["unet_name"] for _, i in two["UNETLoader"]),
+      sorted([MODELS["krea2"]["model"], MODELS["krea2"]["turbo_model"]]))
+check("no resize at full first-stage scale",
+      (node["final_width"], node["final_height"]), (0, 0))
+
+three = staged(3)
+check("three stages use the three-stage node and carry the second crossover",
+      (ri.THREE_STAGE in three, three[ri.THREE_STAGE][0][1]["stage3_handoff_percent"]),
+      (True, ci.DEFAULT_HANDOFF3))
+
+scaled = staged(2, stage1_scale=0.5)
+check("a scaled first stage samples on a smaller latent",
+      scaled["EmptySD3LatentImage"][0][1]["width"], 512)
+check("and the node is told where to finish",
+      (scaled[ri.TWO_STAGE][0][1]["final_width"],
+       scaled[ri.TWO_STAGE][0][1]["final_height"]), (1024, 1024))
+
+# Off is off, and off is the argument-for-argument same KSampler as before.
+plain_graph = by_class(build().expand)
+check("one stage still emits a single KSampler and nothing else",
+      (len(plain_graph["KSampler"]), ri.TWO_STAGE in plain_graph,
+       ri.THREE_STAGE in plain_graph), (1, False, False))
+
+expect_error("a multi-stage run with no Turbo checkpoint picked says which file",
+             lambda: ri.emit(
+                 ci.compile_prestage({"arch": "krea2", "prompt": "p", "aspect": "1:1",
+                                      "short_edge": 1024, "stages": {"count": 2}}),
+                 ri.ImageWeights(arch="krea2", files={
+                     k: v for k, v in MODELS["krea2"].items() if k != "turbo_model"}),
+                 render_mod.Sampling(seed=1, steps=52, cfg=4.0,
+                                     sampler_name="euler", scheduler="simple"), NODE_ID),
+             "Turbo checkpoint")
+
 if FAILURES:
     print(f"{len(FAILURES)} failure(s):")
     for failure in FAILURES:

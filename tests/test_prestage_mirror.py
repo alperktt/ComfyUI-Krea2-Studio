@@ -69,6 +69,12 @@ out.edit = { fit_modes: [...s.PRESTAGE_EDIT_FIT_MODES],
              default_scene_boost: s.emptyPreStage().edit.ref_boost_a,
              on: s.emptyPreStage().edit.on };
 out.moodboard_collections = [...s.PRESTAGE_MOODBOARD_COLLECTIONS];
+out.stages = { counts: [...s.PRESTAGE_STAGE_COUNTS],
+               handoff: s.PRESTAGE_HANDOFF,
+               handoff3: s.PRESTAGE_HANDOFF3,
+               scale: s.PRESTAGE_STAGE1_SCALE,
+               min_scale: s.PRESTAGE_MIN_STAGE1_SCALE,
+               default_count: s.emptyPreStage().stages.count };
 out.style = { max_refs: s.PRESTAGE_MAX_STYLE_TRANSFER_REFS,
               fits: [...s.PRESTAGE_STYLE_FITS],
               strength: s.PRESTAGE_STYLE_STRENGTH,
@@ -181,6 +187,13 @@ check("style strength default", mirror["style"]["strength"], ci.DEFAULT_STYLE_ST
 check("style strength ceiling", mirror["style"]["max_strength"], ci.MAX_STYLE_STRENGTH)
 check("the default fit", mirror["style"]["default_fit"], ci.DEFAULT_STYLE_FIT)
 check("the style pill starts off", mirror["style"]["on"], False)
+
+check("stage counts", mirror["stages"]["counts"], list(ci.STAGE_COUNTS))
+check("the handoff default", mirror["stages"]["handoff"], ci.DEFAULT_HANDOFF)
+check("the third-stage handoff default", mirror["stages"]["handoff3"], ci.DEFAULT_HANDOFF3)
+check("the first-stage scale default", mirror["stages"]["scale"], ci.DEFAULT_STAGE1_SCALE)
+check("and its floor", mirror["stages"]["min_scale"], ci.MIN_STAGE1_SCALE)
+check("a fresh blob samples in one pass", mirror["stages"]["default_count"], ci.DEFAULT_STAGES)
 
 # The weight fields the popover offers have to be the ones the emitter reads, or
 # a file picked in the UI lands in a key nothing loads. `render_image` imports

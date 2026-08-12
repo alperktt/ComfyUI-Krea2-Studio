@@ -356,6 +356,56 @@ expect_error("a primary reference that is not 1 or 2 is refused",
              "must be 1 or 2")
 
 
+# ---- the multi-stage sampler ----------------------------------------------------
+
+check("a default blob samples in one pass", base.stages, None)
+check("and an explicit one stage is the same as none",
+      compile(stages={"count": 1}).stages, None)
+
+two_stage = compile(stages={"count": 2})
+check("two stages carry the pack's handoff default",
+      (two_stage.stages["count"], two_stage.stages["handoff"]), (2, ci.DEFAULT_HANDOFF))
+check("stage 1 loads the base checkpoint, not Turbo",
+      two_stage.checkpoint_field, "model")
+# The turbo pill stops choosing a file and keeps choosing stage 2's step budget,
+# so the quality has to travel with the block.
+check("and the turbo quality rides along for stage 2",
+      two_stage.stages["quality"], ci.DEFAULT_TURBO_QUALITY)
+check("even with the turbo pill on, stage 1 is still the base",
+      compile(stages={"count": 2}, turbo={"on": True, "quality": "draft"}).checkpoint_field,
+      "model")
+check("and the pill's quality is what stage 2 uses",
+      compile(stages={"count": 2}, turbo={"on": True, "quality": "draft"}).stages["quality"],
+      "draft")
+
+three = compile(stages={"count": 3, "handoff": 20, "handoff3": 80})
+check("three stages carry both crossovers",
+      (three.stages["handoff"], three.stages["handoff3"]), (20.0, 80.0))
+
+# Dual resolution: stage 1 small, stage 2 finishing at the target. 0/0 is the
+# node's own "do not resize", which is what a scale of 1 has to compile to —
+# passing the target twice would make it upscale from and to the same size.
+check("no resize when stage 1 runs at full size",
+      (two_stage.stages["width"], two_stage.stages["height"]), (0, 0))
+half = compile(aspect="1:1", short_edge=1024, stages={"count": 2, "stage1_scale": 0.5})
+check("a scaled first stage gets its own canvas, on the same /16 grid",
+      (half.stages["width"], half.stages["height"], half.width), (512, 512, 1024))
+
+expect_error("an unknown stage count is refused",
+             lambda: compile(stages={"count": 4}), "unknown stage count")
+expect_error("a third crossover before the second is refused",
+             lambda: compile(stages={"count": 3, "handoff": 60, "handoff3": 40}),
+             "at or after")
+expect_error("a multi-stage run on the quantized loader is refused, naming both ways out",
+             lambda: compile(loader="svdquant", stages={"count": 2}),
+             "one quantized file")
+expect_error("a multi-stage run with an init image is refused — it has no denoise",
+             lambda: compile(init={"filename": "seed.png"}, stages={"count": 2}),
+             "no denoise")
+expect_error("and it is refused on Ideogram",
+             lambda: compile(arch="ideogram4", stages={"count": 2}), "Krea 2")
+
+
 if FAILURES:
     print(f"{len(FAILURES)} failure(s):")
     for failure in FAILURES:

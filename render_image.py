@@ -81,6 +81,8 @@ STYLE_REFERENCE = "K2S_Krea2StyleReference"
 STYLE_TRANSFER = "K2S_Krea2StyleTransfer"
 STYLE_TWO_REFERENCES = "K2S_Krea2TwoStyleReferences"
 STYLE_TWO_TRANSFER = "K2S_Krea2TwoStyleTransfer"
+TWO_STAGE = "K2S_KreaTwoStageSampler"
+THREE_STAGE = "K2S_KreaThreeStageSampler"
 
 # The reference template's shift, applied only on the style-reference branch —
 # plain t2i leaves the shift the checkpoint detection already set (1.15).
@@ -132,11 +134,18 @@ class ImageWeights:
 def check(weights, payload):
     """Refuse now if a file this render needs was never picked.
 
-    The DiT field is whichever one the payload resolved (`model` or
-    `turbo_model`); the unconditional checkpoint is never required, because the
+    The DiT field is whichever one the payload resolved (`model`, `turbo_model`
+    or `svdq_model`); the unconditional checkpoint is never required, because the
     guider degrades to ordinary CFG without it.
+
+    A multi-stage run needs a second checkpoint on top of that — its stage 2 is
+    the Turbo file — so it is asked for here rather than left to fail inside the
+    loader with an empty filename.
     """
-    for name in ("clip", "vae", payload.checkpoint_field):
+    needed = ["clip", "vae", payload.checkpoint_field]
+    if payload.stages:
+        needed.append("turbo_model")
+    for name in needed:
         if weights.get(name):
             continue
         # Not .capitalize(), which would lowercase "Turbo" mid-label.
@@ -194,7 +203,8 @@ def emit(payload, weights, sampling, unique_id, filename_prefix=FILENAME_PREFIX)
     model = _emit_model(graph, payload, weights)
 
     if payload.arch == "krea2":
-        _emit_krea2(graph, payload, sampling, clip, vae, model, unique_id, filename_prefix)
+        _emit_krea2(graph, payload, sampling, weights, clip, vae, model, unique_id,
+                    filename_prefix)
     else:
         _emit_ideogram4(graph, payload, sampling, weights, clip, vae, model, unique_id,
                         filename_prefix)
@@ -415,6 +425,68 @@ def _emit_style(graph, payload, model, vae, latent, positive):
                       ref_conditioning=positive, **kwargs).out(0)
 
 
+def _emit_sampler(graph, payload, sampling, weights, model, positive, negative,
+                  latent, denoise):
+    """The sampling pass: one `KSampler`, or the multi-stage node in its place.
+
+    Returns the sampled LATENT link. With `stages` unset this is exactly the
+    `KSampler` the PreStage has always emitted, down to the argument order — the
+    no-regression claim depends on that, and `test_prestage_graph` checks it.
+
+    The multi-stage route runs the undistilled base first, for the variation
+    between seeds a distillation largely does not have, then finishes on Turbo.
+    Its own row-per-stage maps onto this package's single row as: **stage 1 takes
+    the widgets** (it is the pass that decides the image, and the row is the one
+    the user can see), **stage 2 takes the Turbo preset** — which is what the
+    turbo pill has always meant. Three stages is base -> Turbo -> base, and the
+    pack reuses stage 1's settings for stage 3 itself.
+    """
+    if not payload.stages:
+        return graph.node(
+            "KSampler", model=model, positive=positive, negative=negative,
+            latent_image=latent, seed=sampling.seed, steps=sampling.steps,
+            cfg=sampling.cfg, sampler_name=sampling.sampler_name,
+            scheduler=sampling.scheduler, denoise=denoise,
+        ).out(0)
+
+    from .compile_image import KREA_TURBO, TURBO_STEPS
+
+    node_id = THREE_STAGE if payload.stages["count"] == 3 else TWO_STAGE
+    _require_vendored(node_id, "The multi-stage sampler",
+                      "Set the stages pill back to one to sample normally.")
+
+    # Stage 2 is the Turbo checkpoint, always — `compile_image` says so by
+    # leaving `checkpoint_field` on the base file. `check` has already refused a
+    # render where either is unpicked.
+    stage2 = graph.node("UNETLoader", unet_name=weights.get("turbo_model"),
+                        weight_dtype=weights.dtype).out(0)
+
+    quality = payload.stages.get("quality", "good")
+    extra = {}
+    if payload.stages["count"] == 3:
+        extra["stage3_handoff_percent"] = payload.stages["handoff3"]
+
+    return graph.node(
+        node_id,
+        stage1_model=model, stage2_model=stage2,
+        positive=positive, negative=negative, latent_image=latent,
+        seed=sampling.seed,
+        handoff_percent=payload.stages["handoff"],
+        stage1_steps=sampling.steps, stage1_cfg=sampling.cfg,
+        stage1_sampler_name=sampling.sampler_name, stage1_scheduler=sampling.scheduler,
+        stage2_steps=TURBO_STEPS[quality], stage2_cfg=KREA_TURBO["cfg"],
+        stage2_sampler_name=KREA_TURBO["sampler_name"],
+        stage2_scheduler=KREA_TURBO["scheduler"],
+        # Where stage 2 *finishes*, which is the render's own canvas. Stage 1's
+        # smaller canvas is on the empty latent (`_latent`), not here. 0/0 is the
+        # node's "do not resize" and is what a full-size first stage compiles to.
+        final_width=payload.width if payload.stages["width"] else 0,
+        final_height=payload.height if payload.stages["height"] else 0,
+        upscale_method="bislerp",
+        **extra,
+    ).out(0)
+
+
 def _negative(graph, payload, clip, positive):
     """The unconditional branch: zeroed conditioning, or a real negative prompt.
 
@@ -442,8 +514,14 @@ def _latent(graph, payload, vae, empty_node):
     image, so this only absorbs the /16 snap. Returns (latent, denoise).
     """
     if payload.init is None:
-        empty = graph.node(empty_node, width=payload.width, height=payload.height,
-                           batch_size=1)
+        # A multi-stage run may start smaller than it finishes: stage 1 samples
+        # on this latent and the node upscales at the handoff. `compile_image`
+        # leaves the two sizes at 0 when they are the same, so this reads the
+        # final canvas unless it was told otherwise.
+        width, height = payload.width, payload.height
+        if payload.stages and payload.stages["width"]:
+            width, height = payload.stages["width"], payload.stages["height"]
+        empty = graph.node(empty_node, width=width, height=height, batch_size=1)
         return empty.out(0), 1.0
     image = graph.node("LoadImage", image=payload.init["filename"]).out(0)
     scaled = graph.node("ImageScale", image=image, upscale_method="lanczos",
@@ -453,7 +531,8 @@ def _latent(graph, payload, vae, empty_node):
     return encoded, payload.init["denoise"]
 
 
-def _emit_krea2(graph, payload, sampling, clip, vae, model, unique_id, filename_prefix):
+def _emit_krea2(graph, payload, sampling, weights, clip, vae, model, unique_id,
+                filename_prefix):
     # Built first on the edit path: the patch node wants the sampler's own
     # latent, so that it can encode the source before sampling starts rather
     # than pulling the VAE onto the card on the first step.
@@ -488,13 +567,9 @@ def _emit_krea2(graph, payload, sampling, clip, vae, model, unique_id, filename_
         # last so it wraps the edit's, matching the plain branch's order.
         if payload.style:
             model = _emit_style(graph, payload, model, vae, latent, positive)
-        sampled = graph.node(
-            "KSampler", model=model, positive=positive, negative=negative,
-            latent_image=latent, seed=sampling.seed, steps=sampling.steps,
-            cfg=sampling.cfg, sampler_name=sampling.sampler_name,
-            scheduler=sampling.scheduler, denoise=denoise,
-        )
-        return _emit_tail(graph, sampled.out(0), vae, unique_id, filename_prefix)
+        sampled = _emit_sampler(graph, payload, sampling, weights, model,
+                                positive, negative, latent, denoise)
+        return _emit_tail(graph, sampled, vae, unique_id, filename_prefix)
 
     if payload.refs:
         # The Qwen-edit encoder reads up to three references: it feeds them to
@@ -522,13 +597,9 @@ def _emit_krea2(graph, payload, sampling, clip, vae, model, unique_id, filename_
     if payload.style:
         model = _emit_style(graph, payload, model, vae, latent, positive)
 
-    sampled = graph.node(
-        "KSampler", model=model, positive=positive, negative=negative,
-        latent_image=latent, seed=sampling.seed, steps=sampling.steps,
-        cfg=sampling.cfg, sampler_name=sampling.sampler_name,
-        scheduler=sampling.scheduler, denoise=denoise,
-    )
-    _emit_tail(graph, sampled.out(0), vae, unique_id, filename_prefix)
+    sampled = _emit_sampler(graph, payload, sampling, weights, model,
+                            positive, negative, latent, denoise)
+    _emit_tail(graph, sampled, vae, unique_id, filename_prefix)
 
 
 def _emit_ideogram4(graph, payload, sampling, weights, clip, vae, model, unique_id,

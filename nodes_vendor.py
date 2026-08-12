@@ -66,6 +66,8 @@ VENDORED: list[tuple[str, str, str]] = [
     ("K2S_Krea2StyleTransfer", "styletransfer.nodes", "Krea2StyleTransfer"),
     ("K2S_Krea2TwoStyleReferences", "styletransfer.nodes", "Krea2TwoStyleReferences"),
     ("K2S_Krea2TwoStyleTransfer", "styletransfer.nodes", "Krea2TwoStyleTransfer"),
+    ("K2S_KreaTwoStageSampler", "twostage", "KreaTwoStageSampler"),
+    ("K2S_KreaThreeStageSampler", "twostage", "KreaThreeStageSampler"),
 ]
 
 

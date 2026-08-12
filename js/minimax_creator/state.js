@@ -966,6 +966,21 @@ export const PRESTAGE_STYLE_FIT_HINT = {
 export const PRESTAGE_STYLE_STRENGTH = 1.0;
 export const PRESTAGE_MAX_STYLE_STRENGTH = 2.0;
 
+/** The multi-stage sampler: base first for real variation between seeds, then
+ *  Turbo to finish. 1 is off — the stock KSampler, unchanged. Mirrors
+ *  compile_image.STAGE_COUNTS. */
+export const PRESTAGE_STAGE_COUNTS = [1, 2, 3];
+export const PRESTAGE_HANDOFF = 16.67;
+export const PRESTAGE_HANDOFF3 = 83.33;
+export const PRESTAGE_STAGE1_SCALE = 1.0;
+export const PRESTAGE_MIN_STAGE1_SCALE = 0.25;
+export const PRESTAGE_STAGE_HINT = {
+  1: "One pass on the chosen checkpoint. What this has always done.",
+  2: "Base model, then Turbo. The base gives variation between seeds that a "
+   + "distillation largely does not; Turbo finishes cheaply.",
+  3: "Base, Turbo, then base again. Stage 3 reuses stage 1's settings.",
+};
+
 export const PRESTAGE_ADAPTER_MODES = ["bypass", "bake"];
 export const PRESTAGE_ADAPTER_LABEL = { bypass: "bypass", bake: "bake" };
 export const PRESTAGE_ADAPTER_HINT = {
@@ -1068,6 +1083,9 @@ export function emptyPreStage() {
     // RF-inversion style transfer. Off, and off adds nothing to the graph.
     // One or two references; with two, `primary` says which one leads.
     style: { on: false, refs: [], fit: "crop", strength: 1.0, primary: 1 },
+    // The multi-stage sampler. count 1 is off, and off emits the same single
+    // KSampler it always did.
+    stages: { count: 1, handoff: 16.67, handoff3: 83.33, stage1_scale: 1.0 },
     // Ideogram's speed axis: which official preset shapes the schedule.
     quality: "default",
     // The H3 branch: its own settings, and its generation in the Creator's
@@ -1173,6 +1191,25 @@ export function parsePreStage(raw) {
       // paths; the compile refuses the pair. A hand-edited blob reaches here, and
       // the one that named files under its own key wins.
       if (state.style.on && state.refs.length) state.refs = [];
+
+      const stages = state.stages && typeof state.stages === "object" ? state.stages : {};
+      const count = PRESTAGE_STAGE_COUNTS.includes(Number(stages.count)) ? Number(stages.count) : 1;
+      state.stages = {
+        count,
+        handoff: clamp(stages.handoff, 0, 100, PRESTAGE_HANDOFF),
+        handoff3: clamp(stages.handoff3, 0, 100, PRESTAGE_HANDOFF3),
+        stage1_scale: clamp(stages.stage1_scale, PRESTAGE_MIN_STAGE1_SCALE, 1,
+                            PRESTAGE_STAGE1_SCALE),
+      };
+      // The third crossover cannot precede the second — the pack refuses it, so
+      // a blob that says otherwise is corrected rather than carried to a failure.
+      if (state.stages.handoff3 < state.stages.handoff) {
+        state.stages.handoff3 = state.stages.handoff;
+      }
+      // A multi-stage run has no denoise and needs two checkpoints, so it cannot
+      // restyle an init image and cannot run on the quantized loader. Both are
+      // refused by the compile; a hand-edited blob is settled here instead.
+      if (count > 1 && (state.init || state.loader === "svdquant")) state.stages.count = 1;
 
       const board = state.moodboard && typeof state.moodboard === "object" ? state.moodboard : {};
       state.moodboard = {

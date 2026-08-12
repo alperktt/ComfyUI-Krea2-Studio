@@ -245,7 +245,8 @@ export class PreStageEditor {
       ...this.widgetIO(),
       set: (name, value) => { this.widgetIO().set(name, value); this.render(); },
       perSegment: false,
-      turbo: state.arch === "krea2" ? [...this.renderLoader(), ...this.renderTurbo()] : [],
+      turbo: state.arch === "krea2"
+        ? [...this.renderLoader(), ...this.renderStages(), ...this.renderTurbo()] : [],
       trailing: [this.renderWeightsPill()],
     }));
   }
@@ -961,6 +962,90 @@ export class PreStageEditor {
       }, [el("span", { text: S.PRESTAGE_LOADER_LABEL[loader] })])))];
   }
 
+  // ---- stages (Krea 2) -------------------------------------------------------
+
+  /** How many sampling passes: one, or base-then-Turbo, or base-Turbo-base.
+   *
+   *  Sits between the loader and the turbo pills because that is the order they
+   *  act in: the loader picks the file, this picks how many passes run over it,
+   *  and turbo then means "stage 2's step budget" rather than "swap the
+   *  checkpoint" — which is why choosing more than one stage switches the turbo
+   *  pill off and puts the base row back. A row already rewritten to 8 steps at
+   *  cfg 1 is the wrong row for stage 1. */
+  renderStages() {
+    const state = this.state;
+    const stages = state.stages;
+    const blocked = !!state.init || state.loader === "svdquant";
+    const pills = [];
+
+    pills.push(el("div", {
+      class: "mmc-pill mmc-turbo-seg",
+      title: blocked
+        ? (state.init
+            ? "A multi-stage run always starts from noise — it has no denoise control — "
+              + "so it cannot restyle an init image."
+            : "A multi-stage run needs both the base and the Turbo checkpoint, and the "
+              + "SVDQuant loader loads one quantized file.")
+        : undefined,
+    }, S.PRESTAGE_STAGE_COUNTS.map((count) => el("button", {
+      class: "mmc-turbo-opt",
+      "aria-pressed": stages.count === count,
+      disabled: (blocked && count > 1) || undefined,
+      title: S.PRESTAGE_STAGE_HINT[count],
+      onclick: () => {
+        if (stages.count === count) return;
+        // Leaving one stage hands the sampler row to stage 1, so the turbo pill
+        // has to give it back before it is read.
+        if (count > 1 && state.turbo.on) this.releaseTurbo();
+        stages.count = count;
+        this.commit();
+      },
+    }, [
+      el("span", { text: count === 1 ? "1 pass" : `${count} stages` }),
+    ]))));
+
+    if (stages.count > 1) {
+      pills.push(stepperPill({
+        value: stages.handoff, min: 0, max: 100, step: 1, width: "60px",
+        format: (n) => `${n.toFixed(2)}%`,
+        title: "Where stage 1 hands off to stage 2. Lower means less of the base model — "
+             + "faster, and less variation between seeds.",
+        onChange: (value) => {
+          stages.handoff = value;
+          if (stages.handoff3 < value) stages.handoff3 = value;
+          this.commit();
+        },
+      }));
+      if (stages.count === 3) {
+        pills.push(stepperPill({
+          value: stages.handoff3, min: stages.handoff, max: 100, step: 1, width: "60px",
+          format: (n) => `${n.toFixed(2)}%`,
+          title: "Where stage 2 hands back to the base model for the finish. Must be at or "
+               + "after the first handoff.",
+          onChange: (value) => { stages.handoff3 = value; this.commit(); },
+        }));
+      }
+    }
+
+    return pills;
+  }
+
+  /** Put the sampler row back the way the turbo pill found it, and switch off.
+   *
+   *  Factored out of `renderTurbo`'s toggle because the stages pill needs the
+   *  same thing: two copies of a save/restore is how one of them stops matching
+   *  what the other saved. */
+  releaseTurbo() {
+    const io = this.widgetIO();
+    const saved = this.state.turbo.saved ?? S.PRESTAGE_KREA_RAW;
+    io.set("steps", saved.steps);
+    io.set("cfg", saved.cfg);
+    io.set("sampler_name", saved.sampler_name);
+    io.set("scheduler", saved.scheduler);
+    this.state.turbo.on = false;
+    this.state.turbo.saved = null;
+  }
+
   // ---- turbo (Krea 2) --------------------------------------------------------
 
   /** The turbo pill, under the H3 contract: save the row once per throw, put it
@@ -983,13 +1068,7 @@ export class PreStageEditor {
             + "instead and the row drops to the picked quality at cfg 1.",
         onclick: () => {
           if (turbo.on) {
-            const saved = turbo.saved ?? S.PRESTAGE_KREA_RAW;
-            io.set("steps", saved.steps);
-            io.set("cfg", saved.cfg);
-            io.set("sampler_name", saved.sampler_name);
-            io.set("scheduler", saved.scheduler);
-            turbo.on = false;
-            turbo.saved = null;
+            this.releaseTurbo();
           } else {
             turbo.saved = {
               steps: Number(io.value("steps", S.PRESTAGE_KREA_RAW.steps)),

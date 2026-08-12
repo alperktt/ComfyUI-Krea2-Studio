@@ -159,6 +159,22 @@ DEFAULT_STYLE_FIT = "crop"
 DEFAULT_STYLE_STRENGTH = 1.0
 MAX_STYLE_STRENGTH = 2.0
 
+# Krea-2-Two-Stage-Sampler: run some steps on the undistilled base for real
+# variation between seeds, then finish on the distillation. 1 is off — the stock
+# `KSampler`, unchanged.
+STAGE_COUNTS = (1, 2, 3)
+DEFAULT_STAGES = 1
+# The pack's own handoff defaults. Three stages is base -> Turbo -> base, and the
+# second crossover has to be at or after the first.
+DEFAULT_HANDOFF = 16.67
+DEFAULT_HANDOFF3 = 83.33
+
+# How much smaller stage 1 samples than the final canvas. 1.0 is off — both
+# stages at the target size. Below it, stage 1 runs on a smaller latent and
+# stage 2 finishes at the target, which is the pack's dual-resolution route.
+DEFAULT_STAGE1_SCALE = 1.0
+MIN_STAGE1_SCALE = 0.25
+
 # Ideogram's official preset table, verbatim from the shipped ComfyUI template
 # (V4_QUALITY_48 / V4_DEFAULT_20 / V4_TURBO_12). mu and std shape the
 # resolution-shifted schedule, so they belong to the preset, not to the user.
@@ -209,6 +225,10 @@ class ImagePayload:
     # RF-inversion style transfer, or None. `{refs, fit, strength, primary}` —
     # see `_parse_style`.
     style: dict = None
+    # A multi-stage sampler run, or None when a single `KSampler` is enough.
+    # `{count, handoff, handoff3, width, height}` — the two sizes are stage 1's
+    # canvas; `ImagePayload.width/height` stays the final one.
+    stages: dict = None
     # Set when an edit's canvas is past the size its weights work best at. Not a
     # refusal and not a clamp — the render is fine, just slower and looser than
     # the same edit at 1 MP, and the UI says so.
@@ -462,6 +482,41 @@ def _parse_style(raw):
     return {"refs": refs, "fit": fit, "strength": strength, "primary": primary}
 
 
+def _parse_stages(raw):
+    """The multi-stage block, validated. `None` when one stage is enough.
+
+    Returns the *count and crossovers* only; stage 1's canvas is resolved later,
+    once the final one is known.
+    """
+    if not isinstance(raw, dict):
+        return None
+    count = raw.get("count", DEFAULT_STAGES)
+    try:
+        count = int(count)
+    except (TypeError, ValueError):
+        raise CompileError("the stage count must be a whole number")
+    if count not in STAGE_COUNTS:
+        raise CompileError(
+            f"unknown stage count {count} — it is one of {', '.join(map(str, STAGE_COUNTS))}")
+    if count == 1:
+        return None
+
+    handoff = _number(raw.get("handoff"), "the handoff percentage", 0.0, 100.0,
+                      DEFAULT_HANDOFF)
+    handoff3 = _number(raw.get("handoff3"), "the third-stage handoff percentage",
+                       0.0, 100.0, DEFAULT_HANDOFF3)
+    if count == 3 and handoff3 < handoff:
+        # The pack says so in its own tooltip, and a schedule that crosses back
+        # before it crossed forward is not a thing it can run.
+        raise CompileError(
+            "the third stage has to start at or after the second — "
+            f"{handoff3:g}% is before {handoff:g}%")
+
+    scale = _number(raw.get("stage1_scale"), "the first-stage scale",
+                    MIN_STAGE1_SCALE, 1.0, DEFAULT_STAGE1_SCALE)
+    return {"count": count, "handoff": handoff, "handoff3": handoff3, "scale": scale}
+
+
 def compile_prestage(data, image_size_lookup=None, moodboard_lookup=None):
     """`prestage_data` dict -> `ImagePayload`.
 
@@ -566,6 +621,31 @@ def compile_prestage(data, image_size_lookup=None, moodboard_lookup=None):
                 "two different reference paths. Clear the style references, or switch "
                 "the style-transfer pill off")
 
+    stages = _parse_stages(data.get("stages"))
+    if stages is not None:
+        if arch != "krea2":
+            raise CompileError(
+                "the multi-stage sampler is Krea 2's — it runs the base checkpoint "
+                "into the Turbo one. Switch the model pill to Krea 2, or the stages "
+                "pill back to one")
+        if loader == "svdquant":
+            # Two MODEL inputs, and the quantized loader names one file. Mixing a
+            # 4-bit stage into an unquantized one across the handoff is not
+            # something the pack describes, so it is refused rather than guessed.
+            raise CompileError(
+                "a multi-stage run needs both the base and the Turbo checkpoint, and "
+                "the SVDQuant loader loads one quantized file. Set the loader pill "
+                "back to standard, or the stages pill back to one")
+        if init is not None:
+            # The node has no `denoise` input: every stage starts from the latent
+            # it is given, at full strength. So there is no way for it to honour
+            # an init image's strength, and pretending otherwise would silently
+            # throw the init away.
+            raise CompileError(
+                "a multi-stage run always starts from noise — it has no denoise "
+                "control — so it cannot restyle an init image. Remove the init "
+                "image, or set the stages pill back to one")
+
     short_edge = data.get("short_edge", DEFAULT_SHORT_EDGE)
     ratio_clamped = False
     # An edit's canvas follows its source for the same reason an img2img render's
@@ -592,11 +672,32 @@ def compile_prestage(data, image_size_lookup=None, moodboard_lookup=None):
                    else EDIT_SWEET_SPOT_PIXELS)
         edit_oversize = width * height > ceiling
 
+    # Stage 1's canvas, once the final one is known. Same /16 grid, because it is
+    # a latent the DiT samples like any other.
+    if stages is not None:
+        if stages["scale"] < 1.0:
+            stages["width"] = _snap(width * stages["scale"])
+            stages["height"] = _snap(height * stages["scale"])
+        else:
+            # 0/0 is the node's own "do not resize", and passing the target twice
+            # would make it upscale from and to the same size.
+            stages["width"] = stages["height"] = 0
+
     checkpoint_field = "model"
     mu = std = None
     if arch == "krea2":
         turbo = data.get("turbo") or {}
-        if loader == "svdquant":
+        if stages is not None:
+            # Stage 2 *is* the Turbo file, so the turbo pill stops choosing a
+            # checkpoint here and keeps choosing that stage's step budget — which
+            # travels on the block, because the emitter has no other way to know
+            # which quality was picked.
+            checkpoint_field = "model"
+            quality = turbo.get("quality", DEFAULT_TURBO_QUALITY)
+            if quality not in TURBO_STEPS:
+                raise CompileError(f"unknown turbo quality {quality!r}")
+            stages["quality"] = quality
+        elif loader == "svdquant":
             # The quantized file is its own, so the turbo pill stops choosing a
             # checkpoint here — but it keeps choosing the schedule, because a
             # checkpoint quantized from Turbo still wants Turbo's steps and cfg
@@ -615,6 +716,6 @@ def compile_prestage(data, image_size_lookup=None, moodboard_lookup=None):
         arch=arch, prompt=prompt, width=width, height=height,
         checkpoint_field=checkpoint_field, loader=loader,
         loras=loras, refs=refs, init=init, negative_prompt=negative_prompt,
-        edit=edit, edit_oversize=edit_oversize, style=style,
+        edit=edit, edit_oversize=edit_oversize, style=style, stages=stages,
         mu=mu, std=std, ratio_clamped=ratio_clamped,
     )
