@@ -376,6 +376,7 @@ export const ko = {
  "Input folder — unavailable while a start/end frame is set": "입력 폴더 — 시작/끝 프레임이 설정된 동안은 사용할 수 없습니다",
  "Input folder": "입력 폴더",
  "the refiner failed ({status})": "리파이너가 실패했습니다 ({status})",
+ "the refine was lost — the server may have restarted": "리라이트가 사라졌습니다 — 서버가 재시작되었을 수 있습니다",
  "follows what is attached: frames pick I2VA / L2VA / FL2VA, @ references pick REF2VA, a bare prompt picks T2VA.": "첨부된 것을 따릅니다: 프레임은 I2VA / L2VA / FL2VA를, @ 레퍼런스는 REF2VA를, 프롬프트만 있으면 T2VA를 선택합니다.",
  "text only — the video is described from nothing.": "텍스트 전용 — 비디오를 아무것도 없는 상태에서 묘사합니다.",
  "first frame — the rewrite opens on the attached image and develops forward.": "첫 프레임 — 리라이트가 첨부된 이미지에서 시작해 앞으로 전개됩니다.",

@@ -376,6 +376,7 @@ export const ja = {
  "Input folder — unavailable while a start/end frame is set": "入力フォルダー — 開始/終了フレームの設定中は利用できません",
  "Input folder": "入力フォルダー",
  "the refiner failed ({status})": "リファイナーが失敗しました ({status})",
+ "the refine was lost — the server may have restarted": "リライトが失われました — サーバーが再起動した可能性があります",
  "follows what is attached: frames pick I2VA / L2VA / FL2VA, @ references pick REF2VA, a bare prompt picks T2VA.": "添付に従います: フレームは I2VA / L2VA / FL2VA、@ リファレンスは REF2VA、プロンプトのみなら T2VA になります。",
  "text only — the video is described from nothing.": "テキストのみ — 動画をゼロから記述します。",
  "first frame — the rewrite opens on the attached image and develops forward.": "先頭フレーム — リライトは添付画像から始まり、前へ展開します。",

@@ -377,6 +377,7 @@ export const zh = {
  "Input folder — unavailable while a start/end frame is set": "输入文件夹——设置了起始/结束帧时不可用",
  "Input folder": "输入文件夹",
  "the refiner failed ({status})": "润色器失败（{status}）",
+ "the refine was lost — the server may have restarted": "润色结果已丢失——服务器可能已重启",
  "follows what is attached: frames pick I2VA / L2VA / FL2VA, @ references pick REF2VA, a bare prompt picks T2VA.": "跟随附加内容：帧选 I2VA / L2VA / FL2VA，@ 参考选 REF2VA，纯提示词选 T2VA。",
  "text only — the video is described from nothing.": "纯文本——视频从零开始描述。",
  "first frame — the rewrite opens on the attached image and develops forward.": "首帧——改写以附加图像开场并向前发展。",

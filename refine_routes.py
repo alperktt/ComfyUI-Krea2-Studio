@@ -17,6 +17,7 @@ time the node runs, the rewrite is an ordinary field in `creator_data`.
 
 import asyncio
 import os
+import uuid
 
 from aiohttp import web
 
@@ -738,14 +739,31 @@ async def refine_skills(request):
     return web.json_response({"skills": refine_skill.list_skills()})
 
 
+# Refines in flight and finished ones waiting to be picked up, newest last.
+#
+# A whole-timeline rewrite runs for many minutes with nothing on the wire, and
+# no browser holds a silent HTTP request open that long — Chromium drops one
+# flat at five minutes, a proxy in between usually sooner. So the POST answers
+# immediately with a job id, the result waits here, and the websocket carries
+# the "done" nudge. A handful of slots is plenty: one press is one job, and a
+# result nobody collects — a closed tab — is evicted by the presses after it.
+_jobs = {}
+_JOBS_KEPT = 8
+
+
 @PromptServer.instance.routes.post("/minimax_creator/refine")
 async def refine_prompt(request):
-    """Rewrite one prompt, one card, or a whole timeline.
+    """Start rewriting one prompt, one card, or a whole timeline.
 
-    Errors come back as 400 with a message rather than as a stack trace: every
-    one of them is something the user can act on — no model is chosen, the
-    chosen file is not a Qwen3-VL, the blob does not compile yet — and the panel
-    shows the message where the button was.
+    Replies `{"job": id}` at once; the work runs on a thread and its end is
+    announced as the `minimax_creator.refine.done` websocket event, after which
+    the result is collected from the job route below. The event is only the
+    nudge — the reply can be big, and every listening tab hears it, so the tab
+    that owns the job is the one that fetches.
+
+    What is knowable *now* still fails now: bad JSON and a missing model come
+    back as 400 on this request, and the panel shows the message where the
+    button was. Errors from the work itself take the same shape, one GET later.
     """
     try:
         body = await request.json()
@@ -758,13 +776,50 @@ async def refine_prompt(request):
             "models/text_encoders and pick it in the refiner's settings."
         }, status=400)
 
+    collected = [key for key, entry in _jobs.items() if entry["done"]]
+    while len(_jobs) >= _JOBS_KEPT and collected:
+        del _jobs[collected.pop(0)]
+
+    job = uuid.uuid4().hex
+    entry = _jobs[job] = {"done": False, "result": None, "error": None,
+                          "status": 200, "task": None}
     loop = asyncio.get_running_loop()
-    try:
-        # Decoding images and waiting on a local model are both long enough that
-        # doing them on the event loop would stall the prompt queue and the
-        # websocket for the whole call.
-        return web.json_response(await loop.run_in_executor(None, _run, body))
-    except (refine.RefineError, compiler.CompileError, media.MediaError) as exc:
-        return web.json_response({"error": str(exc)}, status=400)
-    except Exception as exc:  # noqa: BLE001
-        return web.json_response({"error": f"{type(exc).__name__}: {exc}"}, status=500)
+
+    async def _work():
+        try:
+            # Decoding images and waiting on a local model are both long enough
+            # that doing them on the event loop would stall the prompt queue
+            # and the websocket for the whole call.
+            entry["result"] = await loop.run_in_executor(None, _run, body)
+        except (refine.RefineError, compiler.CompileError, media.MediaError) as exc:
+            entry.update(error=str(exc), status=400)
+        except Exception as exc:  # noqa: BLE001
+            entry.update(error=f"{type(exc).__name__}: {exc}", status=500)
+        entry["done"] = True
+        PromptServer.instance.send_sync("minimax_creator.refine.done", {"job": job})
+
+    # Held on the entry: a bare create_task is garbage-collectable mid-flight.
+    entry["task"] = asyncio.create_task(_work())
+    return web.json_response({"job": job})
+
+
+@PromptServer.instance.routes.get("/minimax_creator/refine/job/{job}")
+async def refine_job(request):
+    """One refine job's outcome, once the done event (or a poll) asks for it.
+
+    `{"done": false}` while the model is still writing; the result or the
+    error, with the status the old one-request route would have used, once it
+    is not. 404 is a job this server never started or has already evicted —
+    seen after a restart, and worth its own words because the generation is
+    gone with the process.
+    """
+    entry = _jobs.get(request.match_info["job"])
+    if entry is None:
+        return web.json_response(
+            {"error": "unknown refine job — the server may have restarted"}, status=404)
+    if not entry["done"]:
+        return web.json_response({"done": False})
+    if entry["error"] is not None:
+        return web.json_response({"done": True, "error": entry["error"]},
+                                 status=entry["status"])
+    return web.json_response({"done": True, "result": entry["result"]})
