@@ -1,0 +1,5 @@
+tests/
+docs/
+PLAN.md
+__pycache__/
+.github/
