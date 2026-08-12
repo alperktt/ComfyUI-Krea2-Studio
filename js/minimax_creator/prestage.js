@@ -238,7 +238,7 @@ export class PreStageEditor {
     ];
     this.assetsHost.replaceChildren(...(chips.length ? [el("div", { class: "mmc-assets" }, chips)] : []));
     this.loraHost.replaceChildren(...(state.loras.length ? [this.renderLoras()] : []));
-    this.pillsHost.replaceChildren(this.renderPills());
+    this.pillsHost.replaceChildren(...this.renderPills());
     this.noticeHost.replaceChildren(
       ...(this.notice ? [el("div", { class: "mmc-warn", text: this.notice })] : []),
       ...this.standingNotes());
@@ -258,7 +258,11 @@ export class PreStageEditor {
       class: "mmc-tool", title, onclick,
     }, [el("span", { class: "mmc-tool-icon" }, [icon(iconName)]), el("span", { text: label })]);
 
-    return el("div", { class: "mmc-rail" }, [
+    // One cluster, in a group, because `.mmc-rail` splits its children with
+    // space-between — which is right for the Creator, where the machine's tools
+    // sit at the far edge, and wrong here, where all four do the same kind of
+    // thing and were being pushed to opposite corners of the node for no reason.
+    return el("div", { class: "mmc-rail" }, [el("div", { class: "mmc-rail-group" }, [
       tool(t("Init image"), "frameIn",
            t("Start from an image instead of noise — img2img. The strength pill says how much of it survives."),
            () => this.setInit(false)),
@@ -274,7 +278,7 @@ export class PreStageEditor {
       tool(t("Add LoRA"), "effect",
            t("Manage the LoRAs patched onto the image model. Krea LoRAs train on RAW and apply on Turbo too."),
            () => this.manageLoras()),
-    ]);
+    ])]);
   }
 
   renderInitChip() {
@@ -1035,29 +1039,55 @@ export class PreStageEditor {
 
     const archPill = this.archPill?.() ?? el("span");
 
+    // A typed size names the ratio itself, so the aspect pill has nothing left to
+    // decide — same reason it greys out for an init image, which also answers the
+    // question before it is asked. The glyph still draws the shape in force.
+    const sized = state.size !== null;
     const aspectPill = el("button", {
       class: "mmc-pill",
-      disabled: geometry.fromImage || undefined,
-      title: geometry.fromImage
-        ? t("The aspect follows the init image — the resolution pill still sets the scale.")
-        : t("Aspect Ratio"),
+      disabled: geometry.fromImage || sized || undefined,
+      title: sized
+        ? t("The width and height are set directly, so they name the ratio too.")
+        : geometry.fromImage
+          ? t("The aspect follows the init image — the resolution pill still sets the scale.")
+          : t("Aspect Ratio"),
       onclick: (event) => this.openAspect(event.currentTarget),
-    }, geometry.fromImage
-      ? [aspectGlyph(geometry.ratio, PILL_GLYPH), el("span", { class: "mmc-pill-sub", text: t("from image") })]
-      : [aspectGlyph(geometry.ratio, PILL_GLYPH), el("span", { text: state.aspect })]);
+    }, sized
+      ? [aspectGlyph(geometry.ratio, PILL_GLYPH), el("span", { class: "mmc-pill-sub", text: t("custom") })]
+      : geometry.fromImage
+        ? [aspectGlyph(geometry.ratio, PILL_GLYPH), el("span", { class: "mmc-pill-sub", text: t("from image") })]
+        : [aspectGlyph(geometry.ratio, PILL_GLYPH), el("span", { text: state.aspect })]);
 
     const resPill = el("button", {
       class: "mmc-pill",
-      title: t("Short edge. Both models are comfortable up to a 2048×2048 area."),
+      title: sized
+        ? t("Width and height, set directly. Any shape, snapped to the model's grid.")
+        : t("Short edge. Both models are comfortable up to a 2048×2048 area."),
       onclick: (event) => this.openResolution(event.currentTarget),
     }, [
       icon("res", 16),
-      el("span", { text: `${state.short_edge}p` }),
-      el("span", { class: "mmc-pill-sub", text: `${geometry.width} × ${geometry.height}` }),
+      // No "1024p" on the custom route: there is no single edge the number would
+      // be naming, so the size carries the pill on its own.
+      ...(sized ? [] : [el("span", { text: `${state.short_edge}p` })]),
+      el("span", {
+        class: sized ? undefined : "mmc-pill-sub",
+        text: `${geometry.width} × ${geometry.height}`,
+      }),
     ]);
 
-    const pills = [archPill, aspectPill, resPill, this.moodboardPill()];
-    if (state.arch === "krea2") pills.push(this.editPill(), this.stylePill(), this.positionPill());
+    // Two rows, not one line of seven. What the render *is* — which model, what
+    // shape, how big — reads as a sentence and belongs together; what has been
+    // *added to* it is a different question, and each of those pills opens a
+    // panel rather than cycling a value. On one row they had to be read one at a
+    // time to find out which kind each was, and past four they wrapped anyway,
+    // at whatever point the width happened to run out rather than at the seam.
+    const pills = [archPill, aspectPill, resPill];
+    // Ideogram has only the moodboard of the four, and one pill is not a row —
+    // it rides on the first one rather than sitting alone under it.
+    const ingredients = state.arch === "krea2"
+      ? [this.moodboardPill(), this.editPill(), this.stylePill(), this.positionPill()]
+      : [];
+    if (state.arch !== "krea2") pills.push(this.moodboardPill());
 
     if (state.arch === "ideogram4") {
       // Ideogram's speed axis. The preset owns the schedule shape as well as
@@ -1088,7 +1118,10 @@ export class PreStageEditor {
       }));
     }
 
-    return el("div", { class: "mmc-pills" }, pills);
+    return [
+      el("div", { class: "mmc-pills" }, pills),
+      ...(ingredients.length ? [el("div", { class: "mmc-pills" }, ingredients)] : []),
+    ];
   }
 
   // ---- loader (Krea 2) -------------------------------------------------------
@@ -1374,9 +1407,141 @@ export class PreStageEditor {
     const close = dismissable(pop);
   }
 
+  /** The slider, or two numbers — whichever route the panel is on.
+   *
+   *  Two routes because the slider cannot say every shape: it offers ratios from
+   *  a list and clamps past 1:3, so a deliberate 1000x4000 came out as 1:3 with
+   *  nothing to say it had been overruled. The custom route drops the ratio clamp
+   *  and keeps the rest — the /16 grid, the per-axis ceiling, the area cap — and
+   *  shows where a typed number actually lands rather than correcting it later. */
   openResolution(anchor) {
-    // The ceiling is the model's own until DyPE is on, which is the whole point
-    // of DyPE — it extrapolates the position encoding rather than letting it
+    const pop = el("div", { class: "mmc-pop mmc-slider" });
+    const body = el("div");
+    const render = () => body.replaceChildren(this.state.size
+      ? this.customSizeBody(() => render())
+      : this.edgeSliderBody(() => render()));
+    render();
+    pop.append(body);
+    document.body.appendChild(pop);
+    placeNear(pop, anchor);
+    dismissable(pop);
+  }
+
+  /** The route switch, shown at the bottom of either body. */
+  sizeRouteRow(rerender) {
+    const custom = this.state.size !== null;
+    return el("div", { class: "mmc-weight-row" }, [
+      el("span", { class: "mmc-weight-name", text: t("Route") }),
+      el("button", {
+        class: "mmc-weight-file",
+        title: custom
+          ? t("Back to a ratio and a short edge. The typed size is dropped.")
+          : t("Type a width and a height instead. Lets you reach shapes the ratio "
+            + "list does not offer, past the 1:3 the slider clamps to."),
+        text: custom ? t("custom") : t("ratio"),
+        onclick: () => {
+          if (custom) {
+            this.state.size = null;
+          } else {
+            // Seeded from what is on screen, so switching route does not change
+            // the render — it only changes which control describes it.
+            const geometry = S.resolvedPreStage(this.state,
+              this.state.init ? this.sizes.get(this.state.init.filename) : null);
+            this.state.size = { width: geometry.width, height: geometry.height };
+          }
+          this.commit();
+          rerender();
+        },
+      }),
+    ]);
+  }
+
+  /** Width and height, typed.
+   *
+   *  Typed, not stepped. A stepper was the obvious reuse and the wrong control:
+   *  from 1024 to 4000 at the /16 step is 186 clicks, and reaching an unusual
+   *  size is the entire reason this route exists. So the number is a field, with
+   *  the arrows kept beside it for nudging. */
+  customSizeBody(rerender) {
+    const maxEdge = S.preStageMaxEdge(this.state);
+    const rows = [];
+    for (const axis of ["width", "height"]) {
+      const commitAxis = (raw) => {
+        const number = Number(raw);
+        if (!Number.isFinite(number) || number <= 0) return;
+        this.state.size[axis] = Math.round(
+          Math.min(maxEdge, Math.max(S.PRESTAGE_MIN_EDGE, number)));
+        this.commit();
+        rerender();
+      };
+      const field = el("input", {
+        class: "mmc-shelf-input",
+        type: "text",
+        inputmode: "numeric",
+        value: String(this.state.size[axis]),
+        style: { width: "72px" },
+        title: t("Snaps to {grid} — the grid the model patchifies on — and stops at {max}.",
+                 { grid: S.PRESTAGE_CANVAS_MULTIPLE, max: maxEdge }),
+        // The graph canvas reads a pointerdown as the start of a node drag and
+        // would carry the node off under the caret, the same reason the slider
+        // stops its own.
+        onpointerdown: (event) => event.stopPropagation(),
+        // Not on every keystroke: re-rendering mid-typing would replace the
+        // input and take the caret with it, so "10" would never become "1000".
+        onchange: (event) => commitAxis(event.currentTarget.value),
+        onkeydown: (event) => {
+          if (event.key === "Enter") commitAxis(event.currentTarget.value);
+          // Arrow keys nudge by the grid, which is what the ± buttons do.
+          const delta = event.key === "ArrowUp" ? S.PRESTAGE_CANVAS_MULTIPLE
+            : event.key === "ArrowDown" ? -S.PRESTAGE_CANVAS_MULTIPLE : 0;
+          if (delta) {
+            event.preventDefault();
+            commitAxis(this.state.size[axis] + delta);
+          }
+          event.stopPropagation();
+        },
+      });
+      const nudge = (label, delta) => el("button", {
+        class: "mmc-step", text: label,
+        onclick: () => commitAxis(this.state.size[axis] + delta),
+      });
+      rows.push(el("div", { class: "mmc-weight-row" }, [
+        el("span", { class: "mmc-weight-name", text: t(axis === "width" ? "Width" : "Height") }),
+        el("div", { class: "mmc-pill mmc-pill-group" }, [
+          nudge("−", -S.PRESTAGE_CANVAS_MULTIPLE),
+          field,
+          nudge("+", S.PRESTAGE_CANVAS_MULTIPLE),
+        ]),
+      ]));
+    }
+    // Same two-part readout the slider uses — the resolved size, and a dimmed
+    // note beside it. Resolved rather than typed: the snap and the ceiling both
+    // apply, so this is where a number that will move says so before the render.
+    const geometry = S.resolvedPreStageSize(this.state);
+    const megapixels = (geometry.width * geometry.height) / 1e6;
+    rows.push(el("div", { class: "mmc-slider-read" }, [
+      el("span", { class: "mmc-edge", text: `${geometry.width} × ${geometry.height}` }),
+      el("span", {
+        text: geometry.overArea
+          ? t("{mp} MP — too much", { mp: megapixels.toFixed(1) })
+          : t("{mp} MP", { mp: megapixels.toFixed(1) }),
+      }),
+    ]));
+    rows.push(el("div", {
+      class: "mmc-native",
+      text: geometry.overArea
+        ? t("Past the area this render can reach. Lower one axis, or pick DyPE or SEGA "
+          + "on the position pill.")
+        : t("Any shape, snapped to {grid}. The ratio list's 1:3 limit does not apply here.",
+            { grid: S.PRESTAGE_CANVAS_MULTIPLE }),
+    }));
+    rows.push(this.sizeRouteRow(rerender));
+    return el("div", {}, rows);
+  }
+
+  edgeSliderBody(rerender) {
+    // The ceiling is the model's own until a position patch is on, which is the
+    // whole point of them — they extrapolate the encoding rather than letting it
     // wrap. The slider therefore reaches further while that pill is lit.
     const maxEdge = S.preStageMaxEdge(this.state);
     const body = edgeSlider({
@@ -1390,11 +1555,12 @@ export class PreStageEditor {
         return {
           size: `${geometry.width} × ${geometry.height}`,
           note: this.state.short_edge >= maxEdge
-            ? (this.state.dype.on
-                ? t("DyPE's {edge} ceiling — wide ratios trade the short edge down to hold "
-                  + "the area.", { edge: maxEdge })
+            ? (S.preStageExtrapolating(this.state)
+                ? t("The {edge} ceiling the position patch reaches — wide ratios trade the "
+                  + "short edge down to hold the area.", { edge: maxEdge })
                 : t("The models' {edge} ceiling — wide ratios trade the short edge down to hold "
-                  + "the area. Switch DyPE on to go past it.", { edge: maxEdge }))
+                  + "the area. Pick DyPE or SEGA on the position pill to go past it.",
+                    { edge: maxEdge }))
             : t("{speed} {edge} is the comfortable default for both models.", {
                 speed: t(this.state.short_edge < S.PRESTAGE_DEFAULT_EDGE ? "Faster, softer." : "Sharper, slower."),
                 edge: S.PRESTAGE_DEFAULT_EDGE,
@@ -1403,10 +1569,7 @@ export class PreStageEditor {
       },
       commit: () => this.commit(),
     });
-    const pop = el("div", { class: "mmc-pop mmc-slider" }, [body]);
-    document.body.appendChild(pop);
-    placeNear(pop, anchor);
-    dismissable(pop);
+    return el("div", {}, [body, this.sizeRouteRow(rerender)]);
   }
 }
 

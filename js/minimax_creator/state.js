@@ -1157,6 +1157,11 @@ export function emptyPreStage() {
     prompt: "",
     aspect: "16:9",
     short_edge: PRESTAGE_DEFAULT_EDGE,
+    // An explicit {width, height}, or null for the aspect + short-edge route.
+    // Null by default: the ratio route is the one that guides, and this is the
+    // escape hatch for a shape it cannot say — a 1:4 sheet, say, which the ratio
+    // clamp would quietly round to 1:3.
+    size: null,
     // {"filename", "denoise"} for img2img, or null.
     init: null,
     // [{handle, filename}] — style references, Krea 2 only.
@@ -1244,6 +1249,16 @@ export function parsePreStage(raw) {
         state.init.denoise = Number.isFinite(denoise)
           ? Math.min(1, Math.max(PRESTAGE_MIN_DENOISE, denoise)) : PRESTAGE_DEFAULT_DENOISE;
       }
+      // A size needs both numbers to mean anything, so a half-written one falls
+      // back to the ratio route rather than inventing the missing axis.
+      const size = state.size && typeof state.size === "object" ? state.size : null;
+      const sizeAxis = (value) => {
+        const number = Number(value);
+        return Number.isFinite(number) && number > 0 ? Math.round(number) : null;
+      };
+      state.size = size && sizeAxis(size.width) && sizeAxis(size.height)
+        ? { width: sizeAxis(size.width), height: sizeAxis(size.height) }
+        : null;
       if (!PRESTAGE_IDEOGRAM_QUALITIES.includes(state.quality)) state.quality = "default";
       if (!PRESTAGE_LOADERS.includes(state.loader)) state.loader = "standard";
       // Only Krea 2 has a quantized loader; a blob that arrives with the pill
@@ -1395,6 +1410,12 @@ export function serializePreStage(state) {
     prompt: state.prompt ?? "",
     aspect: state.aspect,
     short_edge: state.short_edge,
+    // Only when the custom route is in force. Absent means the aspect and short
+    // edge above are the answer, which is what every blob written before this
+    // control existed says — so an old workflow keeps resolving as it did.
+    ...(state.size
+      ? { size: { width: state.size.width, height: state.size.height } }
+      : {}),
     ...(state.init ? { init: { filename: state.init.filename, denoise: round2(state.init.denoise) } } : {}),
     ...(state.refs.length ? { refs: state.refs.map((r) => ({ handle: r.handle, filename: r.filename })) } : {}),
     loras: serializeLoras(state.loras),
@@ -1485,7 +1506,33 @@ export const preStageMaxEdge = (state) => (
 export const preStageMaxPixels = (state) => (
   preStageExtrapolating(state) ? PRESTAGE_POSITION_MAX_PIXELS : PRESTAGE_MAX_PIXELS);
 
+/** Snap to the /16 grid the DiT patchifies on. */
+export const snapPreStageEdge = (v) => Math.max(PRESTAGE_CANVAS_MULTIPLE,
+  Math.floor(v / PRESTAGE_CANVAS_MULTIPLE + 0.5) * PRESTAGE_CANVAS_MULTIPLE);
+
+/** What an explicit `state.size` resolves to, or null when there is none.
+ *
+ *  Mirrors `_parse_size`: the ratio clamp does not apply — saying both numbers is
+ *  the point of this route — but the /16 grid, the per-axis ceiling and the area
+ *  cap all still do. Clamped here rather than refused, because this runs on every
+ *  keystroke and the panel should show where a number will land, not an error. */
+export function resolvedPreStageSize(state) {
+  if (!state?.size) return null;
+  const maxEdge = preStageMaxEdge(state);
+  const axis = (v) => snapPreStageEdge(
+    Math.max(PRESTAGE_MIN_EDGE, Math.min(maxEdge, Math.round(v))));
+  const width = axis(state.size.width);
+  const height = axis(state.size.height);
+  return { width, height, ratio: width / height, fromImage: false,
+           overArea: width * height > preStageMaxPixels(state) };
+}
+
 export function resolvedPreStage(state, initSize = null) {
+  // An explicit size wins over the ratio route and over an init image's shape:
+  // two numbers typed by hand are a more specific instruction than either.
+  const custom = resolvedPreStageSize(state);
+  if (custom) return custom;
+
   let ratio = PRESTAGE_ASPECTS.find(([label]) => label === state.aspect)?.[1] ?? 16 / 9;
   let fromImage = false;
   if (state.init && initSize?.width && initSize?.height) {
@@ -1493,8 +1540,8 @@ export function resolvedPreStage(state, initSize = null) {
     fromImage = true;
   }
   ratio = Math.min(PRESTAGE_MAX_RATIO, Math.max(PRESTAGE_MIN_RATIO, ratio));
-  // DyPE is what lifts the ceiling: it extrapolates the position encoding rather
-  // than letting it wrap, which is the thing 2048 was protecting against.
+  // A position patch is what lifts the ceiling: it extrapolates the encoding
+  // rather than letting it wrap, which is the thing 2048 was protecting against.
   const maxEdge = preStageMaxEdge(state);
   const maxPixels = preStageMaxPixels(state);
   const edge = Math.max(PRESTAGE_MIN_EDGE, Math.min(maxEdge, Math.round(state.short_edge)));
@@ -1514,10 +1561,8 @@ export function resolvedPreStage(state, initSize = null) {
     width *= scale;
     height *= scale;
   }
-  const snap16 = (v) => Math.max(PRESTAGE_CANVAS_MULTIPLE,
-    Math.floor(v / PRESTAGE_CANVAS_MULTIPLE + 0.5) * PRESTAGE_CANVAS_MULTIPLE);
-  width = snap16(width);
-  height = snap16(height);
+  width = snapPreStageEdge(width);
+  height = snapPreStageEdge(height);
   while (width * height > maxPixels && Math.max(width, height) > PRESTAGE_CANVAS_MULTIPLE) {
     if (width >= height) width -= PRESTAGE_CANVAS_MULTIPLE;
     else height -= PRESTAGE_CANVAS_MULTIPLE;

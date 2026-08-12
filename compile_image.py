@@ -322,6 +322,43 @@ def _parse_adapters(raw):
     return raw
 
 
+def _parse_size(raw, max_edge, max_pixels):
+    """An explicit `{width, height}`, or None for the ratio + short-edge route.
+
+    This exists because the ratio route cannot say every shape. It offers a list
+    of presets and clamps anything past 1:3, which is a sensible guard for a
+    slider — a 1:4 sheet on an unpatched model wraps badly — but it means a
+    deliberate 1000x4000 is unreachable: the ratio is 0.25, below `MIN_RATIO`, so
+    it silently came out as 1:3. Typing both numbers is a more specific
+    instruction than picking from a list, so here the ratio clamp does not apply.
+
+    What still applies is what the model cannot do rather than what it does
+    badly: both axes snap to the /16 grid the DiT patchifies on, both stay inside
+    the per-axis ceiling, and the area cap holds. Past those this refuses instead
+    of quietly scaling, because a number that was typed deserves an answer rather
+    than a correction.
+    """
+    if not isinstance(raw, dict):
+        return None
+    out = []
+    for name in ("width", "height"):
+        if raw.get(name) is None:
+            raise CompileError(
+                f"a custom size needs both a width and a height — {name} is missing")
+        value = _number(raw.get(name), f"the custom {name}", MIN_SHORT_EDGE, max_edge, None)
+        # Snapped rather than refused: /16 is the grid, and the nearest cell is
+        # what every other route here would have produced anyway.
+        out.append(_snap(value))
+    width, height = out
+    if width * height > max_pixels:
+        raise CompileError(
+            f"{width}x{height} is {width * height / 1e6:.1f} MP, past the "
+            f"{max_pixels / 1e6:.1f} MP this render can reach"
+            + ("" if max_edge > MAX_SHORT_EDGE else
+               ". Switch the position pill to DyPE or SEGA to raise it"))
+    return width, height
+
+
 def clamp_ratio(ratio):
     if ratio < MIN_RATIO:
         return MIN_RATIO, True
@@ -737,22 +774,6 @@ def compile_prestage(data, image_size_lookup=None, moodboard_lookup=None):
                 f"{name} has no Ideogram 4 path — switch the model pill to Krea 2, "
                 f"or the {name} pill off")
 
-    short_edge = data.get("short_edge", DEFAULT_SHORT_EDGE)
-    ratio_clamped = False
-    # An edit's canvas follows its source for the same reason an img2img render's
-    # follows its init: the answer to "what shape should this be" is already on
-    # screen. The init wins if both are set, because it is the latent the sampler
-    # actually starts from.
-    adaptive = init["filename"] if init is not None else (edit["source"] if edit else None)
-    if adaptive is not None and image_size_lookup is not None:
-        source_w, source_h = image_size_lookup(adaptive)
-        ratio, ratio_clamped = clamp_ratio(source_w / source_h)
-    else:
-        aspect = data.get("aspect", DEFAULT_ASPECT)
-        try:
-            ratio = ASPECT_PRESETS.get(aspect) or float(aspect)
-        except (TypeError, ValueError):
-            raise CompileError(f"unknown aspect {aspect!r}")
     # A position-encoding patch is the reason the ceiling can move: it
     # extrapolates the encoding rather than letting it wrap, which is what the
     # 2048 cap was protecting against. Either patch does that — SEGA's base is
@@ -761,7 +782,38 @@ def compile_prestage(data, image_size_lookup=None, moodboard_lookup=None):
     extrapolating = dype is not None or sega is not None
     max_edge = POSITION_MAX_SHORT_EDGE if extrapolating else MAX_SHORT_EDGE
     max_pixels = POSITION_MAX_PIXELS if extrapolating else MAX_PIXELS
-    width, height = resolve_canvas(ratio, short_edge, max_edge, max_pixels)
+
+    short_edge = data.get("short_edge", DEFAULT_SHORT_EDGE)
+    ratio_clamped = False
+    custom = _parse_size(data.get("size"), max_edge, max_pixels)
+    # An explicit size wins over an init or edit source's shape. Both are answers
+    # to "what shape should this be", and two numbers typed by hand are the more
+    # specific one — the adaptive path exists to save the typing, not to overrule
+    # it. The UI says which is in force, so this is visible rather than inferred.
+    if custom is not None:
+        width, height = custom
+    else:
+        # An edit's canvas follows its source for the same reason an img2img
+        # render's follows its init: the answer to "what shape should this be" is
+        # already on screen. The init wins if both are set, because it is the
+        # latent the sampler actually starts from.
+        adaptive = init["filename"] if init is not None else (edit["source"] if edit else None)
+        if adaptive is not None and image_size_lookup is not None:
+            source_w, source_h = image_size_lookup(adaptive)
+            ratio, ratio_clamped = clamp_ratio(source_w / source_h)
+        else:
+            aspect = data.get("aspect", DEFAULT_ASPECT)
+            try:
+                ratio = ASPECT_PRESETS.get(aspect) or float(aspect)
+            except (TypeError, ValueError):
+                raise CompileError(f"unknown aspect {aspect!r}")
+            # Clamped here as well as inside `resolve_canvas`, only to keep the
+            # flag. Without this a numeric aspect past 1:3 was rounded with
+            # nothing set to say so — the presets are all inside the limit, so it
+            # only ever showed on a hand-written ratio, which is exactly where a
+            # silent correction is least welcome.
+            ratio, ratio_clamped = clamp_ratio(ratio)
+        width, height = resolve_canvas(ratio, short_edge, max_edge, max_pixels)
 
     # A two-reference edit has a lower ceiling than a single-reference one: the
     # release notes give ~1 MP for one image and ~1.5 MP for two people.

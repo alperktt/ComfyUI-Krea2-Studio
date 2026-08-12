@@ -406,6 +406,66 @@ expect_error("and it is refused on Ideogram",
              lambda: compile(arch="ideogram4", stages={"count": 2}), "Krea 2")
 
 
+# ---- an explicit width x height --------------------------------------------------
+#
+# The case this route exists for, verbatim: 1000x4000 on the ratio route came out
+# as 1:3, because 0.25 is below MIN_RATIO and `clamp_ratio` silently rounded it.
+
+check("a size past the ratio clamp is honoured, not rounded to 1:3",
+      (lambda p: (p.width, p.height))(compile(size={"width": 1000, "height": 4000},
+                                              sega={"on": True})),
+      (1008, 4000))
+clamped = compile(aspect="0.25", short_edge=1008, sega={"on": True})
+check("...where the ratio route clamps the same shape to 1:3",
+      round(clamped.height / clamped.width, 2), 3.0)
+check("and says it clamped, which is the only sign the ratio route gives",
+      clamped.ratio_clamped, True)
+# 1000 is not on the /16 grid the DiT patchifies on, so it lands on 1008. Snapped
+# rather than refused: the nearest cell is what every other route produces too.
+check("both axes snap to the grid", compile(size={"width": 1000, "height": 4000},
+                                           sega={"on": True}).width % ci.CANVAS_MULTIPLE, 0)
+check("a size wins over the aspect pill beside it",
+      (lambda p: (p.width, p.height))(compile(aspect="16:9", size={"width": 1024,
+                                                                  "height": 1024})),
+      (1024, 1024))
+check("and over an init image's shape, because typing is the more specific answer",
+      (lambda p: (p.width, p.height))(
+          ci.compile_prestage(blob(init={"filename": "wide.png"},
+                                   size={"width": 1024, "height": 1536}),
+                              image_size_lookup=lambda name: (1920, 1080),
+                              moodboard_lookup=fake_lookup)),
+      (1024, 1536))
+check("while the same blob without a size does follow the image",
+      (lambda p: round(p.width / p.height, 2))(
+          ci.compile_prestage(blob(init={"filename": "wide.png"}),
+                              image_size_lookup=lambda name: (1920, 1080),
+                              moodboard_lookup=fake_lookup)),
+      1.78)
+check("no size key still means the ratio route, exactly as before",
+      (lambda p: (p.width, p.height))(compile(aspect="1:1", short_edge=1024)),
+      (1024, 1024))
+
+expect_error("a size needs both numbers",
+             lambda: compile(size={"width": 1024}), "height is missing")
+expect_error("an axis past the ceiling is refused rather than quietly scaled",
+             lambda: compile(size={"width": 4096, "height": 1024}), "between")
+# The per-axis cap is the binding one on this route: with both axes inside
+# `max_edge`, the area cannot exceed `max_edge ** 2`, which is what `max_pixels`
+# is. So the area check in `_parse_size` is unreachable by construction — kept
+# because the two caps are separate arguments and a future pair need not agree.
+check("the area cap is implied by the per-axis one, not a second gate",
+      (ci.MAX_PIXELS, ci.POSITION_MAX_PIXELS),
+      (ci.MAX_SHORT_EDGE ** 2, ci.POSITION_MAX_SHORT_EDGE ** 2))
+check("the largest square the default route allows is exactly the cap",
+      compile(size={"width": 2048, "height": 2048}).width, ci.MAX_SHORT_EDGE)
+# And the ceiling the position pill raises applies to a typed size too, so the
+# refusal above turns into an accepted render once a patch is on.
+expect_error("4096 wide is refused with no position patch",
+             lambda: compile(size={"width": 4096, "height": 1024}), "between")
+check("and allowed with one",
+      compile(size={"width": 4096, "height": 1024}, dype={"on": True}).width, 4096)
+
+
 # ---- DyPE and SEGA --------------------------------------------------------------
 
 check("a default blob has neither", (base.dype, base.sega), (None, None))

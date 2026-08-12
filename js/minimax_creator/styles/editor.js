@@ -18,6 +18,10 @@ export const css = `
 .mmc-rail { display: flex; gap: 10px 24px; flex-wrap: wrap; justify-content: space-between; }
 .mmc-rail-group { display: flex; gap: 10px; flex-wrap: wrap; }
 .mmc-rail-group:last-child { margin-left: auto; }
+/* A single group is also the last one, and would be shoved to the right edge by
+   the rule above — which is how the PreStage's four tools ended up spread to the
+   corners. One cluster has nothing to be pushed away from. */
+.mmc-rail-group:only-child { margin-left: 0; }
 .mmc-tool {
   display: flex; flex-direction: column; align-items: center; gap: 6px;
   background: none; border: 0; padding: 0; cursor: pointer;

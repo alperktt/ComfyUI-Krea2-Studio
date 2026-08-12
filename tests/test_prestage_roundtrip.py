@@ -104,11 +104,27 @@ const segaBlob = s.serializePreStage(segaState);
 const bothOn = s.parsePreStage(JSON.stringify({
   version: 1, prompt: "p", dype: { on: true }, sega: { on: true } }));
 
+// The custom size route, on its own state: it overrides the aspect the others
+// carry, so it would hide what those are checking.
+const sizedState = s.parsePreStage(JSON.stringify({ version: 1 }));
+sizedState.prompt = "p";
+sizedState.aspect = "16:9";
+sizedState.sega = { on: true, method: "sega", alpha: 0.15 };
+sizedState.size = { width: 1000, height: 4000 };
+const sizedBlob = s.serializePreStage(sizedState);
+// What the panel shows for it, which has to be what the compile resolves.
+const sizedShown = s.resolvedPreStage(s.parsePreStage(sizedBlob));
+
 console.log(JSON.stringify({
   blob, reparsed, stagedBlob, segaBlob,
   stagedReparsed: s.parsePreStage(stagedBlob),
   segaReparsed: s.parsePreStage(segaBlob),
   bothOn: { dype: bothOn.dype.on, sega: bothOn.sega.on },
+  sizedBlob, sizedShown,
+  sizedReparsed: s.parsePreStage(sizedBlob),
+  // A half-written size is not a size, so it must fall back rather than invent
+  // the missing axis.
+  halfSize: s.parsePreStage(JSON.stringify({ version: 1, size: { width: 1024 } })).size,
   // What a fresh node writes, so "off" can be checked as being genuinely absent.
   emptyBlob: s.serializePreStage(s.parsePreStage(JSON.stringify({ version: 1 }))),
 }));
@@ -201,6 +217,26 @@ check("and it did not drag DyPE on with it", sega_back["dype"]["on"], False)
 # combination it would refuse.
 check("a blob claiming both keeps only DyPE",
       (out["bothOn"]["dype"], out["bothOn"]["sega"]), (True, False))
+
+# ---- the custom size, all the way through -------------------------------------
+#
+# The case the route exists for. The panel's number and the compiled number have
+# to be the same one, or the pill would advertise a render nobody gets — which is
+# the shape of the bug this whole file was written after.
+
+sized_blob = json.loads(out["sizedBlob"])
+check("the blob carries the typed size",
+      (sized_blob.get("size", {}).get("width"), sized_blob["size"].get("height")),
+      (1000, 4000))
+check("reading it back keeps it", out["sizedReparsed"]["size"],
+      {"width": 1000, "height": 4000})
+check("a half-written size falls back to the ratio route", out["halfSize"], None)
+sized_payload = ci.compile_prestage(sized_blob)
+check("the compiler resolves it past the 1:3 the ratio route would have clamped to",
+      (sized_payload.width, sized_payload.height), (1008, 4000))
+check("and the panel shows exactly what the compiler resolved",
+      (out["sizedShown"]["width"], out["sizedShown"]["height"]),
+      (sized_payload.width, sized_payload.height))
 staged_back = out["stagedReparsed"]
 check("the stages survive",
       (staged_back["stages"]["count"], staged_back["stages"]["handoff"],
@@ -210,7 +246,7 @@ check("the stages survive",
 # And off stays off: a fresh node writes none of these keys, so an untouched
 # PreStage compiles to exactly what it compiled to before any of them existed.
 empty = json.loads(out["emptyBlob"])
-for key in ("loader", "moodboard", "edit", "style", "stages", "dype", "sega"):
+for key in ("loader", "moodboard", "edit", "style", "stages", "dype", "sega", "size"):
     check(f"a fresh blob does not carry {key}", key in empty, False)
 
 
