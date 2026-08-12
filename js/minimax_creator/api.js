@@ -177,14 +177,16 @@ export async function listModels({ force = false } = {}) {
  *  A failed request resolves to the same empty shape rather than throwing. The
  *  moodboard is one optional line of a prompt; a picker that cannot reach the
  *  server should say nothing matched, not take the editor down with it. */
-export async function listMoodboards({ query = "", collection = "krea", pageSize = 24 } = {}) {
-  const params = new URLSearchParams({ q: query, collection, page_size: String(pageSize) });
+export async function listMoodboards({ query = "", collection = "krea", family = "",
+                                       page = 1, pageSize = 24 } = {}) {
+  const params = new URLSearchParams({
+    q: query, collection, family, page: String(page), page_size: String(pageSize) });
   try {
     const response = await api.fetchApi(`/minimax_creator/moodboards?${params}`);
     if (!response.ok) throw new Error(`moodboard listing failed (${response.status})`);
     return await response.json();
   } catch (error) {
-    return { available: false, items: [], total: 0, error: String(error) };
+    return { available: false, items: [], total: 0, families: {}, error: String(error) };
   }
 }
 

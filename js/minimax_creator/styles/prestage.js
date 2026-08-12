@@ -38,6 +38,47 @@ export const css = `
 }
 .mmc-stage-send:hover { border-color: var(--mmc-accent); color: var(--mmc-accent); }
 
+/* ---- the moodboard picker ----------------------------------------------------
+   A grid of thumbnails rather than a list of titles: "Abyssal Gothic Surrealism"
+   is not a description you can act on, and the catalog ships a 256px image for
+   every board. Built from the same tokens as everything else — surface-2 tiles,
+   the line border, the accent for the chosen one — so it reads as this panel
+   rather than beside it. */
+.mmc-board-pop { width: 520px; }
+.mmc-board-facets { margin: 6px 0 2px; }
+/* The facet chips are pills at a smaller size: there are nine of them and they
+   are a filter, not a control the eye should land on first. */
+.mmc-board-facets .mmc-pill { height: 26px; padding: 0 10px; font-size: 12px; border-radius: 13px; }
+.mmc-board-results { min-height: 120px; }
+.mmc-board-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+  max-height: 300px; overflow-y: auto; padding: 2px;
+}
+.mmc-board-card {
+  display: flex; flex-direction: column; gap: 5px; padding: 0; cursor: pointer;
+  background: none; border: 0; font-family: inherit; color: var(--mmc-dim);
+  text-align: left;
+}
+.mmc-board-thumb {
+  width: 100%; aspect-ratio: 1; object-fit: cover; display: block;
+  border-radius: 10px; background: var(--mmc-surface-2);
+  border: 1px solid var(--mmc-line);
+}
+/* Two lines, clamped: the titles run long and a card that sizes to its text
+   would make the rows of the grid disagree about their height. */
+.mmc-board-title {
+  font-size: 11px; line-height: 1.3; overflow: hidden;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.mmc-board-card:hover { color: var(--mmc-text); }
+.mmc-board-card:hover .mmc-board-thumb { border-color: rgba(255,255,255,.28); }
+.mmc-board-card.picked { color: var(--mmc-accent); }
+.mmc-board-card.picked .mmc-board-thumb { border-color: var(--mmc-accent); }
+.mmc-board-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin-top: 8px;
+}
+
 /* ---- the frame grab ---------------------------------------------------------
    The trim editor's scrubbing with a different ending; dressed like it too. */
 .mmc-grab-card {

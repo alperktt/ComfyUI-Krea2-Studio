@@ -908,11 +908,15 @@ export class PreStageEditor {
     const board = this.state.moodboard;
     return el("button", {
       class: `mmc-pill${board.on ? " accel-on" : ""}`,
+      // No board count in the copy. 3,549 is right for the shipped krea
+      // collection, but it is a number in a sentence that no test can reach, and
+      // the picker now prints the real figure from the listing it just fetched.
       title: board.on
-        ? `Moodboard — "${board.title || board.board}" at ${board.strength} strength, `
-          + "appended to the prompt as style guidance. Click to change or clear."
-        : "Fold one of 3,549 Krea moodboards into the prompt: a look chosen instead "
-          + "of described. Off — the prompt goes as typed.",
+        ? t('Moodboard — "{title}" at {strength} strength, appended to the prompt as '
+          + 'style guidance. Click to change or clear.',
+            { title: board.title || board.board, strength: board.strength })
+        : t("Fold a Krea moodboard into the prompt: a look chosen instead of described. "
+          + "Off — the prompt goes as typed."),
       onclick: (event) => this.openMoodboard(event.currentTarget),
     }, [
       icon("effect", 16),
@@ -921,49 +925,130 @@ export class PreStageEditor {
     ]);
   }
 
+  /** The picker: a grid of thumbnails, filtered by family.
+   *
+   *  A list of titles was the wrong shape for what a moodboard is. "Abyssal
+   *  Gothic Surrealism" tells you nothing you can act on, and the catalog ships a
+   *  256px thumbnail for every one of the 3,549 boards — so the list showed the
+   *  one field that does not answer "is this the look I want" while carrying the
+   *  one that does.
+   *
+   *  The categories are the catalog's own `family` — eight values, counted off
+   *  disk rather than hardcoded. There is no category field in the data; family
+   *  is the only axis coarse enough to browse by, and `keywords` (11,309 distinct
+   *  values) is far too fine to be a filter.
+   *
+   *  The thumbnails are Krea's URLs, so drawing them is a request from this
+   *  browser to optim-images.krea.ai. That is worth knowing and is said in the
+   *  panel; a blocked or offline fetch leaves the card with its title, which is
+   *  the list this replaced. */
   openMoodboard(anchor) {
     const state = this.state;
     const board = state.moodboard;
-    const pop = el("div", { class: "mmc-pop mmc-weights-pop" });
-    const results = el("div");
+    const pop = el("div", { class: "mmc-pop mmc-weights-pop mmc-board-pop" });
+    const results = el("div", { class: "mmc-board-results" });
+    const facets = el("div", { class: "mmc-pills mmc-board-facets" });
     let query = "";
+    let family = "";
+    let page = 1;
+    let known = {};
     let timer = null;
 
-    const pick = (item) => {
+    // The highlight moves in the DOM rather than by rebuilding the grid. `render`
+    // only replaces the rows around `results`, so the cards keep whichever
+    // `picked` class they were built with — and a `load()` to rebuild them would
+    // cost a fetch and throw away the scroll position for a class change.
+    const pick = (item, element) => {
       board.on = true;
       board.board = item.uuid || item.slug || item.title;
       board.title = item.title || "";
       board.collection = item.collection || board.collection;
+      results.querySelectorAll(".mmc-board-card.picked")
+        .forEach((node) => node.classList.remove("picked"));
+      element.classList.add("picked");
       this.commit();
       render();
     };
 
+    const card = (item) => el("button", {
+      class: `mmc-board-card${board.on && board.board === item.uuid ? " picked" : ""}`,
+      title: item.source_summary || item.title,
+      onclick: (event) => pick(item, event.currentTarget),
+    }, [
+      // `loading: lazy` because a page is 24 remote images; `onerror` hides the
+      // frame rather than leaving a broken-image glyph, so an offline install
+      // degrades to a titled card instead of a grid of icons.
+      item.thumbnail_url
+        ? el("img", {
+            class: "mmc-board-thumb", src: item.thumbnail_url, alt: "",
+            loading: "lazy", referrerpolicy: "no-referrer",
+            onerror: (event) => { event.currentTarget.style.display = "none"; },
+          })
+        : el("div", { class: "mmc-board-thumb" }),
+      el("span", { class: "mmc-board-title", text: item.title }),
+    ]);
+
+    const renderFacets = () => {
+      const chip = (label, value, count) => el("button", {
+        class: `mmc-pill${family === value ? " accel-on" : ""}`,
+        title: count == null
+          ? t("Every family.")
+          : t("{count} boards in this family.", { count }),
+        onclick: () => {
+          family = value;
+          page = 1;
+          load();
+        },
+      }, [el("span", { text: label }),
+          ...(count == null ? [] : [el("span", { class: "mmc-pill-sub", text: String(count) })])]);
+      facets.replaceChildren(
+        chip(t("all"), "", null),
+        ...Object.entries(known).map(([name, count]) => chip(name, name, count)));
+    };
+
     const load = () => {
-      listMoodboards({ query, collection: board.collection }).then((payload) => {
+      listMoodboards({ query, family, page, collection: board.collection }).then((payload) => {
         if (!pop.isConnected) return;
         if (!payload.available) {
           results.replaceChildren(el("div", {
             class: "mmc-warn",
-            text: "The moodboard catalog is not installed — vendor/moodboards/data is missing.",
+            text: t("The moodboard catalog is not installed — vendor/moodboards/data is missing."),
           }));
           return;
         }
-        results.replaceChildren(...(payload.items.length
-          ? payload.items.map((item) => el("button", {
-              class: "mmc-opt",
-              "aria-checked": board.on && board.board === item.uuid,
-              title: item.source_summary || item.title,
-              onclick: () => pick(item),
-            }, [
-              el("span", { class: "mmc-opt-label" }, [
-                el("span", { text: item.title }),
-                ...(item.keywords?.length
-                  ? [el("span", { class: "mmc-pill-sub", text: item.keywords.slice(0, 3).join(" · ") })]
-                  : []),
-              ]),
-              el("span", { class: "mmc-radio" }),
-            ]))
-          : [el("div", { class: "mmc-note", text: "No moodboard matched that." })]));
+        if (payload.families && Object.keys(payload.families).length) {
+          known = payload.families;
+          renderFacets();
+        }
+        const items = payload.items ?? [];
+        if (!items.length) {
+          results.replaceChildren(el("div", { class: "mmc-note", text: t("No moodboard matched that.") }));
+          return;
+        }
+        // `exact_total` is false for a search: the catalog's own listing caps its
+        // candidate list at 100, so the number is a floor, not a count. Said as a
+        // floor rather than printed as a total that would be wrong.
+        const count = payload.exact_total
+          ? t("{total} boards", { total: payload.total })
+          : t("{total}+ matches", { total: payload.total });
+        const pages = Math.max(1, Math.ceil((payload.total || 1) / (payload.page_size || 24)));
+        results.replaceChildren(
+          el("div", { class: "mmc-board-grid" }, items.map(card)),
+          el("div", { class: "mmc-board-foot" }, [
+            el("span", { class: "mmc-pill-sub", text: count }),
+            ...(pages > 1 ? [el("div", { class: "mmc-pill mmc-pill-group" }, [
+              el("button", {
+                class: "mmc-step", text: "−", disabled: page <= 1 || undefined,
+                onclick: () => { page -= 1; load(); },
+              }),
+              el("span", { text: t("page {page}/{pages}", { page, pages }),
+                           style: { minWidth: "78px", textAlign: "center" } }),
+              el("button", {
+                class: "mmc-step", text: "+", disabled: page >= pages || undefined,
+                onclick: () => { page += 1; load(); },
+              }),
+            ])] : []),
+          ]));
       });
     };
 
@@ -973,16 +1058,20 @@ export class PreStageEditor {
       rows.push(el("input", {
         class: "mmc-search",
         type: "text",
-        placeholder: "Search 3,549 boards — “film noir”, “kodachrome”, “brutalist”",
+        placeholder: t("Search by look — “film noir”, “kodachrome”, “brutalist”"),
         value: query,
+        onpointerdown: (event) => event.stopPropagation(),
+        onkeydown: (event) => event.stopPropagation(),
         oninput: (event) => {
           query = event.target.value;
+          page = 1;
           // Every keystroke is a scan of the whole catalog on the server, so it
           // waits for the typing to stop rather than racing it.
           clearTimeout(timer);
           timer = setTimeout(load, 250);
         },
       }));
+      rows.push(facets);
       rows.push(results);
 
       if (board.on) {

@@ -46,6 +46,9 @@ _FILES = {
 
 _lock = threading.Lock()
 _cache = {}
+# Family counts, per collection. A full scan of the catalog, so it is kept beside
+# the catalog itself rather than recomputed for every page of the picker.
+_families = {}
 
 
 def _catalog_path(collection):
@@ -110,20 +113,73 @@ def lookup():
     return style
 
 
-def search(query="", page=1, page_size=30, collection=DEFAULT_COLLECTION):
-    """One page of the picker: `{items, total, page, page_size}`.
+def families(collection=DEFAULT_COLLECTION):
+    """`{family: count}` over the whole collection, biggest first.
+
+    The catalog has no category field. What it has is the pack's own
+    `style_family`, which classifies a board by matching its searchable text
+    against a term table — so "family" is derived, not stored, and reading
+    `board["family"]` off the raw catalog returns nothing (the key only exists on
+    the summaries the listing builds). That is the mistake this comment is here to
+    stop being made twice: the classifier has to be called.
+
+    Called rather than reimplemented, for the usual vendoring reason — the term
+    table is the pack's, and a copy here would drift from it the first time it is
+    retuned upstream.
+
+    Cached with the catalog: it is a full scan of every board with a substring
+    match per family, and the answer cannot change without the file changing.
+    """
+    with _lock:
+        if collection in _families:
+            return _families[collection]
+    from .vendor.moodboards import moodboard_catalog as mc
+
+    counts = {}
+    for board in catalog(collection):
+        name = mc.style_family(board)
+        counts[name] = counts.get(name, 0) + 1
+    ordered = dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+    with _lock:
+        _families[collection] = ordered
+    return ordered
+
+
+def search(query="", page=1, page_size=30, collection=DEFAULT_COLLECTION, family=""):
+    """One page of the picker: `{items, total, page, page_size, exact_total}`.
 
     `catalog_listing` rather than `search_boards` for both the searching and the
     browsing case, because it is the one that already does both — an empty query
     is the whole catalog in title order, and a non-empty one is the scored
     matches. Its summaries carry the thumbnail URL the picker draws.
+
+    `family` filters before the listing runs rather than after, so a page is a
+    page of the filtered set instead of whatever survived a page of the whole
+    one. The vendored function knows nothing about families; handing it a shorter
+    catalog is how that stays true.
+
+    `exact_total` says whether `total` can be trusted as a count. On a browse it
+    is the real number; on a search `catalog_listing` caps its own candidate list
+    at 100, so `total` is "at least this many" and the UI must not print it as a
+    total. Returned as a flag rather than left for the caller to know.
     """
     from .vendor.moodboards import moodboard_catalog as mc
 
-    listing = mc.catalog_listing(catalog(collection), query=str(query or ""),
+    boards = catalog(collection)
+    wanted = str(family or "").strip()
+    if wanted:
+        # `style_family`, not `board["family"]`: the key is on the listing's
+        # summaries, not on the catalog entries. See `families`.
+        boards = [b for b in boards if mc.style_family(b) == wanted]
+
+    query = str(query or "")
+    listing = mc.catalog_listing(boards, query=query,
                                  page=int(page), page_size=int(page_size))
     import json
 
     payload = json.loads(listing["catalog_json"])
     return {"items": payload["items"], "total": payload["total"],
-            "page": payload["page"], "page_size": payload["page_size"]}
+            "page": payload["page"], "page_size": payload["page_size"],
+            "exact_total": not query.strip(),
+            "families": families(collection),
+            "family": wanted}

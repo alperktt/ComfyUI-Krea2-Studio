@@ -380,6 +380,9 @@ async def list_moodboards(request):
         return web.json_response({"available": False, "items": [], "total": 0})
 
     query = request.query.get("q", "")
+    # Not validated against a list: the families come from whatever catalog is on
+    # disk, and an unknown one filters to nothing, which is the honest answer.
+    family = request.query.get("family", "")
     collection = request.query.get("collection", moodboard.DEFAULT_COLLECTION)
     if collection not in moodboard.COLLECTIONS:
         return web.json_response({"error": f"unknown collection {collection!r}"}, status=400)
@@ -392,7 +395,8 @@ async def list_moodboards(request):
     loop = asyncio.get_running_loop()
     try:
         payload = await loop.run_in_executor(
-            None, functools.partial(moodboard.search, query, page, page_size, collection))
+            None, functools.partial(moodboard.search, query, page, page_size, collection,
+                                    family))
     except Exception as exc:  # noqa: BLE001 — a broken catalog is not a broken server
         logging.exception("[krea2-studio] moodboard catalog failed to load")
         return web.json_response({"available": False, "items": [], "total": 0,
