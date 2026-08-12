@@ -42,13 +42,19 @@ export function stepperPill({ value, onChange, min = -Infinity, max = Infinity, 
  * from the backend — samplers, schedulers — where there is nothing to draw but
  * the name.
  */
-export function openChoicePopover(anchor, { title, options, value, onPick }) {
+/** `hint(option) -> string` is optional and adds a native tooltip per row. It
+ *  buys nothing visually and costs no CSS, which is the point: where the choice
+ *  is between things a name does not explain — two position-encoding methods,
+ *  say — the explanation can sit on the option rather than in a paragraph above
+ *  it. Callers that omit it get exactly the popover they always got. */
+export function openChoicePopover(anchor, { title, options, value, onPick, hint }) {
   const pop = el("div", { class: "mmc-pop mmc-pop-scroll" },
     title ? [el("div", { class: "mmc-pop-title", text: title })] : []);
   for (const option of options) {
     pop.appendChild(el("button", {
       class: "mmc-opt",
       "aria-checked": option === value,
+      ...(hint?.(option) ? { title: hint(option) } : {}),
       onclick: () => { close(); onPick(option); },
     }, [
       el("span", { class: "mmc-opt-label" }, [el("span", { text: option })]),

@@ -589,32 +589,43 @@ export class PreStageEditor {
 
   // ---- DyPE and SEGA ----------------------------------------------------------
 
-  /** DyPE and SEGA behind one pill.
+  /** One pill, because it is one choice.
    *
-   *  One rather than two because they are one concern — both rewrite the position
-   *  encoding, and the panel was already going to hold both — and because the
-   *  panel row had grown past what the node's width can carry. The label says
-   *  which are on, so nothing is hidden by the grouping.
+   *  DyPE and SEGA are not a pair to combine — the pack's README calls SEGA "an
+   *  alternative to DyPE", and its reference Krea 2 workflow ships the DyPE node
+   *  bypassed with only SEGA live. Both rewrite the same position encoding, so
+   *  chaining them means the second overwrites what the first decided. The pill
+   *  therefore offers three states, not two switches, and the compile refuses
+   *  the pair for a hand-edited blob.
    *
-   *  DyPE is also the pill that moves the resolution ceiling, so switching it off
-   *  pulls an oversize short edge back down rather than leaving a number the
-   *  slider can no longer reach. */
+   *  Whichever is chosen moves the resolution ceiling, so landing back on `off`
+   *  pulls an oversize short edge down rather than leaving a number the slider
+   *  can no longer reach. */
   positionPill() {
-    const { dype, sega } = this.state;
-    const on = [dype.on && "dype", sega.on && "sega"].filter(Boolean);
+    const method = this.state.dype.on ? "dype" : this.state.sega.on ? "sega" : null;
     return el("button", {
-      class: `mmc-pill${on.length ? " accel-on" : ""}`,
-      title: on.length
-        ? `${on.join(" + ")} on. Click to change either.`
-        : `Position encoding. DyPE extrapolates it, so a render past `
-          + `${S.PRESTAGE_MAX_EDGE} does not wrap and the resolution slider reaches `
-          + `${S.PRESTAGE_DYPE_MAX_EDGE}; SEGA sharpens attention from the latent's own `
-          + `spectrum. Both off.`,
+      class: `mmc-pill${method ? " accel-on" : ""}`,
+      title: method
+        ? `${method === "dype" ? "DyPE" : "SEGA"} on — the resolution slider reaches `
+          + `${S.PRESTAGE_POSITION_MAX_EDGE}. Click to switch method or turn it off.`
+        : `Position encoding — off, so the slider stops at ${S.PRESTAGE_MAX_EDGE}. `
+          + `DyPE and SEGA are two ways to extrapolate it past that; pick one.`,
       onclick: (event) => this.openPosition(event.currentTarget),
     }, [
       icon("res", 16),
-      el("span", { text: on.length ? on.join("+") : "position" }),
+      el("span", { text: method ?? "position" }),
     ]);
+  }
+
+  /** Turn on one position-encoding method, or none. Never two. */
+  choosePosition(picked) {
+    const state = this.state;
+    state.dype.on = picked === "dype";
+    state.sega.on = picked === "sega";
+    // The ceiling moved with it. A short edge left above it would be a value the
+    // slider cannot show and the compile would clamp silently.
+    state.short_edge = Math.min(state.short_edge, S.preStageMaxEdge(state));
+    this.commit();
   }
 
   openPosition(anchor) {
@@ -622,46 +633,61 @@ export class PreStageEditor {
     const pop = el("div", { class: "mmc-pop mmc-weights-pop" });
     const body = el("div");
 
+    // The one choice, at the top: none, or exactly one of the two.
+    const CHOICES = {
+      off: `Neither. The slider stops at ${S.PRESTAGE_MAX_EDGE}, which is where these `
+         + `models were trained.`,
+      dype: "Dynamic Position Extrapolation — retunes the encoding per step to match "
+          + "the diffusion's own spectral progression. The pack leads with this, and "
+          + "it is the one that works on every architecture it supports.",
+      sega: "Spectral-Energy Guided Attention — per-dimension RoPE mscale read from "
+          + "the latent's Fourier spectrum, over an NTK base. The alternative to "
+          + "DyPE, not an addition to it.",
+    };
+
+    const chooser = () => {
+      const picked = state.dype.on ? "dype" : state.sega.on ? "sega" : "off";
+      return el("div", { class: "mmc-weight-row" }, [
+        el("span", { class: "mmc-weight-name", text: "Method" }),
+        el("button", {
+          class: "mmc-weight-file",
+          title: CHOICES[picked],
+          text: picked,
+          onclick: (event) => openChoicePopover(event.currentTarget, {
+            title: "Position encoding",
+            options: ["off", "dype", "sega"],
+            value: picked,
+            hint: (option) => CHOICES[option],
+            onPick: (option) => {
+              this.choosePosition(option === "off" ? null : option);
+              render();
+            },
+          }),
+        }),
+      ]);
+    };
+
     const section = (kind) => {
       const block = state[kind];
+      if (!block.on) return [];
       const isDype = kind === "dype";
       const methods = isDype ? S.PRESTAGE_DYPE_METHODS : S.PRESTAGE_SEGA_METHODS;
       const hints = isDype ? S.PRESTAGE_DYPE_METHOD_HINT : S.PRESTAGE_SEGA_METHOD_HINT;
-      const rows = [el("div", { class: "mmc-weight-row" }, [
-        el("span", { class: "mmc-weight-name", text: isDype ? "DyPE" : "SEGA" }),
-        el("button", {
-          class: "mmc-weight-file",
-          title: isDype
-            ? `Extrapolates the position encoding. On, the resolution slider reaches `
-              + `${S.PRESTAGE_DYPE_MAX_EDGE} instead of ${S.PRESTAGE_MAX_EDGE}.`
-            : "Sharpens attention from the latent's Fourier spectrum, per RoPE dimension "
-              + "and per step. Independent of DyPE.",
-          text: block.on ? "on" : "off",
-          onclick: () => {
-            block.on = !block.on;
-            // The ceiling moved. A short edge left above it would be a value the
-            // slider cannot show and the compile would clamp silently.
-            if (!block.on && isDype) {
-              state.short_edge = Math.min(state.short_edge, S.PRESTAGE_MAX_EDGE);
-            }
-            this.commit();
-            render();
-          },
-        }),
-      ])];
+      const rows = [];
 
-      if (!block.on) return rows;
-
+      // "Variant", not "Method": the row above already claimed that word for the
+      // choice between DyPE and SEGA, and this is the chosen one's own inner list.
       rows.push(el("div", { class: "mmc-weight-row" }, [
-        el("span", { class: "mmc-weight-name", text: "Method" }),
+        el("span", { class: "mmc-weight-name", text: "Variant" }),
         el("button", {
           class: "mmc-weight-file",
           title: hints[block.method],
           text: block.method,
           onclick: (event) => openChoicePopover(event.currentTarget, {
-            title: "Method",
+            title: isDype ? "DyPE variant" : "SEGA variant",
             options: [...methods],
             value: block.method,
+            hint: (option) => hints[option],
             onPick: (picked) => { block.method = picked; this.commit(); render(); },
           }),
         }),
@@ -703,7 +729,9 @@ export class PreStageEditor {
       return rows;
     };
 
-    const render = () => body.replaceChildren(...section("dype"), ...section("sega"));
+    // At most one section has rows, because at most one method is on.
+    const render = () => body.replaceChildren(
+      chooser(), ...section("dype"), ...section("sega"));
 
     pop.append(el("div", { class: "mmc-pop-title", text: "Position encoding" }), body);
     render();

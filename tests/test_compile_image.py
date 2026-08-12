@@ -416,16 +416,26 @@ check("DyPE carries the pack's method and scale",
       (ci.DEFAULT_DYPE_METHOD, ci.DEFAULT_DYPE_SCALE))
 segad = compile(sega={"on": True, "method": "ntk", "alpha": 0.3})
 check("SEGA carries its own", (segad.sega["method"], segad.sega["alpha"]), ("ntk", 0.3))
-check("and the two are independent",
-      bool(compile(dype={"on": True}, sega={"on": True}).sega), True)
+# They are alternatives, and this test used to claim the opposite — that they were
+# independent and composed. The pack's README says "use as an alternative to
+# DyPE", and its reference Krea 2 workflow ships the DyPE node bypassed with only
+# SEGA live. Both rewrite the same encoding, so the second would overwrite the
+# first's decision.
+expect_error("the two together are refused, because they are two ways to do one thing",
+             lambda: compile(dype={"on": True}, sega={"on": True}), "cannot both be on")
 
-# The reason DyPE is in this package at all: it is what lifts the ceiling. With
-# it off the model's own 2048 still holds, so the same blob resolves differently.
+# The reason either is in this package at all: they are what lift the ceiling.
+# With both off the model's own 2048 still holds, so the same blob resolves
+# differently.
 tall = {"aspect": "1:1", "short_edge": 4096}
-check("without DyPE a 4096 request is clamped to the model's ceiling",
+check("with no position patch a 4096 request is clamped to the model's ceiling",
       compile(**tall).width, ci.MAX_SHORT_EDGE)
 check("with DyPE it is not",
-      compile(**tall, dype={"on": True}).width, ci.DYPE_MAX_SHORT_EDGE)
+      compile(**tall, dype={"on": True}).width, ci.POSITION_MAX_SHORT_EDGE)
+# The bug this pair of checks exists for: the cap moved for DyPE only, so
+# choosing SEGA left the render clamped to 2048 with no sign of why.
+check("and with SEGA it is not either",
+      compile(**tall, sega={"on": True}).width, ci.POSITION_MAX_SHORT_EDGE)
 # And the area cap moves with it, not just the per-axis one.
 check("a 16:9 4K render keeps its aspect under the raised area cap",
       compile(aspect="16:9", short_edge=2160, dype={"on": True}).width > ci.MAX_SHORT_EDGE,

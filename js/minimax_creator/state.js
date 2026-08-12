@@ -1060,8 +1060,10 @@ export const PRESTAGE_STAGE_HINT = {
 
 /** DyPE and SEGA. Mirrors compile_image.
  *
- *  DyPE is the reason the resolution ceiling can move — see
- *  `PRESTAGE_DYPE_MAX_EDGE`. SEGA is independent and composes after it. */
+ *  Alternatives, not companions: both patch the position encoding, and the
+ *  pack's own README calls SEGA "an alternative to DyPE". At most one is ever
+ *  on, and whichever it is raises the resolution ceiling to
+ *  `PRESTAGE_POSITION_MAX_EDGE` — SEGA extrapolates too, with NTK as its base. */
 export const PRESTAGE_DYPE_METHODS = ["vision_yarn", "yarn", "ntk", "pi", "base"];
 export const PRESTAGE_DYPE_METHOD_HINT = {
   vision_yarn: "The pack's default, and the one to start from.",
@@ -1073,8 +1075,8 @@ export const PRESTAGE_DYPE_METHOD_HINT = {
 export const PRESTAGE_DYPE_SCALE = 2.0;
 export const PRESTAGE_YARN_ALT = false;
 export const PRESTAGE_MAX_DYPE_SCALE = 8.0;
-export const PRESTAGE_DYPE_MAX_EDGE = 4096;
-export const PRESTAGE_DYPE_MAX_PIXELS = 4096 * 4096;
+export const PRESTAGE_POSITION_MAX_EDGE = 4096;
+export const PRESTAGE_POSITION_MAX_PIXELS = 4096 * 4096;
 
 export const PRESTAGE_SEGA_METHODS = ["sega", "ntk"];
 export const PRESTAGE_SEGA_METHOD_HINT = {
@@ -1330,6 +1332,10 @@ export function parsePreStage(raw) {
         method: PRESTAGE_SEGA_METHODS.includes(sega.method) ? sega.method : "sega",
         alpha: clamp(sega.alpha, 0, 1, PRESTAGE_SEGA_ALPHA),
       };
+      // Two ways to do one thing, so a blob claiming both is settled rather than
+      // refused. DyPE wins because it is the one the pack leads with and the one
+      // whose method list covers Anima, where SEGA's NTK base does not work.
+      if (state.dype.on && state.sega.on) state.sega.on = false;
       // Neither has an Ideogram path — the pack's model_type list does not
       // include it — so a blob that arrives with one on off-arch is corrected.
       if (state.arch !== "krea2") { state.dype.on = false; state.sega.on = false; }
@@ -1471,10 +1477,13 @@ export function guessPreStageModels(models, byFolder) {
 /** The resolution ceiling for a state: the model's own, or DyPE's when it is on.
  *  Mirrors the `max_edge` / `max_pixels` arguments `compile_image.resolve_canvas`
  *  takes. */
+/** Either patch lifts the ceiling — see `PRESTAGE_POSITION_MAX_EDGE`. */
+export const preStageExtrapolating = (state) => (
+  state?.dype?.on === true || state?.sega?.on === true);
 export const preStageMaxEdge = (state) => (
-  state?.dype?.on ? PRESTAGE_DYPE_MAX_EDGE : PRESTAGE_MAX_EDGE);
+  preStageExtrapolating(state) ? PRESTAGE_POSITION_MAX_EDGE : PRESTAGE_MAX_EDGE);
 export const preStageMaxPixels = (state) => (
-  state?.dype?.on ? PRESTAGE_DYPE_MAX_PIXELS : PRESTAGE_MAX_PIXELS);
+  preStageExtrapolating(state) ? PRESTAGE_POSITION_MAX_PIXELS : PRESTAGE_MAX_PIXELS);
 
 export function resolvedPreStage(state, initSize = null) {
   let ratio = PRESTAGE_ASPECTS.find(([label]) => label === state.aspect)?.[1] ?? 16 / 9;

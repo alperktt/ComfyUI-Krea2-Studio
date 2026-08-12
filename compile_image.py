@@ -48,8 +48,11 @@ MAX_PIXELS = 2048 * 2048
 # resolution — extrapolating the position encoding instead of letting it wrap —
 # so the cap that exists because "past it Krea 2's own card stops" is exactly the
 # cap it lifts. Off, the numbers above still apply.
-DYPE_MAX_SHORT_EDGE = 4096
-DYPE_MAX_PIXELS = 4096 * 4096
+# The ceiling either position-encoding patch lifts the render to. Not DyPE's
+# alone: SEGA extrapolates too (NTK is its base), so the cap moves for whichever
+# one is chosen.
+POSITION_MAX_SHORT_EDGE = 4096
+POSITION_MAX_PIXELS = 4096 * 4096
 
 # Wider than the video envelope on purpose: a style sheet or a poster is a
 # legitimate still even though no H3 render could take its shape.
@@ -200,7 +203,12 @@ MAX_DYPE_SCALE = 8.0
 DEFAULT_YARN_ALT = False
 
 # SEGA: per-dimension RoPE mscale computed from the latent's Fourier spectrum.
-# Independent of DyPE and composes after it.
+#
+# Not a companion to DyPE — an alternative to it. The pack's own README says so
+# ("Use as an alternative to DyPE for FLUX/Qwen"), and its reference Krea 2
+# workflow ships the DyPE node bypassed with only SEGA live. Both patch the same
+# thing, the position encoding, so running them together means the second one
+# rewrites what the first decided. Hence one choice, not two switches.
 SEGA_METHODS = ("sega", "ntk")
 DEFAULT_SEGA_METHOD = "sega"
 DEFAULT_SEGA_ALPHA = 0.15
@@ -262,7 +270,8 @@ class ImagePayload:
     # DyPE, or None. `{method, scale}` — the width and height it needs are the
     # payload's own, so they are not repeated here.
     dype: dict = None
-    # SEGA, or None. `{method, alpha}`. Independent of DyPE.
+    # SEGA, or None. `{method, alpha}`. Never set at the same time as `dype`:
+    # they are alternatives, and `compile_prestage` refuses the pair.
     sega: dict = None
     # Set when an edit's canvas is past the size its weights work best at. Not a
     # refusal and not a clamp — the render is fine, just slower and looser than
@@ -332,9 +341,9 @@ def resolve_canvas(ratio, short_edge, max_edge=MAX_SHORT_EDGE, max_pixels=MAX_PI
     the short edge is what the slider says, the long edge follows the ratio, and
     the area cap steps the long axis back down if snapping pushed past it.
 
-    The two caps are arguments because DyPE raises them — see
-    `DYPE_MAX_SHORT_EDGE`. They default to the model's own, so a caller that does
-    not know about DyPE gets the behaviour this always had.
+    The two caps are arguments because a position-encoding patch raises them —
+    see `POSITION_MAX_SHORT_EDGE`. They default to the model's own, so a caller
+    that does not know about DyPE or SEGA gets the behaviour this always had.
     """
     ratio, _ = clamp_ratio(float(ratio))
     short_edge = max(MIN_SHORT_EDGE, min(max_edge, int(short_edge)))
@@ -714,6 +723,11 @@ def compile_prestage(data, image_size_lookup=None, moodboard_lookup=None):
 
     dype = _parse_dype(data.get("dype"))
     sega = _parse_sega(data.get("sega"))
+    if dype is not None and sega is not None:
+        raise CompileError(
+            "DyPE and SEGA are two ways to do the same thing — extrapolate the "
+            "position encoding — so they cannot both be on. Pick one on the "
+            "position pill")
     for name, block in (("DyPE", dype), ("SEGA", sega)):
         if block is not None and arch != "krea2":
             # The pack has no Ideogram path at all — its `model_type` list does
@@ -739,11 +753,14 @@ def compile_prestage(data, image_size_lookup=None, moodboard_lookup=None):
             ratio = ASPECT_PRESETS.get(aspect) or float(aspect)
         except (TypeError, ValueError):
             raise CompileError(f"unknown aspect {aspect!r}")
-    # DyPE is the reason the ceiling can move: it extrapolates the position
-    # encoding rather than letting it wrap, which is what the 2048 cap was
-    # protecting against. With it off, the model's own limits still apply.
-    max_edge = DYPE_MAX_SHORT_EDGE if dype else MAX_SHORT_EDGE
-    max_pixels = DYPE_MAX_PIXELS if dype else MAX_PIXELS
+    # A position-encoding patch is the reason the ceiling can move: it
+    # extrapolates the encoding rather than letting it wrap, which is what the
+    # 2048 cap was protecting against. Either patch does that — SEGA's base is
+    # NTK — so the cap moves for either. With both off, the model's own limits
+    # still apply.
+    extrapolating = dype is not None or sega is not None
+    max_edge = POSITION_MAX_SHORT_EDGE if extrapolating else MAX_SHORT_EDGE
+    max_pixels = POSITION_MAX_PIXELS if extrapolating else MAX_PIXELS
     width, height = resolve_canvas(ratio, short_edge, max_edge, max_pixels)
 
     # A two-reference edit has a lower ceiling than a single-reference one: the

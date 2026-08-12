@@ -72,10 +72,13 @@ out.moodboard_collections = [...s.PRESTAGE_MOODBOARD_COLLECTIONS];
 out.dype = { methods: [...s.PRESTAGE_DYPE_METHODS], scale: s.PRESTAGE_DYPE_SCALE,
              yarn_alt: s.PRESTAGE_YARN_ALT,
              max_scale: s.PRESTAGE_MAX_DYPE_SCALE,
-             max_edge: s.PRESTAGE_DYPE_MAX_EDGE, max_pixels: s.PRESTAGE_DYPE_MAX_PIXELS,
+             max_edge: s.PRESTAGE_POSITION_MAX_EDGE, max_pixels: s.PRESTAGE_POSITION_MAX_PIXELS,
              on: s.emptyPreStage().dype.on,
              ceiling_off: s.preStageMaxEdge(s.emptyPreStage()),
-             ceiling_on: s.preStageMaxEdge({ dype: { on: true } }) };
+             ceiling_on: s.preStageMaxEdge({ dype: { on: true } }),
+             // SEGA extrapolates too, so it lifts the same ceiling. This is the
+             // claim the pill got wrong: it moved the cap for DyPE only.
+             ceiling_sega: s.preStageMaxEdge({ sega: { on: true } }) };
 out.sega = { methods: [...s.PRESTAGE_SEGA_METHODS], alpha: s.PRESTAGE_SEGA_ALPHA,
              on: s.emptyPreStage().sega.on };
 out.dype_canvases = {};
@@ -216,14 +219,17 @@ check("DyPE methods", mirror["dype"]["methods"], list(ci.DYPE_METHODS))
 check("the DyPE scale default", mirror["dype"]["scale"], ci.DEFAULT_DYPE_SCALE)
 check("the yarn scaling default", mirror["dype"]["yarn_alt"], ci.DEFAULT_YARN_ALT)
 check("and its ceiling", mirror["dype"]["max_scale"], ci.MAX_DYPE_SCALE)
-check("the raised edge ceiling", mirror["dype"]["max_edge"], ci.DYPE_MAX_SHORT_EDGE)
-check("the raised area ceiling", mirror["dype"]["max_pixels"], ci.DYPE_MAX_PIXELS)
+check("the raised edge ceiling", mirror["dype"]["max_edge"], ci.POSITION_MAX_SHORT_EDGE)
+check("the raised area ceiling", mirror["dype"]["max_pixels"], ci.POSITION_MAX_PIXELS)
 check("SEGA methods", mirror["sega"]["methods"], list(ci.SEGA_METHODS))
 check("the SEGA amplitude default", mirror["sega"]["alpha"], ci.DEFAULT_SEGA_ALPHA)
 check("both pills start off", [mirror["dype"]["on"], mirror["sega"]["on"]], [False, False])
-# The ceiling is the model's until DyPE lifts it, which is the whole point of it.
-check("the ceiling with DyPE off", mirror["dype"]["ceiling_off"], ci.MAX_SHORT_EDGE)
-check("and with it on", mirror["dype"]["ceiling_on"], ci.DYPE_MAX_SHORT_EDGE)
+# The ceiling is the model's until a position patch lifts it, which is the whole
+# point of them. Either one does: SEGA's base is NTK, so it extrapolates as well.
+check("the ceiling with neither on", mirror["dype"]["ceiling_off"], ci.MAX_SHORT_EDGE)
+check("and with DyPE on", mirror["dype"]["ceiling_on"], ci.POSITION_MAX_SHORT_EDGE)
+check("and with SEGA on, which it did not use to",
+      mirror["dype"]["ceiling_sega"], ci.POSITION_MAX_SHORT_EDGE)
 
 # The raised ceiling has to resolve the same way on both sides too, not just be
 # the same number — the /16 snap and the area cap interact.
@@ -231,7 +237,7 @@ for key, size in mirror["dype_canvases"].items():
     label, edge = key.split("@")
     check(f"dype {key}", size,
           list(ci.resolve_canvas(ci.ASPECT_PRESETS[label], int(edge),
-                                 ci.DYPE_MAX_SHORT_EDGE, ci.DYPE_MAX_PIXELS)))
+                                 ci.POSITION_MAX_SHORT_EDGE, ci.POSITION_MAX_PIXELS)))
 
 # The weight fields the popover offers have to be the ones the emitter reads, or
 # a file picked in the UI lands in a key nothing loads. `render_image` imports

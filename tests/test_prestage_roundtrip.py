@@ -72,7 +72,9 @@ state.edit = { on: true, source: { filename: "man.png" }, source_b: { filename: 
 state.style = { on: true, refs: [{ filename: "look.png" }], fit: "contain",
                 strength: 1.35, primary: 1 };
 state.dype = { on: true, method: "yarn", scale: 3.5, yarn_alt: true };
-state.sega = { on: true, method: "ntk", alpha: 0.42 };
+// SEGA is the alternative to DyPE, not an addition, so it is carried on its own
+// state below rather than alongside.
+state.sega = { on: false, method: "ntk", alpha: 0.42 };
 
 // An edit and style references cannot coexist, and the parser enforces it, so
 // the reference list stays empty here rather than fighting that rule.
@@ -88,9 +90,25 @@ staged.prompt = "p";
 staged.stages = { count: 3, handoff: 22.5, handoff3: 77.5, stage1_scale: 0.5 };
 const stagedBlob = s.serializePreStage(staged);
 
+// SEGA likewise: it is the alternative to DyPE, so it gets its own state rather
+// than riding along with the one that has DyPE on.
+const segaState = s.parsePreStage(JSON.stringify({ version: 1 }));
+segaState.prompt = "p";
+segaState.aspect = "21:9";
+segaState.short_edge = 4096;
+segaState.sega = { on: true, method: "ntk", alpha: 0.42 };
+const segaBlob = s.serializePreStage(segaState);
+
+// And a blob that claims both is settled rather than carried, so a hand-edited
+// workflow cannot arrive with a pair the compile will refuse.
+const bothOn = s.parsePreStage(JSON.stringify({
+  version: 1, prompt: "p", dype: { on: true }, sega: { on: true } }));
+
 console.log(JSON.stringify({
-  blob, reparsed, stagedBlob,
+  blob, reparsed, stagedBlob, segaBlob,
   stagedReparsed: s.parsePreStage(stagedBlob),
+  segaReparsed: s.parsePreStage(segaBlob),
+  bothOn: { dype: bothOn.dype.on, sega: bothOn.sega.on },
   // What a fresh node writes, so "off" can be checked as being genuinely absent.
   emptyBlob: s.serializePreStage(s.parsePreStage(JSON.stringify({ version: 1 }))),
 }));
@@ -118,9 +136,11 @@ def check(label, got, want):
 # The bug was exactly this: present in the state, absent from the blob. Checked
 # key by key rather than by comparing whole objects, so a failure names the field.
 
-for key in ("loader", "moodboard", "edit", "style", "dype", "sega"):
+for key in ("loader", "moodboard", "edit", "style", "dype"):
     check(f"the blob carries {key}", key in blob, True)
 check("the blob carries stages", "stages" in json.loads(out["stagedBlob"]), True)
+sega_blob = json.loads(out["segaBlob"])
+check("the blob carries sega", "sega" in sega_blob, True)
 
 check("the loader", blob.get("loader"), "svdquant")
 check("the LoRA's adapter mode", [e.get("adapters") for e in blob.get("loras", [])], ["bake"])
@@ -142,7 +162,7 @@ check("the DyPE method and scale",
       (blob.get("dype", {}).get("method"), blob.get("dype", {}).get("scale")), ("yarn", 3.5))
 check("its yarn scaling", blob.get("dype", {}).get("yarn_alt"), True)
 check("the SEGA method and amplitude",
-      (blob.get("sega", {}).get("method"), blob.get("sega", {}).get("alpha")), ("ntk", 0.42))
+      (sega_blob["sega"].get("method"), sega_blob["sega"].get("alpha")), ("ntk", 0.42))
 
 staged_blob = json.loads(out["stagedBlob"])
 check("the stage count", staged_blob.get("stages", {}).get("count"), 3)
@@ -172,9 +192,15 @@ check("the style survives",
 check("DyPE survives",
       (back["dype"]["on"], back["dype"]["method"], back["dype"]["scale"], back["dype"]["yarn_alt"]),
       (True, "yarn", 3.5, True))
+sega_back = out["segaReparsed"]
 check("SEGA survives",
-      (back["sega"]["on"], back["sega"]["method"], back["sega"]["alpha"]),
+      (sega_back["sega"]["on"], sega_back["sega"]["method"], sega_back["sega"]["alpha"]),
       (True, "ntk", 0.42))
+check("and it did not drag DyPE on with it", sega_back["dype"]["on"], False)
+# The pair is settled on the way in, so the UI can never hand the compile a
+# combination it would refuse.
+check("a blob claiming both keeps only DyPE",
+      (out["bothOn"]["dype"], out["bothOn"]["sega"]), (True, False))
 staged_back = out["stagedReparsed"]
 check("the stages survive",
       (staged_back["stages"]["count"], staged_back["stages"]["handoff"],
@@ -204,7 +230,11 @@ check("and reads its checkpoint field", payload.checkpoint_field, "svdq_model")
 check("the compiler sees the edit", payload.edit["source"], "man.png")
 check("the compiler sees the style transfer", payload.style["refs"], ["look.png"])
 check("the compiler sees DyPE", payload.dype["method"], "yarn")
-check("the compiler sees SEGA", payload.sega["alpha"], 0.42)
+check("the compiler sees SEGA, on the state that carries it",
+      ci.compile_prestage(sega_blob).sega["alpha"], 0.42)
+check("and the SEGA render reaches the raised ceiling too",
+      max(ci.compile_prestage(sega_blob).width,
+          ci.compile_prestage(sega_blob).height), ci.POSITION_MAX_SHORT_EDGE)
 check("the moodboard reached the prompt", "hard chiaroscuro" in payload.prompt, True)
 check("and its negative was declined, as the blob asked", payload.negative_prompt, None)
 
@@ -219,7 +249,7 @@ raised = ci.compile_prestage(tall, moodboard_lookup=lambda *a: {
 check("a 4096 request with DyPE on is not clamped to the model's ceiling",
       max(raised.width, raised.height) > ci.MAX_SHORT_EDGE, True)
 check("and it lands on DyPE's ceiling instead",
-      max(raised.width, raised.height), ci.DYPE_MAX_SHORT_EDGE)
+      max(raised.width, raised.height), ci.POSITION_MAX_SHORT_EDGE)
 
 no_dype = dict(tall)
 no_dype.pop("dype")

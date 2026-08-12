@@ -839,27 +839,25 @@ check("one stage still emits a single KSampler and nothing else",
 
 # ---- DyPE and SEGA --------------------------------------------------------------
 #
-# Two patches over the same embedder, emitted last because everything above them
-# assumes the position encoding they rewrite.
+# One patch over the embedder, emitted last because everything above it assumes
+# the position encoding it rewrites. One, not two: they are alternatives, and
+# this block used to assert they chained.
 
 positioned = emitted(ci.compile_prestage(
     {"arch": "krea2", "prompt": "p", "aspect": "1:1", "short_edge": 2048,
-     "dype": {"on": True, "scale": 3.0}, "sega": {"on": True, "alpha": 0.2}}))
+     "dype": {"on": True, "scale": 3.0}}))
 
-check("both patches are emitted", (len(positioned[ri.DYPE]), len(positioned[ri.SEGA])), (1, 1))
-check("DyPE first, then SEGA — the pack's own order",
-      list(positioned[ri.SEGA][0][1]["model"]), [positioned[ri.DYPE][0][0], 0])
-check("and the sampler runs the fully patched model",
-      list(positioned["KSampler"][0][1]["model"]), [positioned[ri.SEGA][0][0], 0])
+check("DyPE alone is emitted", (len(positioned[ri.DYPE]), ri.SEGA in positioned), (1, False))
+check("and the sampler runs the patched model",
+      list(positioned["KSampler"][0][1]["model"]), [positioned[ri.DYPE][0][0], 0])
 # Both nodes' tooltips say width/height must match the empty latent, so they are
 # the resolved canvas rather than anything the user can set separately.
 check("DyPE is told the canvas it is extrapolating for",
       (positioned[ri.DYPE][0][1]["width"], positioned[ri.DYPE][0][1]["height"]),
       (positioned["EmptySD3LatentImage"][0][1]["width"],
        positioned["EmptySD3LatentImage"][0][1]["height"]))
-check("the scale and amplitude arrive from the payload",
-      (positioned[ri.DYPE][0][1]["dype_scale"], positioned[ri.SEGA][0][1]["mscale_alpha"]),
-      (3.0, 0.2))
+check("the scale arrives from the payload",
+      positioned[ri.DYPE][0][1]["dype_scale"], 3.0)
 # `auto` rather than `flux`: Krea 2 is not in the pack's list, and auto reaches
 # the flux branch by elimination — which is right, because SingleStreamDiT's
 # pe_embedder *is* Flux's EmbedND.
@@ -870,9 +868,13 @@ check("and everything not exposed comes from the pack's own defaults",
 
 only_sega = emitted(ci.compile_prestage(
     {"arch": "krea2", "prompt": "p", "aspect": "1:1", "short_edge": 1024,
-     "sega": {"on": True}}))
+     "sega": {"on": True, "alpha": 0.2}}))
 check("SEGA alone patches the loaded model directly",
       (ri.DYPE in only_sega, len(only_sega[ri.SEGA])), (False, 1))
+check("and its amplitude arrives from the payload",
+      only_sega[ri.SEGA][0][1]["mscale_alpha"], 0.2)
+check("the sampler runs SEGA's model when SEGA is the choice",
+      list(only_sega["KSampler"][0][1]["model"]), [only_sega[ri.SEGA][0][0], 0])
 
 for absent in (ri.DYPE, ri.SEGA):
     check(f"no {absent} without its pill", absent in by_class(build().expand), False)

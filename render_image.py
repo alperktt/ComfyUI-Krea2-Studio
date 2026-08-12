@@ -441,7 +441,13 @@ def _emit_style(graph, payload, model, vae, latent, positive):
 
 
 def _emit_position(graph, payload, model):
-    """DyPE and SEGA, in that order. Returns the new MODEL link.
+    """DyPE or SEGA — whichever the position pill chose. Returns the MODEL link.
+
+    Two branches rather than a chain: they are alternatives, not stages. Both
+    rewrite the same position encoding, so running one after the other means the
+    second overwrites the first's decision, and `compile_prestage` refuses the
+    pair before it can get here. The `if`s are independent only because at most
+    one of the two payload fields is ever set.
 
     Last before the sampler because both rewrite the position encoding, and
     everything upstream — LoRAs, the edit patch, the style transfer — is either a
