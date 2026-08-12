@@ -149,6 +149,15 @@ def emit(payloads, labels, weights, sampling, acceleration, unique_id,
     # standing route is the same statement the per-request pin makes, said once
     # for every generation instead of once per generation.
     payloads = [weights.routed(payload) for payload in payloads]
+    # Which segment each payload is, for the stage's "now rendering segment N"
+    # chip — the segment node announces it when it executes. Only where there
+    # are several: a lone generation has no position worth reporting. The index
+    # alone, never the total: a payload's index is stable when a segment is
+    # appended, so earlier segments keep their cache keys, where a total would
+    # invalidate the whole strip for adding one shot at the end.
+    if len(payloads) > 1:
+        payloads = [{**payload, "progress": {"index": index + 1}}
+                    for index, payload in enumerate(payloads)]
     compiled = compile_all(payloads, labels)
     where = routed(compiled, labels)
     models.check(weights, set(where), where)

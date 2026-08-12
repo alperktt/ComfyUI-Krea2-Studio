@@ -506,6 +506,30 @@ function serializeRefined(refined) {
   };
 }
 
+/** Asset entries, stripped to what compile.py reads. Shared by a state's own
+ *  list and the timeline's reference pool — same shape, same defaults. */
+function serializeAssets(assets) {
+  return assets.map((asset) => {
+    const out = { handle: asset.handle, kind: asset.kind, role: asset.role, filename: asset.filename };
+    if (asset.kind === "video") out.track = asset.track || DEFAULT_TRACK;
+    // Only what departs from the backend's own default for the kind, so the
+    // common setting adds nothing and an old blob round-trips unchanged.
+    if (sizeable(asset) && refSize(asset) !== DEFAULT_REF_SIZE[asset.kind]) {
+      out.ref_size = refSize(asset);
+    }
+    // Absent means the whole file, so a clip nobody trimmed adds nothing.
+    if (asset.trim && asset.kind !== "image") {
+      out.trim = { start: asset.trim.start, end: asset.trim.end };
+    }
+    // Absent means the whole picture, so an unnarrowed reference adds nothing
+    // and compile.py refuses the field anywhere it means nothing.
+    if (takeable(asset) && takes(asset) !== "full") {
+      out.takes = takes(asset);
+    }
+    return out;
+  });
+}
+
 /** The parts of a state every generation has, timeline segment or not. */
 function serializeCommon(state) {
   return {
@@ -516,25 +540,7 @@ function serializeCommon(state) {
     // timeline's rather than clearing them.
     ...(state.soundscape?.trim() ? { soundscape: state.soundscape } : {}),
     ...(state.music?.trim() ? { music: state.music } : {}),
-    assets: state.assets.map((asset) => {
-      const out = { handle: asset.handle, kind: asset.kind, role: asset.role, filename: asset.filename };
-      if (asset.kind === "video") out.track = asset.track || DEFAULT_TRACK;
-      // Only what departs from the backend's own default for the kind, so the
-      // common setting adds nothing and an old blob round-trips unchanged.
-      if (sizeable(asset) && refSize(asset) !== DEFAULT_REF_SIZE[asset.kind]) {
-        out.ref_size = refSize(asset);
-      }
-      // Absent means the whole file, so a clip nobody trimmed adds nothing.
-      if (asset.trim && asset.kind !== "image") {
-        out.trim = { start: asset.trim.start, end: asset.trim.end };
-      }
-      // Absent means the whole picture, so an unnarrowed reference adds nothing
-      // and compile.py refuses the field anywhere it means nothing.
-      if (takeable(asset) && takes(asset) !== "full") {
-        out.takes = takes(asset);
-      }
-      return out;
-    }),
+    assets: serializeAssets(state.assets),
     loras: serializeLoras(state.loras),
     duration_s: state.duration_s,
     // Absent means "follow the mode", so the common case adds nothing.
@@ -622,6 +628,10 @@ export function emptyTimeline() {
     // Patched onto every segment, in front of whatever that segment adds. What
     // a turbo LoRA is for: you want it on the whole clip, not shot by shot.
     loras: [],
+    // The piece's own reference pool — a character sheet, a location plate —
+    // cited by @handle from any segment's text and injected into exactly the
+    // segments that cite it. Mirrors compile.timeline_pool.
+    assets: [],
     // How much of the previous segment's sound a continuing seam inherits.
     // Mirrors compile.DEFAULT_AUDIO_TAIL_S.
     audio_tail_s: DEFAULT_AUDIO_TAIL_S,
@@ -655,6 +665,11 @@ function syncCanvas(timeline) {
     segment.upscale = timeline.upscale;
     segment.sample_edge = timeline.sample_edge;
     segment.refine_denoise = timeline.refine_denoise;
+    // The piece's reference pool, mirrored like the canvas so a segment state
+    // answers `mode()`, `checkpoint()` and the prompt box's chips on its own:
+    // a segment citing @ref-1 is a reference generation and every accessor has
+    // to say so. Never serialized — the pool is the timeline's.
+    segment.pool = timeline.assets ?? [];
   }
   // Segment 1 has nothing in front of it. Kept in step here rather than guarded
   // at every read, so reordering cannot leave a stale flag behind.
@@ -689,6 +704,18 @@ export function parseTimeline(raw) {
       // Workflows saved before either existed have no key at all, and a
       // hand-edited blob can have the wrong type in it.
       if (!Array.isArray(timeline.loras)) timeline.loras = [];
+      if (!Array.isArray(timeline.assets)) timeline.assets = [];
+      timeline.assets = timeline.assets.filter(
+        (asset) => asset && typeof asset.handle === "string" && typeof asset.filename === "string");
+      for (const asset of timeline.assets) {
+        // A pool entry is a reference by definition — compile.timeline_pool
+        // refuses anything else, so nothing else is kept here either.
+        asset.role = "reference";
+        if (asset.kind === "video" && !TRACKS.includes(asset.track)) {
+          asset.track = asset.with_audio ? "picture+sound" : DEFAULT_TRACK;
+        }
+        delete asset.with_audio;
+      }
       if (!RENDER_MODES.includes(timeline.render)) timeline.render = "chained";
       timeline.audio_tail_s = clampTail(timeline.audio_tail_s);
       for (const key of ["soundscape", "music"]) {
@@ -751,6 +778,9 @@ export function serializeTimeline(timeline) {
     ...(timeline.refine_denoise !== DEFAULT_REFINE_DENOISE
       ? { refine_denoise: timeline.refine_denoise } : {}),
     loras: serializeLoras(timeline.loras ?? []),
+    // The reference pool. Absent when empty, so a timeline that never used one
+    // round-trips exactly as it always did.
+    ...(timeline.assets?.length ? { assets: serializeAssets(timeline.assets) } : {}),
     audio_tail_s: clampTail(timeline.audio_tail_s),
     ...serializeModels(timeline.models),
     ...serializeTurbo(timeline.turbo),
@@ -1399,6 +1429,50 @@ export function removeLora(state, name) {
 
 // ---- assets -----------------------------------------------------------------
 
+/** Every @handle in a text, in order of first appearance. Mirrors
+ *  compile.HANDLE_RE — the one shape a handle may take. */
+export const HANDLE_RE = /@([A-Za-z]+-\d+)/g;
+
+/** The pool assets a segment's own text cites, in pool order. Mirrors
+ *  `compile.cited_pool`: the prompt (and the rewrite standing in for it, with
+ *  its sections) and the segment's own two audio fields — a citation anywhere
+ *  in them is what injects the asset into this segment's generation at queue
+ *  time. The pool rides on the segment as `state.pool`, mirrored by
+ *  `syncTimeline` the way the canvas is; a lone Creator state has none. */
+export function citedPool(state) {
+  const pool = state.pool ?? [];
+  if (!pool.length) return [];
+  const texts = [state.prompt ?? "", state.soundscape ?? "", state.music ?? ""];
+  if (state.refined && state.refined.enabled !== false) {
+    texts.push(state.refined.body ?? "");
+    for (const text of Object.values(state.refined.sections ?? {})) texts.push(text ?? "");
+  }
+  const found = new Set();
+  for (const text of texts) {
+    for (const match of String(text).matchAll(HANDLE_RE)) found.add(match[1]);
+  }
+  const own = new Set(state.assets.map((a) => a.handle));
+  return pool.filter((asset) => found.has(asset.handle) && !own.has(asset.handle));
+}
+
+/** Which segments cite a pool asset, as 1-based card numbers — the shelf's
+ *  "used in segments 2, 4" readout. */
+export function poolCitations(timeline, asset) {
+  return timeline.segments
+    .map((segment, index) => (citedPool(segment).includes(asset) ? index + 1 : null))
+    .filter((n) => n !== null);
+}
+
+/** Next free pool handle: ref-1, ref-2, ... One counter across kinds — the
+ *  prefix says "the piece's", not what the file is; the glossary says that. */
+export function nextPoolHandle(timeline) {
+  const taken = new Set((timeline.assets ?? []).map((a) => a.handle));
+  for (let n = 1; ; n += 1) {
+    const handle = `ref-${n}`;
+    if (!taken.has(handle)) return handle;
+  }
+}
+
 export const references = (state) => state.assets.filter((a) => a.role === "reference");
 export const refImages = (state) => references(state).filter((a) => a.kind === "image");
 // The same bucketing compile.py does: a video kept for its soundtrack alone is
@@ -1409,7 +1483,10 @@ export const refAudios = (state) => references(state).filter((a) => a.kind === "
 export const frameAsset = (state, role) => state.assets.find((a) => a.role === role) || null;
 
 export function hasReferences(state) {
-  return references(state).length > 0;
+  // A cited pool reference is a reference of this generation in every way that
+  // matters — the mode, the checkpoint, the pin — even though the asset lives
+  // on the timeline. Mirrors what compile's injection makes true.
+  return references(state).length > 0 || citedPool(state).length > 0;
 }
 
 /** A timeline segment that starts from the previous segment's last frame. */
@@ -1538,7 +1615,13 @@ export function blockedReason(state, action) {
     return t("This segment's start frame is an earlier segment's last frame. Turn continuation off to choose one.");
   }
   if ((action === "first_frame" || action === "last_frame") && hasReferences(state)) {
-    return t("Remove the references first — start/end frames use the FL2VA checkpoint, references use Ref2VA.");
+    // The reference may be a cited pool asset rather than an attached file, in
+    // which case "remove" means editing the mention out of the text.
+    return references(state).length
+      ? t("Remove the references first — start/end frames use the FL2VA checkpoint, references use Ref2VA.")
+      : t("This segment cites a piece reference ({handles}) — edit the mention out first: "
+        + "start/end frames use the FL2VA checkpoint, references use Ref2VA.",
+          { handles: citedPool(state).map((a) => `@${a.handle}`).join(", ") });
   }
   if (action === "continue" && frameAsset(state, "first_frame")) {
     return t("Remove this segment's start frame first — continuing would replace it with the source "

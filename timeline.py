@@ -60,6 +60,10 @@ DEFAULT_DATA = json.dumps({
     "aspect": "16:9",
     "short_edge": 768,
     "loras": [],
+    # The piece's own reference pool — a character sheet, a location plate —
+    # cited by handle from any segment's text and injected into exactly the
+    # segments that cite it. See `compile.timeline_pool`.
+    "assets": [],
     # Where the finished clip lands under output/. See `outputs`.
     "output_prefix": outputs.VIDEO_PREFIX,
     # Which files to load. Empty here rather than guessed: a fresh node has no
@@ -78,6 +82,21 @@ def _parse(timeline_data):
         raise ValueError(f"timeline_data is not valid JSON: {exc}") from exc
 
 
+def _announce(unique_id, progress):
+    """Broadcast which segment is being built, keyed to the emitting node.
+
+    `mmc_segment` carries the expanded node's own id — the Timeline's plus a
+    GraphBuilder prefix — which `stage.js` prefix-matches exactly as it does
+    for the sampler's preview frames. Sent through the running PromptServer;
+    a graph executed without one (the test harness) has nobody to tell.
+    """
+    from server import PromptServer
+
+    server = getattr(PromptServer, "instance", None)
+    if server is not None:
+        server.send_sync("mmc_segment", {"node": unique_id, **progress})
+
+
 def _stamps(data):
     """Mtimes of every file any segment names, for `fingerprint_inputs`."""
     import os
@@ -91,9 +110,13 @@ def _stamps(data):
             out.append(None)
 
     # The timeline's own LoRAs are patched onto every segment, so a replaced file
-    # has to invalidate the node just as a segment's own would.
+    # has to invalidate the node just as a segment's own would. The reference
+    # pool is the same story on the asset side: a cited pool file rides into
+    # segments, so replacing it has to re-render them.
     for entry in data.get("loras", []) or []:
         stamp(lora.resolve, entry, "name")
+    for asset in data.get("assets", []) or []:
+        stamp(media.resolve, asset, "filename")
     for segment in data.get("segments", []):
         if not isinstance(segment, dict):
             continue
@@ -247,6 +270,10 @@ class MiniMaxH3TimelineSegment(io.ComfyNode):
                 io.Conditioning.Output(display_name="positive"),
                 io.Latent.Output(),
             ],
+            # For the "now rendering segment N" report — the announce below
+            # names this node, whose id is the Timeline's plus a GraphBuilder
+            # prefix, and the stage prefix-matches it back to the node body.
+            hidden=[io.Hidden.unique_id],
         )
 
     @classmethod
@@ -262,6 +289,18 @@ class MiniMaxH3TimelineSegment(io.ComfyNode):
                 model_fl2va=None, model_ref2va=None,
                 prev_image=None, prev_audio=None) -> io.NodeOutput:
         payload = _parse(segment_data)
+
+        # Which segment the queue has reached, told to the stage the moment
+        # this segment starts encoding — the sampler that follows reports steps
+        # but not whose they are, and on a long strip "23 / 40" says nothing
+        # about where in the piece you are. `render.emit` stamps the index onto
+        # multi-segment payloads only, so a Creator render announces nothing.
+        # A cached segment never executes and so never announces, which is
+        # right: the stage should name the segment actually being made.
+        progress = payload.get("progress")
+        if progress:
+            _announce(cls.hidden.unique_id, progress)
+
         compiled = compiler.compile_segment(payload, image_size_lookup=media.image_size)
 
         # Both VAEs are wired only when the encoder will actually reach for them

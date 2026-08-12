@@ -69,6 +69,9 @@ export const css = `
 .mmc-stage-chip { color: #ededed; text-shadow: 0 1px 3px rgba(0,0,0,.8); }
 .mmc-stage-chip.warn { color: #e0743c; }
 .mmc-stage[data-state="sampling"] .mmc-stage-chip:first-child { color: var(--mmc-accent); }
+/* Which segment the steps belong to — first in the row, so the accent rule
+   above lands on it whenever a timeline render announces one. */
+.mmc-stage-segment { font-weight: 500; }
 /* The readout swallows the pointer so the finished video's controls stay
    reachable under it; its one real button opts back in. */
 .mmc-stage-gallery {

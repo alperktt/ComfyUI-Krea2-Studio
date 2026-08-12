@@ -44,6 +44,18 @@ export const css = `
 }
 .mmc-tl-small { min-height: 64px; font-size: 13px; padding: 10px 12px; }
 
+/* The piece's reference pool: a shelf between the audio fields and the bar.
+   Chips reuse the editor's asset row; what is ours here is only the head line
+   and the "used in segments 2, 4" readout. */
+.mmc-tl-pool { display: flex; flex-direction: column; gap: 8px; }
+.mmc-tl-pool-head { display: flex; gap: 10px; align-items: center; min-width: 0; }
+.mmc-tl-pool-hint {
+  font-size: 11px; color: var(--mmc-off); flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mmc-tl-pool-add { display: inline-flex; gap: 5px; align-items: center; }
+.mmc-tl-pool-where { font-size: 11px; color: var(--mmc-dim); white-space: nowrap; }
+
 .mmc-tl-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .mmc-pill.on { border-color: rgba(255,255,255,.22); }
 /* An accelerator that is doing something. Lit rather than merely outlined,

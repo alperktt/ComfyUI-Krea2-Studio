@@ -115,8 +115,8 @@ def _still(path):
     return Image.open(buffer)
 
 
-def _look(compiled, show_labels):
-    """The glossary and the pictures for one shot.
+def _picture(asset):
+    """The one picture that says what an asset holds, or None.
 
     Images are opened at full size and downscaled by `refine_local.to_tensor`.
     A clip contributes the still the picker already decoded for it — one frame
@@ -125,34 +125,61 @@ def _look(compiled, show_labels):
     """
     from PIL import Image
 
+    try:
+        path = media.resolve(asset.filename)
+        if asset.kind == "image":
+            return Image.open(path)
+        if asset.kind == "video" and asset.track != "sound":
+            return _still(path)
+    except Exception:  # noqa: BLE001 — an unreadable file is a slot without a picture
+        pass
+    return None
+
+
+def _sighted(slot, asset, picture):
+    """Mark whether the slot's asset could be shown, on the slot itself."""
+    if picture is not None:
+        # Which of the message's images this is comes later, in `_number`, once
+        # every picture is in one list and the tail past `MAX_IMAGES` is known.
+        slot["picture"] = True
+    elif asset.kind != "audio" and asset.track != "sound":
+        # It should have had one and does not: the file would not open. Said
+        # rather than left silent, because the glossary line stays either way
+        # and a handle the model believes it can see is worse than one it
+        # knows it cannot.
+        slot["note"] = "the file could not be read, so no picture of it is attached"
+    return slot
+
+
+def _look(compiled, show_labels):
+    """The glossary and the pictures for one shot."""
     slots, images = [], []
     ordered = [a for a in (compiled.first_frame, compiled.last_frame) if a is not None]
     ordered += compiled.ref_images + compiled.ref_videos + compiled.ref_audios
 
     for asset in ordered:
         slot = _slot(asset, compiled.labels.get(asset.handle), show_labels)
-        picture = None
-        try:
-            path = media.resolve(asset.filename)
-            if asset.kind == "image":
-                picture = Image.open(path)
-            elif asset.kind == "video" and asset.track != "sound":
-                picture = _still(path)
-        except Exception:  # noqa: BLE001 — an unreadable file is a slot without a picture
-            picture = None
+        picture = _picture(asset)
         if picture is not None:
             images.append(picture)
-            # Which of the message's images this is comes later, in `_number`,
-            # once every shot's pictures are in one list and the tail past
-            # `MAX_IMAGES` is known.
-            slot["picture"] = True
-        elif asset.kind != "audio" and asset.track != "sound":
-            # It should have had one and does not: the file would not open. Said
-            # rather than left silent, because the glossary line stays either way
-            # and a handle the model believes it can see is worse than one it
-            # knows it cannot.
-            slot["note"] = "the file could not be read, so no picture of it is attached"
-        slots.append(slot)
+        slots.append(_sighted(slot, asset, picture))
+    return slots, images
+
+
+def _look_pool(pool):
+    """The piece's own reference pool, as glossary lines and pictures.
+
+    No labels: a pool asset's ordinal depends on which segment cites it, so
+    there is no one `<Picture N>` to show. The model writes the handle and the
+    labels are assigned per segment at queue time, exactly as for typed text.
+    """
+    slots, images = [], []
+    for asset in pool:
+        slot = _slot(asset, None, False)
+        picture = _picture(asset)
+        if picture is not None:
+            images.append(picture)
+        slots.append(_sighted(slot, asset, picture))
     return slots, images
 
 
@@ -201,11 +228,22 @@ def _plan(body):
         compiled = compiler.compile_request(data, media.image_size)
         shot, images = _shot(compiled, str(data.get("prompt") or ""),
                              compiled.seconds, False, True)
-        return compiled.mode, [shot], images, None, False
+        return compiled.mode, [shot], images, None, False, None
 
     single = compiler.render_mode(data) == "single"
     segments = compiler.timeline_segments(data)
     payloads = compiler.timeline_payloads(data, media.image_size)
+
+    # The piece's own reference pool, shown once whatever is asked about: the
+    # model may write a pool handle into any shot — citing it is what attaches
+    # it there at queue time — so every shot's handle set has to know them and
+    # the glossary has to say what they are.
+    pool_assets = compiler.timeline_pool(data)
+    pool = None
+    if pool_assets:
+        slots, pictures = _look_pool(pool_assets)
+        pool = {"slots": slots, "images": pictures,
+                "handles": {a.handle for a in pool_assets}}
 
     wanted = list(range(len(segments)))
     if kind == "segment":
@@ -230,11 +268,16 @@ def _plan(body):
             lone,
         )
         shot["index"] = index
+        if pool:
+            # The model may cite a pool reference in any shot, and `check` has
+            # to accept the handle there rather than flag it as unattached —
+            # at queue time the citation itself is what attaches it.
+            shot["handles"] |= pool["handles"]
         shots.append(shot)
         images.extend(pictures)
 
     piece = str(data.get("prompt") or "")
-    return _representative(data, shots, single), shots, images, piece, single
+    return _representative(data, shots, single), shots, images, piece, single, pool
 
 
 def _representative(data, shots, single):
@@ -261,34 +304,49 @@ def _representative(data, shots, single):
     return modes[0] if modes else "T2VA"
 
 
-def _number(shots, limit):
+def _number(groups, images, limit, shared=frozenset()):
     """Bind each picture to the glossary line it belongs to, and cut the tail.
 
-    The images ride in one flat list — every shot's, concatenated in play order —
-    and the glossary is printed per shot, so the two only line up if every listed
-    asset has a picture. Several do not: an audio reference, a video taken for
-    its soundtrack alone, a file that would not open. Counting the pictures here
-    and stamping the number onto the slot that produced each one is what makes
-    the correspondence explicit rather than positional, so an audio clip on the
-    first card cannot shift every later picture onto the wrong handle.
+    The images ride in one flat list — the pool's, then every shot's, in play
+    order — and the glossary is printed per group, so the two only line up if
+    every listed asset has a picture. Several do not: an audio reference, a
+    video taken for its soundtrack alone, a file that would not open. Counting
+    the pictures here and stamping the number onto the slot that produced each
+    one is what makes the correspondence explicit rather than positional, so an
+    audio clip on the first card cannot shift every later picture onto the
+    wrong handle.
+
+    `shared` is the pool's handles — the only ones stable across groups. A pool
+    reference cited in three segments produced four copies of the same picture
+    (the pool's and each citing shot's); the first is attached and numbered,
+    and every later slot for the same handle points at that number instead of
+    riding a duplicate into the context window.
 
     Doing it after the cap is applied means the slots past it say they were not
     shown, rather than pointing at an image that is no longer in the message.
-    Returns how many were dropped.
+    Returns `(how many were dropped, the pictures actually attached)`.
     """
-    number, dropped = 0, 0
-    for shot in shots:
-        for slot in shot["slots"]:
+    kept, seen, dropped, position = [], {}, 0, 0
+    for slots in groups:
+        for slot in slots:
             if not slot.pop("picture", False):
                 continue
-            if number >= limit:
+            picture = images[position]
+            position += 1
+            handle = slot.get("handle")
+            if handle in seen:
+                slot["image"] = seen[handle]
+                continue
+            if len(kept) >= limit:
                 dropped += 1
                 slot["note"] = (f"not shown to the model — one call looks at at most "
                                 f"{limit} images")
                 continue
-            number += 1
-            slot["image"] = number
-    return dropped
+            kept.append(picture)
+            slot["image"] = len(kept)
+            if handle in shared:
+                seen[handle] = len(kept)
+    return dropped, kept
 
 
 def _shared(shots):
@@ -394,17 +452,28 @@ def _run_skill(body, name, mode, shots, pictures, seconds, dropped, piece_text=N
 def _run(body):
     """The blocking half: compile, look, ask, parse. Runs on a thread."""
     kind = body.get("kind")
-    derived, shots, pictures, piece_text, single = _plan(body)
-
-    dropped = _number(shots, MAX_IMAGES)
-    pictures = pictures[:MAX_IMAGES]
+    derived, shots, pictures, piece_text, single, pool = _plan(body)
 
     seconds = sum(float(s.get("seconds") or 0) for s in shots)
 
     skill = str(body.get("skill") or "").strip()
     if skill:
+        # The skill's message knows nothing of the pool, so its pictures stay
+        # out of the attachment list — a cited pool reference still rides in
+        # through the card's own slots, which the compile injected.
+        dropped, pictures = _number([shot["slots"] for shot in shots],
+                                    pictures, MAX_IMAGES)
         return _run_skill(body, skill, derived, shots, pictures, seconds, dropped,
                           piece_text)
+
+    # The pool's pictures lead — they are the ones several shots share — and a
+    # cited copy inside a shot points back at the pool's number instead of
+    # attaching the same picture twice.
+    dropped, pictures = _number(
+        ([pool["slots"]] if pool else []) + [shot["slots"] for shot in shots],
+        (pool["images"] if pool else []) + pictures,
+        MAX_IMAGES,
+        shared=pool["handles"] if pool else frozenset())
 
     # Which template writes the rewrite. `auto` — the default — is the derived
     # mode; a pinned template replaces it everywhere the prompting looks,
@@ -458,6 +527,7 @@ def _run(body):
         images=len(pictures),
         mode=mode,
         piece=piece,
+        pool=pool["slots"] if pool else None,
     )
     content = refine_local.chat(
         body.get("model") or "",

@@ -130,6 +130,10 @@ export class CreatorEditor {
       },
       onAttach: (row) => this.attachFromMention(row),
       attachBlocked: (action) => S.blockedReason(this.state, action),
+      // The piece's reference pool, where this state is a timeline segment —
+      // `syncTimeline` mirrors it on as `pool`, the way the canvas rides on.
+      // Citable by chip, never attached: the citation is the attachment.
+      getPool: () => this.state.pool ?? [],
     });
 
     // Built once and refreshed in place: it holds textareas that are typed into,
@@ -943,10 +947,14 @@ export class CreatorEditor {
     return badge;
   }
 
-  /** Handles in the prompt with no asset behind them. compile.py rejects these,
-   *  so say so here rather than at queue time. */
+  /** Handles in the prompt with no asset behind them — the state's own or the
+   *  piece's pool. compile.py rejects these, so say so here rather than at
+   *  queue time. */
   renderDangling() {
-    const known = new Set(this.state.assets.map((a) => a.handle));
+    const known = new Set([
+      ...this.state.assets.map((a) => a.handle),
+      ...(this.state.pool ?? []).map((a) => a.handle),
+    ]);
     const missing = [...new Set(Array.from(this.state.prompt.matchAll(HANDLE_RE), (m) => m[1]))]
       .filter((handle) => !known.has(handle));
     if (!missing.length) return null;

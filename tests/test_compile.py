@@ -777,6 +777,74 @@ check("the sound seam on a reference segment compiles",
 check("compile_request still defaults to not continuing", build("x").continues, False)
 
 
+# --- the reference pool --------------------------------------------------------
+#
+# Assets attached to the timeline itself, injected into exactly the segments
+# whose own text cites their handle. The cite-gating is the load-bearing part:
+# an uncited pool must leave every payload byte-identical to a pool-less one,
+# or the cache re-renders segments nobody touched.
+
+sheet = {"handle": "ref-1", "kind": "image", "role": "reference", "filename": "sheet.png"}
+
+pooled = timeline([segment("wide shot"), segment("she turns, @ref-1")], assets=[sheet])
+check("a cited pool reference rides into the citing segment",
+      [a.filename for a in pooled[1].ref_images], ["sheet.png"])
+check("...as an ordinary reference generation", pooled[1].mode, "REF2VA")
+check("...with its label substituted", pooled[1].body, "she turns, <Picture 1>")
+check("a segment that cites nothing carries nothing",
+      (pooled[0].mode, pooled[0].ref_images), ("T2VA", []))
+
+# The injected asset leads the segment's own, so a shared reference keeps the
+# low ordinal wherever the citing sets agree.
+led = timeline([segment("@ref-1 beside @img-1", assets=[
+    {"handle": "img-1", "kind": "image", "role": "reference", "filename": "own.png"},
+])], assets=[sheet])
+check("the pool leads the segment's own references",
+      led[0].body, "<Picture 1> beside <Picture 2>")
+
+check("a segment's own handle shadows the pool's",
+      timeline([segment("keep @ref-1", assets=[
+          {"handle": "ref-1", "kind": "image", "role": "reference", "filename": "mine.png"},
+      ])], assets=[sheet])[0].ref_images[0].filename,
+      "mine.png")
+
+check("a citation in the refined body counts",
+      timeline([segment("plain", refined={"body": "her from @ref-1", "scope": "shot"})],
+               assets=[sheet])[0].mode,
+      "REF2VA")
+check("a citation in the segment's own soundscape counts",
+      timeline([segment("plain", soundscape="the room from @ref-1... hums",
+                        assets=[{"handle": "img-1", "kind": "image",
+                                 "role": "reference", "filename": "a.png"}])],
+               assets=[sheet])[0].ref_images[0].filename,
+      "sheet.png")
+
+# Cache stability: an uncited pool changes nothing about the payloads at all.
+plain_segments = [segment("wide"), segment("close")]
+check("an uncited pool leaves every payload byte-identical",
+      compiler.timeline_payloads({"segments": plain_segments}),
+      compiler.timeline_payloads({"segments": plain_segments, "assets": [sheet]}))
+
+expect_error("the global prompt cannot cite the pool",
+             lambda: timeline([segment("x")], prompt="a piece around @ref-1",
+                              assets=[sheet]),
+             "global prompt cites @ref-1")
+expect_error("the global soundscape cannot either",
+             lambda: timeline([segment("x")], soundscape="hums like @ref-1",
+                              assets=[sheet]),
+             "overall_soundscape cites @ref-1")
+expect_error("a pool keyframe is refused",
+             lambda: timeline([segment("x")], assets=[
+                 {"handle": "ref-1", "kind": "image", "role": "first_frame",
+                  "filename": "a.png"}]),
+             "belongs to one segment")
+expect_error("a keyframe segment citing the pool fails as the checkpoint clash it is",
+             lambda: timeline([segment("open on @ref-1", assets=[
+                 {"handle": "img-1", "kind": "image", "role": "first_frame",
+                  "filename": "a.png"}])], assets=[sheet]),
+             "different checkpoints")
+
+
 # ---- one pass ---------------------------------------------------------------
 #
 # The same timeline read as the shots of a single generation. The assertions
@@ -1108,4 +1176,24 @@ if FAILURES:
     for failure in FAILURES:
         print("  -", failure)
     sys.exit(1)
+# --- the reference pool, one pass ---------------------------------------------
+#
+# In one pass the shots share a single merged reference list already; a pool
+# asset cited in two shots must land in it once, with both citations renamed
+# onto the one merged handle.
+
+pool_single = single([segment("she waits, @ref-1", duration_s=5),
+                      segment("cut to her again, @ref-1", duration_s=5)],
+                     assets=[{"handle": "ref-1", "kind": "image",
+                              "role": "reference", "filename": "sheet.png"}])
+check("a pool reference cited twice merges to one",
+      [a.filename for a in pool_single.ref_images], ["sheet.png"])
+check("...and both citations point at it",
+      pool_single.body.count("<Picture 1>"), 2)
+check("a one-pass shot that cites nothing stays plain",
+      single([segment("just a field", duration_s=5)],
+             assets=[{"handle": "ref-1", "kind": "image",
+                      "role": "reference", "filename": "sheet.png"}]).mode,
+      "T2VA")
+
 print("all contract tests passed")

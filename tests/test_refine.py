@@ -504,6 +504,25 @@ check("an empty global with nothing to rewrite adds no block",
 check("no piece, no block",
       "THE PIECE" in refine.user_message([{"text": "x"}]), False)
 
+# --- the reference pool -------------------------------------------------------
+#
+# The piece's own references, listed once at the top: their handles are the only
+# ones stable across every shot, and citing one in a shot's prose is what
+# attaches it there at queue time.
+
+pool_msg = refine.user_message(
+    [{"text": "she waits", "seconds": 6}, {"text": "her hands", "seconds": 6}],
+    seconds=12, mode="T2VA",
+    pool=[{"handle": "ref-1", "what": "a person reference (sheet.png)", "image": 1}])
+check("the pool is shown once, at the top",
+      "ATTACHED TO THE PIECE" in pool_msg, True)
+check("...with the handle's glossary line",
+      "@ref-1 [image 1]: a person reference (sheet.png)" in pool_msg, True)
+check("...and the citing rule beside it",
+      "Writing one's handle in a shot's prose is what attaches it" in pool_msg, True)
+check("no pool, no block",
+      "ATTACHED TO THE PIECE" in refine.user_message([{"text": "x"}]), False)
+
 
 if FAILURES:
     print(f"{len(FAILURES)} failure(s):")

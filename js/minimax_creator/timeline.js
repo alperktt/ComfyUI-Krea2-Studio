@@ -7,6 +7,7 @@
 // LoRAs, same routing badge. There is no reduced "segment UI" to keep in step
 // with the node's, because there is only one editor.
 
+import { viewUrl } from "./api.js";
 import { el, icon, mountOverlay } from "./dom.js";
 import { CreatorEditor } from "./editor.js";
 import { t } from "./i18n.js";
@@ -25,6 +26,7 @@ import {
 
 /** A seam blend's width as the user reads it: seconds, one decimal. */
 const blendSeconds = (frames) => (frames / FPS).toFixed(1);
+
 
 /**
  * @param {object} options
@@ -116,6 +118,7 @@ class Timeline {
       ]),
     ]);
 
+    this.poolHost = el("div", { class: "mmc-tl-pool" });
     this.barHost = el("div", { class: "mmc-tl-bar" });
     this.stripHost = el("div", { class: "mmc-tl-strip" });
 
@@ -125,7 +128,7 @@ class Timeline {
         el("button", { class: "mmc-close", text: "✕", title: t("Close"), onclick: () => this.close() }),
       ]),
       el("div", { class: "mmc-tl-body" }, [
-        this.promptBox, this.audioHost, this.barHost, this.stripHost,
+        this.promptBox, this.audioHost, this.poolHost, this.barHost, this.stripHost,
       ]),
     ]);
 
@@ -153,8 +156,122 @@ class Timeline {
     this.promptBox.placeholder = S.isSingle(this.timeline)
       ? t("The whole piece: setting, look, who is in it. Opens Shot 1's description, so write it as the start of one.")
       : t("The whole piece: setting, look, who is in it. Added in front of every segment's own prompt.");
+    this.renderPool();
     this.renderBar();
     this.renderStrip();
+  }
+
+  /**
+   * The piece's reference pool: files attached to the timeline itself.
+   *
+   * A pool asset is cited by its @handle from any segment's text, and the
+   * citation is what attaches it — the file rides into exactly the segments
+   * that write the handle, and no other. That is the whole point: a character
+   * sheet is attached once here instead of once per segment it appears in,
+   * and every citing segment gets the same reference under the same handle.
+   */
+  renderPool() {
+    const assets = this.timeline.assets ?? [];
+    this.poolHost.replaceChildren(
+      el("div", { class: "mmc-tl-pool-head" }, [
+        el("span", { class: "mmc-tl-field-name", text: t("Piece references") }),
+        el("span", {
+          class: "mmc-tl-pool-hint",
+          text: t("Attached once, used wherever a segment writes the @handle — "
+                + "type it, or pick it from the prompt's @ menu."),
+        }),
+        el("button", {
+          class: "mmc-ghost mmc-tl-pool-add",
+          title: t("Attach a reference to the whole piece — a character sheet, a location, "
+               + "a voice. Cite it with its @handle in every segment where it appears."),
+          onclick: () => this.addPoolAssets(),
+        }, [el("span", { text: "+" }), el("span", { text: t("Add") })]),
+      ]),
+      ...(assets.length ? [el("div", { class: "mmc-assets" }, assets.map((a) => this.poolChip(a)))] : []),
+    );
+  }
+
+  poolChip(asset) {
+    const cited = S.poolCitations(this.timeline, asset);
+    const where = cited.length
+      ? t(cited.length === 1 ? "in segment {list}" : "in segments {list}", { list: cited.join(", ") })
+      : t("cited nowhere yet");
+    const thumb = asset.kind === "image"
+      ? el("img", { class: "mmc-asset-thumb", src: viewUrl(asset.filename, { preview: true }), alt: "" })
+      : el("span", { class: "mmc-asset-thumb", text: asset.kind === "video" ? "▶" : "♪" });
+    return el("div", {
+      class: `mmc-asset${cited.length ? "" : " idle"}`,
+      title: cited.length
+        ? t("{file} — {where}", { file: asset.filename, where })
+        : t("{file} — no segment cites @{handle} yet, so it rides into none of them.",
+            { file: asset.filename, handle: asset.handle }),
+    }, [
+      thumb,
+      el("span", { class: `mmc-asset-handle mmc-tag-${S.tagIndex(asset.handle)}`, text: `@${asset.handle}` }),
+      el("span", { class: "mmc-tl-pool-where", text: where }),
+      // What of the picture is the reference — a character sheet is usually the
+      // person, not the sheet's background. Images only, like the editor's own.
+      ...(asset.kind === "image" ? [el("button", {
+        class: "mmc-ghost",
+        style: { fontSize: "11px" },
+        title: t("What of this picture is the reference — narrowing it keeps the picture's "
+             + "background and palette out of the video."),
+        text: t(S.takes(asset)),
+        onclick: (event) => this.pickPoolTakes(event.currentTarget, asset),
+      })] : []),
+      el("button", {
+        class: "mmc-asset-x", text: "✕",
+        title: cited.length
+          ? t("Remove @{handle} — segments {list} still cite it and will refuse to queue "
+            + "until the mentions are edited out.", { handle: asset.handle, list: cited.join(", ") })
+          : t("Remove @{handle}", { handle: asset.handle }),
+        onclick: () => {
+          this.timeline.assets = (this.timeline.assets ?? []).filter((a) => a !== asset);
+          this.commit();
+        },
+      }),
+    ]);
+  }
+
+  pickPoolTakes(anchor, asset) {
+    const label = (key) => t(key);
+    openChoicePopover(anchor, {
+      title: t("@{handle} is a reference to", { handle: asset.handle }),
+      options: S.TAKES.map(label),
+      value: label(S.takes(asset)),
+      onPick: (choice) => {
+        const key = S.TAKES.find((k) => label(k) === choice) ?? "full";
+        if (key === "full") delete asset.takes;
+        else asset.takes = key;
+        this.commit();
+      },
+    });
+  }
+
+  /** The same picker the segments use, filling the pool instead of a card. */
+  async addPoolAssets() {
+    const chosen = await openPicker({
+      kinds: ["image", "video", "audio", "renders"],
+      kind: "image",
+      // The per-segment reference caps are compile's, applied where a segment
+      // actually cites — the pool itself has no ceiling worth enforcing here.
+      capacity: () => ({ used: 0, max: S.MAX_REF_FILES, filesLeft: S.MAX_REF_FILES }),
+    });
+    if (!chosen) return;
+    for (const picked of chosen) {
+      const entry = {
+        handle: S.nextPoolHandle(this.timeline),
+        kind: picked.kind,
+        role: "reference",
+        filename: picked.path,
+        // Fidelity is why a reference is attached — same default as the editor.
+        ref_size: "max",
+      };
+      if (picked.kind === "video") entry.track = picked.track ?? S.DEFAULT_TRACK;
+      if (picked.trim) entry.trim = picked.trim;
+      this.timeline.assets.push(entry);
+    }
+    this.commit();
   }
 
   geometry() {
@@ -496,7 +613,9 @@ class Timeline {
     // does — so the card shows what the user set and the bar shows the truth.
     const frames = framesForSeconds(segment.duration_s);
     const seconds = single ? Number(segment.duration_s) || 0 : secondsForFrames(frames);
-    const refs = S.references(segment).length;
+    // The segment's own references plus the piece references its text cites —
+    // both ride into this generation, so the card counts both.
+    const refs = S.references(segment).length + S.citedPool(segment).length;
     const loras = S.activeLoras(segment).length;
     const typed = (segment.prompt || "").trim();
     const rewrite = segment.refined?.body?.trim();
@@ -857,6 +976,12 @@ export class TimelineBody {
     this.root = el("div", { class: "mmc-root" });
     this.stage = new Stage({
       nodeId,
+      // Which segment the queue is on, said over the preview: the strip runs
+      // for minutes and a bare step count says nothing about where in the
+      // piece the sampler is. Read late — the strip may grow between queueing
+      // and the announce.
+      segmentLabel: (index) => t("Segment {n} of {count}",
+        { n: index, count: this.timeline.segments.length }),
       // View-only: a timeline's references live on its segments, so a pick from
       // here would have no card to land on. The Creator attaches; this browses.
       onGallery: () => openPicker({
@@ -1029,6 +1154,18 @@ export class TimelineBody {
         }, [
           icon("effect", 16),
           el("span", { text: t(globalLoras === 1 ? "{count} LoRA" : "{count} LoRAs", { count: globalLoras }) }),
+        ])] : []),
+        // Only when there are any, like the LoRAs: the modal introduces the
+        // feature, the node only reports what this timeline uses.
+        ...(this.timeline.assets?.length ? [el("span", {
+          class: "mmc-pill mmc-pill-static",
+          title: t("References attached to the piece itself, cited by @handle from "
+               + "the segments where they appear."),
+        }, [
+          icon("image", 16),
+          el("span", { text: t(this.timeline.assets.length === 1
+            ? "{count} piece ref" : "{count} piece refs",
+            { count: this.timeline.assets.length }) }),
         ])] : []),
         ...(audio.length ? [el("span", {
           class: "mmc-pill mmc-pill-static",

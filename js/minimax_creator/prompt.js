@@ -26,6 +26,9 @@ export class PromptBox {
    * @param {(text:string)=>void} hooks.onInput   prompt text changed
    * @param {(row:object)=>string|null} hooks.onAttach  attach an input-folder file, -> handle
    * @param {(kind:string)=>string|null} hooks.attachBlocked  why attaching is impossible, or null
+   * @param {()=>object[]} [hooks.getPool]   the piece's reference pool, for a
+   *   timeline segment: citable by handle, never attached — writing the chip is
+   *   what attaches it at queue time
    */
   constructor(hooks) {
     this.hooks = hooks;
@@ -69,10 +72,14 @@ export class PromptBox {
     this.root.replaceChildren(...this.build(text));
   }
 
-  /** Text -> [text nodes, chip spans]. Only handles with a live asset become
-   *  chips; the rest stay as plain text so the dangling-handle warning sees them. */
+  /** Text -> [text nodes, chip spans]. Only handles with a live asset — the
+   *  state's own or the piece's pool — become chips; the rest stay as plain
+   *  text so the dangling-handle warning sees them. */
   build(text) {
-    const known = new Set(this.hooks.getState().assets.map((a) => a.handle));
+    const known = new Set([
+      ...this.hooks.getState().assets.map((a) => a.handle),
+      ...(this.hooks.getPool?.() ?? []).map((a) => a.handle),
+    ]);
     const out = [];
     let at = 0;
     const pattern = /@([A-Za-z]+-\d+)/g;
@@ -253,13 +260,25 @@ export class PromptBox {
     this.menu.style.top = `${Math.max(8, Math.min(top, window.innerHeight - height - 8))}px`;
   }
 
-  /** Attached assets first, then everything else in the input folder. */
+  /** Attached assets first, then the piece's pool, then the input folder. */
   options() {
     const state = this.hooks.getState();
     const attached = state.assets
       .filter((asset) => !this.query || asset.handle.toLowerCase().includes(this.query)
         || asset.filename.toLowerCase().includes(this.query))
       .map((asset) => ({ kind: "attached", handle: asset.handle, path: asset.filename, mediaKind: asset.kind }));
+
+    // The pool is citable, never attached: choosing one only writes the chip,
+    // and the citation is what carries the file into this generation at queue
+    // time. Hidden while references are blocked here (a start/end frame is
+    // set), because the chip would queue a checkpoint clash.
+    const own = new Set(state.assets.map((a) => a.handle));
+    const pool = this.hooks.attachBlocked("reference") ? []
+      : (this.hooks.getPool?.() ?? [])
+        .filter((asset) => !own.has(asset.handle))
+        .filter((asset) => !this.query || asset.handle.toLowerCase().includes(this.query)
+          || asset.filename.toLowerCase().includes(this.query))
+        .map((asset) => ({ kind: "pool", handle: asset.handle, path: asset.filename, mediaKind: asset.kind }));
 
     const used = new Set(state.assets.map((a) => a.filename));
     const library = (this.library ?? [])
@@ -268,13 +287,13 @@ export class PromptBox {
       .slice(0, MAX_SUGGESTIONS)
       .map((row) => ({ kind: "library", path: row.path, mediaKind: row.kind, row }));
 
-    return { attached, library };
+    return { attached, pool, library };
   }
 
   renderMenu() {
     if (!this.menu) return;
-    const { attached, library } = this.options();
-    this.flat = [...attached, ...library];
+    const { attached, pool, library } = this.options();
+    this.flat = [...attached, ...pool, ...library];
     if (this.active >= this.flat.length) this.active = Math.max(0, this.flat.length - 1);
 
     // openMenu() renders once immediately and again when the library resolves,
@@ -332,6 +351,10 @@ export class PromptBox {
       this.menu.appendChild(el("div", { class: "mmc-mention-head", text: t("Attached") }));
       for (const option of attached) this.menu.appendChild(row(option));
     }
+    if (pool.length) {
+      this.menu.appendChild(el("div", { class: "mmc-mention-head", text: t("Piece references") }));
+      for (const option of pool) this.menu.appendChild(row(option));
+    }
     if (library.length) {
       const blocked = this.hooks.attachBlocked("reference");
       this.menu.appendChild(el("div", {
@@ -366,7 +389,9 @@ export class PromptBox {
   choose(index) {
     const option = this.flat?.[index];
     if (!option) return;
-    if (option.kind === "attached") {
+    if (option.kind === "attached" || option.kind === "pool") {
+      // Both already have a handle; for a pool asset the chip *is* the
+      // attachment — the citation carries it into this generation at queue time.
       this.closeMenu();
       this.insertChip(option.handle);
       return;

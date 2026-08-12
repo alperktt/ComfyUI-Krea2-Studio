@@ -231,6 +231,23 @@ list — nothing is decoded and re-encoded mid-clip, so there is no seam and mus
 dialogue carries across a cut. **Refine all** rewrites every card in one call, which
 is the only way a later shot keeps the look an earlier one established.
 
+**Piece references** attach a file to the timeline itself — a character sheet, a
+location plate, a voice — instead of once per segment it appears in. The shelf
+above the strip hands out `@ref-N` handles, and writing one in a segment's prompt
+is what attaches the file to that segment's generation: it rides into exactly the
+segments that cite it and no other, so a keyframe segment that never mentions it
+is untouched, and editing an unrelated segment re-renders nothing extra. The `@`
+menu inside every segment offers them under *Piece references*, the refiner is
+shown the pool once and may cite it where the subject appears, and a reference
+image can be narrowed (*person*, *object*, *scene*, *style*) so a sheet
+contributes the likeness without its background. In one pass, shots citing the
+same piece reference share a single `<Picture N>`.
+
+While a chained timeline renders, the preview overlay names the segment the
+sampler is on — *Segment 3 of 5* — so a long strip's step count finally says
+where in the piece you are. Cached segments are skipped, so the chip always
+names the segment actually being made.
+
 ## Modes and duration
 
 What you attach picks the mode, and the mode picks the checkpoint — only that one is

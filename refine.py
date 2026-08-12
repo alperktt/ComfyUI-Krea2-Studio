@@ -560,7 +560,7 @@ def describe_slots(slots):
     return lines
 
 
-def user_message(shots, seconds=None, images=0, mode=None, piece=None):
+def user_message(shots, seconds=None, images=0, mode=None, piece=None, pool=None):
     """What to rewrite, and what is attached to rewrite it against.
 
     `shots` is one entry per body wanted back, in play order:
@@ -575,6 +575,12 @@ def user_message(shots, seconds=None, images=0, mode=None, piece=None):
     `rewrite` it is material like the shots and comes back as `PIECE_FIELD`;
     without — a single-card refine, where the other cards' rewrites were
     written against it — it is context that the body must not restate.
+
+    `pool` is the timeline's own reference pool as glossary slots — the assets
+    attached to the piece rather than to one card. Listed once, at the top,
+    because their handles are the only ones stable across every shot: writing
+    one into a shot's prose is what attaches it to that shot's generation at
+    queue time, so the model is told it may.
 
     Each shot's own attachments are listed under it rather than in one glossary
     at the top, because handles are allocated per segment: two cards both have an
@@ -632,6 +638,18 @@ def user_message(shots, seconds=None, images=0, mode=None, piece=None):
                 "it as it stands and write the body to be read after it, "
                 "without restating it."
             )
+
+    if pool:
+        lines.append("")
+        lines.append("ATTACHED TO THE PIECE")
+        lines.append(
+            "These references belong to the whole piece, not to one shot. "
+            "Writing one's handle in a shot's prose is what attaches it to that "
+            "shot's generation; a shot that never writes it does not carry it. "
+            "Cite each one in every shot where its subject appears — and never "
+            "in the global description, which stands in front of all of them."
+        )
+        lines.extend("  " + line for line in describe_slots(pool))
     lines.append("")
 
     for number, shot in enumerate(shots, start=1):

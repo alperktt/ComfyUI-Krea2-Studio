@@ -171,9 +171,15 @@ segments = in_order(by_type["MiniMaxH3TimelineSegment"],
                     ["a red room\nwide", "a red room\ncloser", "a red room\ncut away"])
 # The global prompt is folded into each payload rather than passed alongside it,
 # so a segment node's inputs describe one whole generation and nothing else.
+# `progress` is the one exception: the segment's own position, announced to the
+# stage when the node runs — the index only, so appending a segment cannot
+# touch an earlier payload's cache key.
 check("each segment carries only its own payload",
       [sorted(json.loads(i["segment_data"])) for _, i in segments],
-      [["canvas", "continue", "continue_audio", "request"]] * 3)
+      [["canvas", "continue", "continue_audio", "progress", "request"]] * 3)
+check("the progress stamp is the segment's index and nothing else",
+      [json.loads(i["segment_data"])["progress"] for _, i in segments],
+      [{"index": 1}, {"index": 2}, {"index": 3}])
 # The loaders are built once for the whole chain, not once per segment: they are
 # ordinary nodes keyed on their filenames, so every segment reads the same one.
 check("every segment reads the same FL2VA loader",
