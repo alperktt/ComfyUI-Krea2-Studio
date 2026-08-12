@@ -1,6 +1,6 @@
 [project]
 name = "minimax-creator"
-version = "1.0.0"
+version = "1.0.1"
 description = "One node for MiniMax H3 video: write a sentence, attach media with @, press Run — get a finished clip with sound. Local open weights only, no API key."
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -13,3 +13,4 @@ Repository = "https://github.com/roadmaus/ComfyUI-MiniMax-Creator"
 [tool.comfy]
 PublisherId = "roadmaus"
 DisplayName = "MiniMax Creator"
+Icon = "https://raw.githubusercontent.com/roadmaus/ComfyUI-MiniMax-Creator/main/docs/img/icon.svg"
