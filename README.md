@@ -223,11 +223,11 @@ needs installing separately and nothing registers a node you have to find.
 | pill | what it does | cost |
 |---|---|---|
 | `standard` / `SVDQuant` | W4A4 4-bit blocks with a low-rank branch, from [Krea-2-SVDQuant](https://github.com/alperktt/Krea-2-SVDQuant-ComfyUI). Moves every LoRA onto its own loader too — a plain one would rewrite the quantized weight. | 40 s → 26 s at 1024 |
-| `moodboard` | One of 3,549 [Krea moodboards](https://github.com/Andro-Meta/ComfyUI-Krea-Moodboards) folded into the prompt as style guidance. No node reaches the graph — the catalog is read as data. | free |
+| `moodboard` | One of 3,549 [Krea moodboards](https://github.com/Andro-Meta/ComfyUI-Krea-Moodboards) folded into the prompt as style guidance, picked from a grid of thumbnails and filtered by the catalog's eight style families. No node reaches the graph — the catalog is read as data. | free |
 | `edit` | In-context editing via [krea2edit](https://github.com/lbouaraba/comfyui-krea2edit): the source goes in as frame=1 tokens *and* grounds the instruction through the vision encoder. Needs the Identity Edit LoRA, which the panel picks. | ~1.75× a plain render |
 | `style` | RF-inversion [style transfer](https://github.com/nkxx188/ComfyUI-Krea2-StyleTransfer), one reference or two. | ~4× |
 | `2 stages` / `3 stages` | Base model into Turbo, from [Krea-2-Two-Stage-Sampler](https://github.com/Auryg/Krea-2-Two-Stage-Sampler). The base gives variation between seeds that a distillation does not. Its dual-resolution route cuts the cost of that by more than half. | 61 s, or 26 s at half first-stage scale |
-| `dype` / `sega` | [DyPE](https://github.com/wildminder/ComfyUI-DyPE) extrapolates the position encoding, which is what lifts the resolution ceiling from 2048 to 4096; SEGA sharpens attention from the latent's spectrum. | 3840×2160 in 149 s on a 3090 |
+| `position` | One of two ways to extrapolate the position encoding, from [DyPE](https://github.com/wildminder/ComfyUI-DyPE) — `dype` retunes it per step against the diffusion's spectral progression, `sega` reads a per-dimension mscale off the latent's FFT over an NTK base. **Alternatives, not a chain**: the pack calls SEGA "an alternative to DyPE", so the pill picks one. Either lifts the resolution ceiling from 2048 to 4096. | 3840×2160 in 149 s on a 3090 |
 
 Every one of them is **off by default, and off adds nothing to the graph** — a
 blob that touches none of them compiles to exactly the graph it compiled to
@@ -238,7 +238,22 @@ disabled rather than left to fail: an edit and style references (both build the
 positive conditioning), style transfer and style references (two different
 reference paths), and a multi-stage run with an init image (the sampler has no
 denoise input at all). A multi-stage run also needs two checkpoints, so it does
-not run on the quantized loader.
+not run on the quantized loader. DyPE and SEGA are exclusive too, but as one
+three-way choice rather than a disabled pill — there is no pair to prevent when
+there is only one control.
+
+### The size
+
+The resolution pill has two routes. **Ratio** is a preset aspect and a short-edge
+slider, which is the one to use; it clamps anything past 1:3, because an extreme
+ratio on an unpatched model wraps. **Custom** takes a width and a height typed
+directly and drops that clamp, because saying both numbers is the point of it —
+1000×4000 is reachable there and is not on the ratio route at all. What custom
+keeps is what the model cannot do rather than what it does badly: both axes snap
+to the /16 grid the DiT patchifies on, both stay inside whatever ceiling the
+position pill allows, and the readout shows the *resolved* size, so 1000 reads as
+1008 before the render rather than after it. A typed size also names the ratio, so
+the aspect pill greys out while it is in force.
 
 Each vendored tree carries an `ORIGIN.md`: the source, the commit, what was left
 out, and the things worth knowing before re-vendoring it — including where a
