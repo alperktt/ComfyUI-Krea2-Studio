@@ -208,6 +208,106 @@ expect_error("and a chosen board with no catalog installed says so",
              "catalog is not available")
 
 
+# ---- krea2edit -----------------------------------------------------------------
+
+check("a default blob carries no edit", base.edit, None)
+
+edited = compile(edit={"on": True, "source": {"filename": "portrait.png"}})
+check("the source reaches the payload", edited.edit["source"], "portrait.png")
+check("with the release's defaults for everything not set",
+      (edited.edit["fit_mode"], edited.edit["grounding_px"],
+       edited.edit["ref_boost"], edited.edit["ref_boost_a"], edited.edit["lora"]),
+      (ci.DEFAULT_EDIT_FIT, ci.DEFAULT_GROUNDING_PX, ci.DEFAULT_REF_BOOST, 1.0, None))
+# The fidelity dial follows the v1.2 release workflow, not the node's own input
+# default. The node still says 1.0 because the input was added without changing
+# old graphs; the release ships 4 and calls 1.0 "classic v1.1 behavior". Taking
+# the node's default would hand everyone the old behaviour without saying so.
+check("the fidelity dial is pre-boosted the way the release ships it",
+      ci.DEFAULT_REF_BOOST, 4.0)
+check("but the scene dial is not — the notes say leave it at 1",
+      edited.edit["ref_boost_a"], 1.0)
+
+two = compile(edit={"on": True, "source": {"filename": "scene.png"},
+                    "source_b": {"filename": "face.png"}, "ref_boost": 1.4})
+check("the second reference keeps its slot — training order is scene, then subject",
+      (two.edit["source"], two.edit["source_b"]), ("scene.png", "face.png"))
+check("and the boost is carried as given", two.edit["ref_boost"], 1.4)
+
+# The canvas follows the source, the same way it follows an init image: the
+# answer to "what shape should this be" is already on screen.
+square = compile(aspect="16:9", edit={"on": True, "source": {"filename": "tall.png"}})
+check("the canvas follows the edit source's aspect",
+      ci.compile_prestage(blob(aspect="16:9",
+                               edit={"on": True, "source": {"filename": "tall.png"}}),
+                          image_size_lookup=lambda name: (768, 1024),
+                          moodboard_lookup=fake_lookup).height >
+      ci.compile_prestage(blob(aspect="16:9",
+                               edit={"on": True, "source": {"filename": "tall.png"}}),
+                          image_size_lookup=lambda name: (768, 1024),
+                          moodboard_lookup=fake_lookup).width,
+      True)
+check("but an init image still wins — it is the latent the sampler starts from",
+      ci.compile_prestage(blob(init={"filename": "wide.png"},
+                               edit={"on": True, "source": {"filename": "tall.png"}}),
+                          image_size_lookup=lambda name: ((1024, 768) if name == "wide.png"
+                                                          else (768, 1024)),
+                          moodboard_lookup=fake_lookup).width >
+      ci.compile_prestage(blob(init={"filename": "wide.png"},
+                               edit={"on": True, "source": {"filename": "tall.png"}}),
+                          image_size_lookup=lambda name: ((1024, 768) if name == "wide.png"
+                                                          else (768, 1024)),
+                          moodboard_lookup=fake_lookup).height,
+      True)
+
+# An edit composes with everything that is not conditioning.
+check("an edit and a moodboard compose",
+      bool(compile(edit={"on": True, "source": {"filename": "p.png"}},
+                   moodboard={"on": True, "board": "noir-1"}).edit), True)
+check("and an edit runs on the quantized loader",
+      compile(loader="svdquant", edit={"on": True, "source": {"filename": "p.png"}}
+              ).checkpoint_field, "svdq_model")
+
+# The size advisory, which is an observation and never a clamp: the resolution
+# pill stays the user's and an oversize edit still renders.
+check("a 1 MP edit is not flagged",
+      ci.compile_prestage(blob(aspect="1:1", short_edge=1024,
+                               edit={"on": True, "source": {"filename": "p.png"}}),
+                          moodboard_lookup=fake_lookup).edit_oversize, False)
+check("a 16:9 edit at a 1024 short edge is — 1.9 MP is past where the weights hold",
+      ci.compile_prestage(blob(aspect="16:9", short_edge=1024,
+                               edit={"on": True, "source": {"filename": "p.png"}}),
+                          moodboard_lookup=fake_lookup).edit_oversize, True)
+check("and a second reference raises the ceiling rather than lowering it",
+      ci.compile_prestage(blob(aspect="3:2", short_edge=1024,
+                               edit={"on": True, "source": {"filename": "p.png"},
+                                     "source_b": {"filename": "q.png"}}),
+                          moodboard_lookup=fake_lookup).edit_oversize, False)
+check("nothing is flagged when there is no edit", base.edit_oversize, False)
+
+expect_error("the edit pill with no source is refused",
+             lambda: compile(edit={"on": True}), "no source image is chosen")
+expect_error("an edit and style references together are refused, naming both ways out",
+             lambda: compile(edit={"on": True, "source": {"filename": "p.png"}},
+                             refs=[{"filename": "style.png"}]),
+             "positive conditioning")
+expect_error("an edit is refused on Ideogram",
+             lambda: compile(arch="ideogram4",
+                             edit={"on": True, "source": {"filename": "p.png"}}),
+             "Krea 2")
+expect_error("an unknown fit mode is refused",
+             lambda: compile(edit={"on": True, "source": {"filename": "p.png"},
+                                   "fit_mode": "stretch"}),
+             "unknown edit fit mode")
+expect_error("a grounding resolution past the node's ceiling is refused",
+             lambda: compile(edit={"on": True, "source": {"filename": "p.png"},
+                                   "grounding_px": 9000}),
+             "grounding resolution")
+expect_error("and a boost past the node's ceiling is refused",
+             lambda: compile(edit={"on": True, "source": {"filename": "p.png"},
+                                   "ref_boost": 5000}),
+             "ref_boost")
+
+
 if FAILURES:
     print(f"{len(FAILURES)} failure(s):")
     for failure in FAILURES:

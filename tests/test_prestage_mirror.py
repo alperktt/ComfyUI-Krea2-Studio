@@ -57,6 +57,17 @@ out.defaults = { loader: s.emptyPreStage().loader,
                  moodboard_on: s.emptyPreStage().moodboard.on,
                  moodboard_strength: s.emptyPreStage().moodboard.strength };
 out.moodboard_strengths = [...s.PRESTAGE_MOODBOARD_STRENGTHS];
+out.edit = { fit_modes: [...s.PRESTAGE_EDIT_FIT_MODES],
+             grounding_px: s.PRESTAGE_GROUNDING_PX,
+             max_grounding_px: s.PRESTAGE_MAX_GROUNDING_PX,
+             ref_boost: s.PRESTAGE_REF_BOOST,
+             overcopy: s.PRESTAGE_REF_BOOST_OVERCOPY,
+             max_ref_boost: s.PRESTAGE_MAX_REF_BOOST,
+             sweet_spot: s.PRESTAGE_EDIT_SWEET_SPOT,
+             two_ref_max: s.PRESTAGE_EDIT_TWO_REF_MAX,
+             default_boost: s.emptyPreStage().edit.ref_boost,
+             default_scene_boost: s.emptyPreStage().edit.ref_boost_a,
+             on: s.emptyPreStage().edit.on };
 out.moodboard_collections = [...s.PRESTAGE_MOODBOARD_COLLECTIONS];
 out.image_arches = [...s.PRESTAGE_IMAGE_ARCHES];
 out.presets = s.PRESTAGE_ASPECTS.map(([label]) => label).sort();
@@ -144,6 +155,19 @@ check("the default moodboard strength", mirror["defaults"]["moodboard_strength"]
 # Off is the whole no-regression claim: an untouched pill never opens the
 # 9 MB catalog and never touches the prompt.
 check("the moodboard pill starts off", mirror["defaults"]["moodboard_on"], False)
+
+check("edit fit modes", mirror["edit"]["fit_modes"], list(ci.EDIT_FIT_MODES))
+check("edit grounding default", mirror["edit"]["grounding_px"], ci.DEFAULT_GROUNDING_PX)
+check("edit grounding ceiling", mirror["edit"]["max_grounding_px"], ci.MAX_GROUNDING_PX)
+check("the fidelity dial", mirror["edit"]["ref_boost"], ci.DEFAULT_REF_BOOST)
+check("where over-copying starts", mirror["edit"]["overcopy"], ci.REF_BOOST_OVERCOPY)
+check("the boost ceiling", mirror["edit"]["max_ref_boost"], ci.MAX_REF_BOOST)
+check("the edit sweet spot", mirror["edit"]["sweet_spot"], ci.EDIT_SWEET_SPOT_PIXELS)
+check("the two-reference ceiling", mirror["edit"]["two_ref_max"], ci.EDIT_TWO_REF_MAX_PIXELS)
+# The dial the release pre-boosts and the one it says to leave alone.
+check("a fresh edit block is pre-boosted", mirror["edit"]["default_boost"], ci.DEFAULT_REF_BOOST)
+check("and its scene dial is not", mirror["edit"]["default_scene_boost"], 1.0)
+check("the edit pill starts off", mirror["edit"]["on"], False)
 
 # The weight fields the popover offers have to be the ones the emitter reads, or
 # a file picked in the UI lands in a key nothing loads. `render_image` imports

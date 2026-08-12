@@ -26,6 +26,7 @@ import { openFrameGrab } from "./framegrab.js";
 import { openChoicePopover, stepperPill, aspectGlyph, edgeSlider, PILL_GLYPH } from "./pills.js";
 import { CreatorEditor } from "./editor.js";
 import { samplingBar } from "./sampling.js";
+import { loadLoraNames, loraNames } from "./turbo.js";
 import { Stage } from "./stage.js";
 import { loadCatalog, catalogByFolder } from "./models.js";
 import { viewUrl, listMoodboards } from "./api.js";
@@ -200,15 +201,21 @@ export class PreStageEditor {
     this.commit();
   }
 
+  /** Measure the images the canvas adapts to, so the pills can say what will
+   *  actually be generated before anything is queued.
+   *
+   *  Both the init image and the edit source, because both make the canvas
+   *  follow them — see `compile_image.compile_prestage`. */
   probeInit() {
-    const init = this.state.init;
-    if (!init || this.sizes.has(init.filename)) return;
-    const probe = new Image();
-    probe.onload = () => {
-      this.sizes.set(init.filename, { width: probe.naturalWidth, height: probe.naturalHeight });
-      this.render();
-    };
-    probe.src = viewUrl(init.filename);
+    for (const filename of [this.state.init?.filename, this.state.edit?.source?.filename]) {
+      if (!filename || this.sizes.has(filename)) continue;
+      const probe = new Image();
+      probe.onload = () => {
+        this.sizes.set(filename, { width: probe.naturalWidth, height: probe.naturalHeight });
+        this.render();
+      };
+      probe.src = viewUrl(filename);
+    }
   }
 
   flash(message) {
@@ -231,7 +238,8 @@ export class PreStageEditor {
     this.loraHost.replaceChildren(...(state.loras.length ? [this.renderLoras()] : []));
     this.pillsHost.replaceChildren(this.renderPills());
     this.noticeHost.replaceChildren(
-      ...(this.notice ? [el("div", { class: "mmc-warn", text: this.notice })] : []));
+      ...(this.notice ? [el("div", { class: "mmc-warn", text: this.notice })] : []),
+      ...this.standingNotes());
     this.samplingHost.replaceChildren(samplingBar({
       widgets: this.samplingWidgets,
       ...this.widgetIO(),
@@ -365,6 +373,215 @@ export class PreStageEditor {
       ]));
     }
     return el("div", { class: "mmc-lora-block" }, parts);
+  }
+
+  /** Standing observations about the state, as opposed to `this.notice`, which
+   *  is something that just happened and fades. These are true until the setting
+   *  changes, so they persist and they never block the render — every one of them
+   *  is "this will work, and here is what it will cost".
+   *
+   *  Mirrors what `compile_image` computes, and deliberately not a clamp: the
+   *  resolution pill and the boost dial are the user's. */
+  standingNotes() {
+    const state = this.state;
+    const notes = [];
+    if (!state.edit.on) return notes;
+
+    const geometry = S.resolvedPreStage(state, state.edit.source
+      ? this.sizes.get(state.edit.source.filename) : null);
+    const ceiling = state.edit.source_b ? S.PRESTAGE_EDIT_TWO_REF_MAX : S.PRESTAGE_EDIT_SWEET_SPOT;
+    if (geometry.width * geometry.height > ceiling) {
+      const megapixels = (geometry.width * geometry.height / 1e6).toFixed(1);
+      notes.push(el("div", { class: "mmc-note" }, [
+        el("span", { class: "mmc-note-key", text: "edit size" }),
+        el("span", {
+          text: `${megapixels} MP. The edit weights work best around `
+              + `${(ceiling / 1e6).toFixed(1)} MP — this renders, but slower and with a `
+              + `looser hold on the source. Drop the resolution pill to tighten it.`,
+        }),
+      ]));
+    }
+    if (state.edit.ref_boost > S.PRESTAGE_REF_BOOST_OVERCOPY) {
+      notes.push(el("div", { class: "mmc-note" }, [
+        el("span", { class: "mmc-note-key", text: "boost" }),
+        el("span", {
+          text: `${state.edit.ref_boost.toFixed(2)} is past the point where the reference `
+              + `starts being copied rather than referenced — removals and replacements `
+              + `stop landing. 4 is the recommended setting.`,
+        }),
+      ]));
+    }
+    return notes;
+  }
+
+  // ---- krea2edit --------------------------------------------------------------
+
+  /** The in-context edit path: a source image the render is an edit *of*.
+   *
+   *  Not img2img — the init pill is that, and the two are different things. An
+   *  init is the latent the sampler starts from and gets partly overwritten; an
+   *  edit source is conditioning, injected as frame=1 tokens and grounded into
+   *  the text encode, and the sampler still starts from noise. */
+  editPill() {
+    const edit = this.state.edit;
+    const blocked = this.state.refs.length > 0 && !edit.on;
+    return el("button", {
+      class: `mmc-pill${edit.on ? " accel-on" : ""}`,
+      disabled: blocked || undefined,
+      title: blocked
+        ? "An edit and style references both build the positive conditioning, so only "
+          + "one can run. Clear the style references to edit."
+        : edit.on
+          ? `Editing ${edit.source.filename}${edit.source_b ? " + a second reference" : ""}. `
+            + "Click to change the source, the boost or the edit LoRA."
+          : "Edit an image instead of describing one: the source goes in as in-context "
+            + "tokens and grounds the instruction through the vision encoder. "
+            + "Off — the prompt is read on its own.",
+      onclick: (event) => this.openEdit(event.currentTarget),
+    }, [
+      icon("frameIn", 16),
+      el("span", { text: edit.on ? "edit" : "edit off" }),
+      ...(edit.on ? [el("span", {
+        class: "mmc-pill-sub",
+        text: edit.source.filename.split("/").pop().slice(0, 18),
+      })] : []),
+    ]);
+  }
+
+  async pickEditSource(slot) {
+    const chosen = await openPicker({
+      kinds: ["image", "renders"], kind: "image", single: true,
+      capacity: () => ({ used: 0, max: 1, filesLeft: 1 }),
+    });
+    if (!chosen) return false;
+    this.state.edit[slot] = { filename: chosen[0].path };
+    if (slot === "source") {
+      this.state.edit.on = true;
+      // Both own the positive conditioning; the compile refuses the pair, so
+      // the UI never builds it.
+      this.state.refs = [];
+    }
+    this.commit();
+    return true;
+  }
+
+  openEdit(anchor) {
+    const state = this.state;
+    const edit = state.edit;
+    const pop = el("div", { class: "mmc-pop mmc-weights-pop" });
+    const body = el("div");
+
+    const fileRow = (label, slot, hint) => el("div", { class: "mmc-weight-row" }, [
+      el("span", { class: "mmc-weight-name", text: label }),
+      el("button", {
+        class: `mmc-weight-file${edit[slot] ? "" : " empty"}`,
+        title: hint,
+        text: edit[slot] ? edit[slot].filename.split("/").pop() : "not set",
+        onclick: async () => { if (await this.pickEditSource(slot)) render(); },
+      }),
+      ...(edit[slot] && slot === "source_b" ? [el("button", {
+        class: "mmc-asset-x", text: "✕", title: "Drop the second reference",
+        onclick: () => { edit.source_b = null; this.commit(); render(); },
+      })] : []),
+    ]);
+
+    const numberRow = (label, key, hint, step = 0.05) => el("div", { class: "mmc-weight-row" }, [
+      el("span", { class: "mmc-weight-name", text: label }),
+      stepperPill({
+        value: edit[key], min: 0, max: S.PRESTAGE_MAX_REF_BOOST, step, width: "56px",
+        title: hint,
+        format: (n) => n.toFixed(2),
+        onChange: (value) => { edit[key] = value; this.commit(); render(); },
+      }),
+    ]);
+
+    const render = () => {
+      const rows = [fileRow("Source", "source",
+                            "The image this render is an edit of. Its aspect becomes the canvas.")];
+
+      if (edit.on) {
+        rows.push(fileRow("Second reference", "source_b",
+                          "Optional, for multi-reference edit LoRAs. Training order is scene "
+                        + "first, subject second — so this slot is the subject."));
+
+        // The edit LoRA. Suggested, never imposed: it may equally well be in the
+        // main stack above, and someone who trained their own belongs here too.
+        const loras = loraNames();
+        const suggestion = loras.find((name) => S.PRESTAGE_EDIT_LORA_HINTS.some(
+          (needle) => name.toLowerCase().includes(needle)));
+        rows.push(el("div", { class: "mmc-weight-row" }, [
+          el("span", { class: "mmc-weight-name", text: "Edit LoRA" }),
+          el("button", {
+            class: `mmc-weight-file${edit.lora ? "" : " empty"}`,
+            title: "krea2edit's patch adds the in-context path; the Identity Edit LoRA is what "
+                 + "was trained to use it. Patched on before the patch node. Leave this empty "
+                 + "if the LoRA is already in the stack above — adding it twice doubles it.",
+            text: edit.lora || (suggestion ? `not set — ${suggestion} found` : "not set"),
+            onclick: (event) => openChoicePopover(event.currentTarget, {
+              title: "Edit LoRA",
+              options: ["— none —", ...loras],
+              value: edit.lora || "— none —",
+              onPick: (picked) => {
+                edit.lora = picked === "— none —" ? "" : picked;
+                this.commit();
+                render();
+              },
+            }),
+          }),
+        ]));
+
+        rows.push(numberRow("Reference boost", "ref_boost",
+                            "Multiplies attention toward the last reference — the subject in a "
+                          + "two-reference edit, the only one otherwise. 1.0 is off; higher pulls "
+                          + "harder toward its appearance. The useful value is model-specific."));
+        if (edit.source_b) {
+          rows.push(numberRow("First-ref boost", "ref_boost_a",
+                              "The same dial for the scene. No effect without a second reference."));
+        }
+
+        rows.push(el("div", { class: "mmc-weight-row" }, [
+          el("span", { class: "mmc-weight-name", text: "Fit" }),
+          el("div", { class: "mmc-pill mmc-turbo-seg" }, S.PRESTAGE_EDIT_FIT_MODES.map((mode) =>
+            el("button", {
+              class: "mmc-turbo-opt",
+              "aria-pressed": edit.fit_mode === mode,
+              title: S.PRESTAGE_EDIT_FIT_HINT[mode],
+              onclick: () => { edit.fit_mode = mode; this.commit(); render(); },
+            }, [el("span", { text: mode === "fit" ? "fit" : "crop" })]))),
+        ]));
+
+        rows.push(el("div", { class: "mmc-weight-row" }, [
+          el("span", { class: "mmc-weight-name", text: "Grounding" }),
+          stepperPill({
+            value: edit.grounding_px, min: 0, max: S.PRESTAGE_MAX_GROUNDING_PX,
+            step: 64, width: "64px",
+            title: "Longest side of the source fed to the vision encoder. The edit LoRA trained "
+                 + "with 384–768 px jitter, so 768 is in distribution; 0 means native.",
+            onChange: (value) => { edit.grounding_px = Math.round(value); this.commit(); render(); },
+          }),
+        ]));
+
+        rows.push(el("button", {
+          class: "mmc-opt",
+          onclick: () => {
+            edit.on = false;
+            edit.source = null;
+            edit.source_b = null;
+            this.commit();
+            render();
+          },
+        }, [el("span", { class: "mmc-opt-label" }, [el("span", { text: "Switch the edit off" })])]));
+      }
+
+      body.replaceChildren(...rows);
+    };
+
+    pop.append(el("div", { class: "mmc-pop-title", text: "Edit" }), body);
+    render();
+    document.body.appendChild(pop);
+    placeNear(pop, anchor);
+    dismissable(pop);
+    loadLoraNames(() => pop.isConnected && render());
   }
 
   // ---- moodboard --------------------------------------------------------------
@@ -531,6 +748,7 @@ export class PreStageEditor {
     ]);
 
     const pills = [archPill, aspectPill, resPill, this.moodboardPill()];
+    if (state.arch === "krea2") pills.push(this.editPill());
 
     if (state.arch === "ideogram4") {
       // Ideogram's speed axis. The preset owns the schedule shape as well as

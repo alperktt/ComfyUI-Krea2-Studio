@@ -72,9 +72,11 @@ LABEL = {
     "vae": "the VAE",
 }
 
-# The vendored SVDQuant pair, under the ids `nodes_vendor` registers them with.
+# The vendored nodes, under the ids `nodes_vendor` registers them with.
 SVDQUANT_LOADER = "K2S_SVDQuantW4A4Loader"
 SVDQUANT_LORA = "K2S_SVDQuantLoraLoader"
+EDIT_PATCH = "K2S_Krea2EditModelPatch"
+EDIT_ENCODE = "K2S_Krea2EditGroundedEncode"
 
 # The reference template's shift, applied only on the style-reference branch —
 # plain t2i leaves the shift the checkpoint detection already set (1.15).
@@ -229,41 +231,131 @@ def _emit_model(graph, payload, weights):
     if payload.loader != "svdquant":
         model = graph.node("UNETLoader", unet_name=weights.get(payload.checkpoint_field),
                            weight_dtype=weights.dtype).out(0)
-        # Model-only, exactly as the official workflows patch these DiTs — there
-        # is no text-encoder half to a Krea or Ideogram LoRA.
-        for entry in payload.loras:
-            model = graph.node("LoraLoaderModelOnly", model=model,
-                               lora_name=entry["name"],
-                               strength_model=entry["strength"]).out(0)
-        return model
+    else:
+        _require_vendored(
+            SVDQUANT_LOADER, "The SVDQuant loader",
+            "Set the loader pill back to standard to render on the stock loader.")
+        # No `weight_dtype`: the checkpoint carries its own precision, and the
+        # dtype pill has nothing to say about a file that is already quantized.
+        model = graph.node(SVDQUANT_LOADER,
+                           model_name=weights.get(payload.checkpoint_field)).out(0)
 
-    from . import nodes_vendor
+    for entry in payload.loras:
+        model = emit_lora(graph, payload, model, entry["name"], entry["strength"],
+                          entry.get("adapters", "bypass"))
+    return model
 
-    if nodes_vendor.missing(SVDQUANT_LOADER):
-        raise ValueError(
-            "The SVDQuant loader did not load — see the ComfyUI log for why "
-            "vendor/svdquant could not be imported. Set the loader pill back to "
-            "standard to render on the stock loader."
-        )
+
+def emit_lora(graph, payload, model, name, strength, adapters="bypass"):
+    """One LoRA onto a MODEL link, through whichever loader this render is using.
+
+    Model-only, exactly as the official workflows patch these DiTs — there is no
+    text-encoder half to a Krea or Ideogram LoRA.
+
+    Public because the edit panel carries a LoRA of its own and has to patch it
+    on the same way: two code paths for "add a LoRA" is how one of them ends up
+    on the wrong loader.
+    """
+    if payload.loader != "svdquant":
+        return graph.node("LoraLoaderModelOnly", model=model,
+                          lora_name=name, strength_model=strength).out(0)
+
     import nodes
 
-    # No `weight_dtype`: the checkpoint carries its own precision, and the dtype
-    # pill has nothing to say about a file that is already quantized.
-    model = graph.node(SVDQUANT_LOADER,
-                       model_name=weights.get(payload.checkpoint_field)).out(0)
-    lora_node = nodes.NODE_CLASS_MAPPINGS.get(SVDQUANT_LORA)
-    for entry in payload.loras:
-        if lora_node is None:
-            raise ValueError(
-                "The SVDQuant LoRA loader did not load, so this LoRA would be "
-                "baked into the 4-bit weight instead of folded into the low-rank "
-                "branch. Remove the LoRA, or set the loader pill back to standard."
-            )
-        model = graph.node(SVDQUANT_LORA, model=model,
-                           lora_name=entry["name"],
-                           strength=entry["strength"],
-                           adapters=_adapter_option(lora_node, entry["adapters"])).out(0)
-    return model
+    node = nodes.NODE_CLASS_MAPPINGS.get(SVDQUANT_LORA)
+    if node is None:
+        raise ValueError(
+            f"The SVDQuant LoRA loader did not load, so '{name}' would be baked "
+            f"into the 4-bit weight instead of folded into the low-rank branch. "
+            f"Remove the LoRA, or set the loader pill back to standard."
+        )
+    return graph.node(SVDQUANT_LORA, model=model, lora_name=name, strength=strength,
+                      adapters=_adapter_option(node, adapters)).out(0)
+
+
+def _require_vendored(node_id, feature, fallback):
+    """Refuse a feature whose vendored node did not load, by name.
+
+    Emitters address these by string into a `GraphBuilder`, which does not check
+    ids — an unregistered one fails much later, inside execution, with an error
+    naming neither the pack nor the feature.
+    """
+    from . import nodes_vendor
+
+    if nodes_vendor.missing(node_id):
+        raise ValueError(
+            f"{feature} needs the '{node_id}' node, which did not load — see the "
+            f"ComfyUI log for why vendor/ could not be imported. {fallback}")
+
+
+def _edit_sources(graph, payload, placeholder):
+    """The edit's source image(s), loaded and scaled to the render's canvas.
+
+    Scaled here rather than left to the node because `compile_image` has already
+    made the canvas follow the source's aspect, so this only absorbs the /16
+    snap — and a source that arrives at the target grid is the case `fit_mode`
+    was trained on rather than the one it has to rescue.
+
+    **`source_latent` gets `placeholder` rather than an encode of the source.**
+    It is a required socket that this emitter's wiring guarantees is never read:
+    the node takes its pixel path whenever `vae` and `source_image` are both
+    connected (`if vae is not None and source_image is not None` in the vendored
+    patch), and that path encodes the source itself from pixels. This emitter
+    always connects both — it is the blur-proof path the pack recommends — so a
+    `VAEEncode` here would run on every render and have its result thrown away.
+    Passing a latent the graph already has costs nothing and adds no node.
+
+    Flagged in `vendor/krea2edit/ORIGIN.md`: if a future version stops
+    overriding, this becomes wrong rather than merely wasteful.
+    """
+    images, latents = {}, {}
+    for slot, key in (("", "source"), ("_b", "source_b")):
+        filename = payload.edit[key]
+        if not filename:
+            continue
+        loaded = graph.node("LoadImage", image=filename).out(0)
+        images[f"source_image{slot}"] = graph.node(
+            "ImageScale", image=loaded, upscale_method="lanczos",
+            width=payload.width, height=payload.height, crop="center").out(0)
+        latents[f"source_latent{slot}"] = placeholder
+    return images, latents
+
+
+def _emit_edit_patch(graph, payload, model, vae, images, latents, target_latent):
+    """krea2edit's appearance half: the source's tokens, in context.
+
+    Wired the way the pack's README recommends and not one input less — `vae`
+    plus `source_image` is the pixel-space path that does not blur on a
+    resolution mismatch, and `target_latent` gets the source encoded before
+    sampling starts rather than on the first step, which on a tight card is the
+    difference between the VAE evicting part of the DiT and not.
+    """
+    _require_vendored(EDIT_PATCH, "The edit", "Switch the edit pill off to render without it.")
+    return graph.node(EDIT_PATCH, model=model, vae=vae,
+                      target_latent=target_latent,
+                      ref_boost=payload.edit["ref_boost"],
+                      ref_boost_a=payload.edit["ref_boost_a"],
+                      fit_mode=payload.edit["fit_mode"],
+                      **images, **latents).out(0)
+
+
+def _emit_edit_encode(graph, payload, clip, images, text):
+    """krea2edit's semantic half: the instruction, grounded on the source.
+
+    Training encoded the instruction *with* the image through Qwen3-VL, twelve
+    layers tapped. Stock `CLIPTextEncode` is text-only, so an edit run through it
+    is missing the half that resolves "the man on the left".
+
+    `text=""` is the grounded unconditional, which is what training's negative
+    looked like — the pack's own docstring asks for it, so the negative branch
+    calls this too rather than zeroing the positive.
+    """
+    _require_vendored(EDIT_ENCODE, "The edit", "Switch the edit pill off to render without it.")
+    grounded = {"image": images["source_image"]}
+    if "source_image_b" in images:
+        grounded["image_b"] = images["source_image_b"]
+    return graph.node(EDIT_ENCODE, clip=clip, prompt=text,
+                      grounding_px=payload.edit["grounding_px"], **grounded).out(0)
 
 
 def _negative(graph, payload, clip, positive):
@@ -305,6 +397,43 @@ def _latent(graph, payload, vae, empty_node):
 
 
 def _emit_krea2(graph, payload, sampling, clip, vae, model, unique_id, filename_prefix):
+    # Built first on the edit path: the patch node wants the sampler's own
+    # latent, so that it can encode the source before sampling starts rather
+    # than pulling the VAE onto the card on the first step.
+    latent, denoise = _latent(graph, payload, vae, "EmptySD3LatentImage")
+
+    if payload.edit:
+        # The Identity Edit LoRA goes on before the patch: the patch adds the
+        # in-context path, the LoRA is what was trained to use it. Optional
+        # because it may equally well be sitting in the main stack above — the
+        # panel says so rather than adding it twice.
+        if payload.edit["lora"]:
+            model = emit_lora(graph, payload, model, payload.edit["lora"],
+                              payload.edit["lora_strength"])
+        images, latents = _edit_sources(graph, payload, latent)
+        model = _emit_edit_patch(graph, payload, model, vae, images, latents, latent)
+        positive = _emit_edit_encode(graph, payload, clip, images, payload.prompt)
+        if sampling.cfg > 1.0:
+            # Grounded on the same source with an empty instruction — training's
+            # unconditional, and what the pack asks for when CFG is in play.
+            negative = _emit_edit_encode(graph, payload, clip, images,
+                                         payload.negative_prompt or "")
+        else:
+            # At cfg 1 the sampler never evaluates the unconditional branch — but
+            # a graph is executed by dependency, so a grounded encode wired into
+            # `negative` still runs, and running it means a second full pass of
+            # Qwen3-VL's vision tower over the source for a result nothing reads.
+            # On the first edit rendered here that was most of the render.
+            # `ConditioningZeroOut` satisfies the socket for free.
+            negative = graph.node("ConditioningZeroOut", conditioning=positive).out(0)
+        sampled = graph.node(
+            "KSampler", model=model, positive=positive, negative=negative,
+            latent_image=latent, seed=sampling.seed, steps=sampling.steps,
+            cfg=sampling.cfg, sampler_name=sampling.sampler_name,
+            scheduler=sampling.scheduler, denoise=denoise,
+        )
+        return _emit_tail(graph, sampled.out(0), vae, unique_id, filename_prefix)
+
     if payload.refs:
         # The Qwen-edit encoder reads up to three references: it feeds them to
         # the text encoder as vision tokens *and* VAE-encodes them into the
@@ -326,7 +455,6 @@ def _emit_krea2(graph, payload, sampling, clip, vae, model, unique_id, filename_
 
     negative = _negative(graph, payload, clip, positive)
 
-    latent, denoise = _latent(graph, payload, vae, "EmptySD3LatentImage")
     sampled = graph.node(
         "KSampler", model=model, positive=positive, negative=negative,
         latent_image=latent, seed=sampling.seed, steps=sampling.steps,

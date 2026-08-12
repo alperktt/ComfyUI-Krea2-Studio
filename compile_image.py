@@ -103,6 +103,45 @@ DEFAULT_MOODBOARD_STRENGTH = "normal"
 MOODBOARD_COLLECTIONS = ("krea", "andrometa")
 DEFAULT_MOODBOARD_COLLECTION = "krea"
 
+# krea2edit: the in-context edit path. `fit` resamples the source onto the target
+# grid the way the current weights were trained; `crop (legacy)` is v1/v1.1
+# geometry and only belongs with those older weights. The strings are the
+# vendored node's own option values, so they are passed through verbatim.
+EDIT_FIT_MODES = ("fit", "crop (legacy)")
+DEFAULT_EDIT_FIT = "fit"
+
+# How much of the source the VLM sees, as a cap on its longest side. The edit
+# LoRA trained with 384-768 px jitter, so the node's own 768 is in distribution;
+# 0 means native resolution, which the jitter makes tolerable too.
+DEFAULT_GROUNDING_PX = 768
+MAX_GROUNDING_PX = 4096
+
+# `ref_boost` multiplies target->reference attention.
+#
+# **4.0, not the node's own 1.0.** The node defaults to 1.0 because that is what
+# v1.1 did and the input was added without changing old graphs; the v1.2 release
+# workflow ships it at 4 and its note says why — "4.0 = recommended (pre-set):
+# much stronger face + body likeness, more reliable edits", against "1.0 =
+# classic v1.1 behavior". Taking the node's default would quietly hand everyone
+# the old behaviour, so this follows the release rather than the input.
+#
+# Above ~10 the note reports over-copying: removals and replacements start
+# failing because the reference is pulled in too hard. Below 1 suppresses the
+# reference for creative freedom. The ceiling is the node's own.
+DEFAULT_REF_BOOST = 4.0
+REF_BOOST_OVERCOPY = 10.0
+MAX_REF_BOOST = 1000.0
+
+# Where the edit weights work best, in pixels of output. The release workflow's
+# notes: "1MP is the sweet spot; go higher only for single-person edits" and
+# "Inputs around 1MP work best. Two-person images: stay at/below ~1.5MP."
+#
+# Not a clamp. The resolution pill is the user's, and an edit at 2 MP renders —
+# it is just slower and looser than the same edit at 1 MP. So the payload
+# carries the observation and the UI says it.
+EDIT_SWEET_SPOT_PIXELS = 1024 * 1024
+EDIT_TWO_REF_MAX_PIXELS = 1536 * 1024
+
 # Ideogram's official preset table, verbatim from the shipped ComfyUI template
 # (V4_QUALITY_48 / V4_DEFAULT_20 / V4_TURBO_12). mu and std shape the
 # resolution-shifted schedule, so they belong to the preset, not to the user.
@@ -147,6 +186,13 @@ class ImagePayload:
     # in `prompt`; this one needs a conditioning of its own, so it travels
     # separately — see `render_image._emit_krea2`.
     negative_prompt: str = None
+    # krea2edit, or None. `{source, source_b, lora, ref_boost, ref_boost_a,
+    # fit_mode, grounding_px}` — see `_parse_edit`.
+    edit: dict = None
+    # Set when an edit's canvas is past the size its weights work best at. Not a
+    # refusal and not a clamp — the render is fine, just slower and looser than
+    # the same edit at 1 MP, and the UI says so.
+    edit_oversize: bool = False
     # Ideogram's schedule shape, None on krea2.
     mu: float = None
     std: float = None
@@ -294,6 +340,71 @@ def _parse_moodboard(raw):
             "use_negative": raw.get("use_negative", True) is not False}
 
 
+def _number(value, label, minimum, maximum, default):
+    if value is None:
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise CompileError(f"{label} must be a number")
+    if not minimum <= number <= maximum:
+        raise CompileError(f"{label} must be between {minimum} and {maximum}")
+    return number
+
+
+def _parse_edit(raw):
+    """The krea2edit block, validated. `None` when the pill is off.
+
+    Two references are the node's limit and its order is load-bearing: the
+    training order is scene first, subject second, which is why the second slot
+    is `source_b` rather than a list.
+    """
+    if not isinstance(raw, dict) or not raw.get("on"):
+        return None
+
+    def source(key, required):
+        entry = raw.get(key)
+        filename = entry.get("filename") if isinstance(entry, dict) else entry
+        if not filename:
+            if required:
+                raise CompileError("the edit pill is on but no source image is chosen")
+            return None
+        if not isinstance(filename, str):
+            raise CompileError(f"the edit {key} must be a filename")
+        return filename
+
+    fit_mode = raw.get("fit_mode", DEFAULT_EDIT_FIT)
+    if fit_mode not in EDIT_FIT_MODES:
+        raise CompileError(f"unknown edit fit mode {fit_mode!r}")
+
+    grounding = raw.get("grounding_px", DEFAULT_GROUNDING_PX)
+    try:
+        grounding = int(grounding)
+    except (TypeError, ValueError):
+        raise CompileError("the grounding resolution must be a whole number")
+    if not 0 <= grounding <= MAX_GROUNDING_PX:
+        raise CompileError(f"the grounding resolution must be between 0 and {MAX_GROUNDING_PX}")
+
+    lora = raw.get("lora")
+    return {
+        "source": source("source", True),
+        "source_b": source("source_b", False),
+        # The Identity Edit LoRA, patched before the model patch. Optional here
+        # because it may equally well be in the main LoRA stack — see
+        # `render_image._emit_edit_patch`.
+        "lora": lora.strip() if isinstance(lora, str) and lora.strip() else None,
+        "lora_strength": _number(raw.get("lora_strength"), "the edit LoRA strength",
+                                 -10.0, 10.0, 1.0),
+        "ref_boost": _number(raw.get("ref_boost"), "ref_boost", 0.0, MAX_REF_BOOST,
+                             DEFAULT_REF_BOOST),
+        # The scene dial, and it stays at 1: the release notes say to leave it
+        # there unless you are exploring. Only the subject dial is pre-boosted.
+        "ref_boost_a": _number(raw.get("ref_boost_a"), "ref_boost_a", 0.0, MAX_REF_BOOST, 1.0),
+        "fit_mode": fit_mode,
+        "grounding_px": grounding,
+    }
+
+
 def compile_prestage(data, image_size_lookup=None, moodboard_lookup=None):
     """`prestage_data` dict -> `ImagePayload`.
 
@@ -367,10 +478,30 @@ def compile_prestage(data, image_size_lookup=None, moodboard_lookup=None):
 
     init = _parse_init(data.get("init"))
 
+    edit = _parse_edit(data.get("edit"))
+    if edit is not None:
+        if arch != "krea2":
+            raise CompileError(
+                "krea2edit is Krea 2's in-context edit path — switch the model "
+                "pill to Krea 2, or the edit pill off")
+        if refs:
+            # Both build the positive conditioning, and from different encoders:
+            # the Qwen-edit node for references, the grounded node for edits.
+            # Whichever ran second would silently be the only one that counted.
+            raise CompileError(
+                "an edit and style references cannot run together — both build the "
+                "positive conditioning. Clear the style references, or switch the "
+                "edit pill off")
+
     short_edge = data.get("short_edge", DEFAULT_SHORT_EDGE)
     ratio_clamped = False
-    if init is not None and image_size_lookup is not None:
-        source_w, source_h = image_size_lookup(init["filename"])
+    # An edit's canvas follows its source for the same reason an img2img render's
+    # follows its init: the answer to "what shape should this be" is already on
+    # screen. The init wins if both are set, because it is the latent the sampler
+    # actually starts from.
+    adaptive = init["filename"] if init is not None else (edit["source"] if edit else None)
+    if adaptive is not None and image_size_lookup is not None:
+        source_w, source_h = image_size_lookup(adaptive)
         ratio, ratio_clamped = clamp_ratio(source_w / source_h)
     else:
         aspect = data.get("aspect", DEFAULT_ASPECT)
@@ -379,6 +510,14 @@ def compile_prestage(data, image_size_lookup=None, moodboard_lookup=None):
         except (TypeError, ValueError):
             raise CompileError(f"unknown aspect {aspect!r}")
     width, height = resolve_canvas(ratio, short_edge)
+
+    # A two-reference edit has a lower ceiling than a single-reference one: the
+    # release notes give ~1 MP for one image and ~1.5 MP for two people.
+    edit_oversize = False
+    if edit is not None:
+        ceiling = (EDIT_TWO_REF_MAX_PIXELS if edit["source_b"]
+                   else EDIT_SWEET_SPOT_PIXELS)
+        edit_oversize = width * height > ceiling
 
     checkpoint_field = "model"
     mu = std = None
@@ -403,5 +542,6 @@ def compile_prestage(data, image_size_lookup=None, moodboard_lookup=None):
         arch=arch, prompt=prompt, width=width, height=height,
         checkpoint_field=checkpoint_field, loader=loader,
         loras=loras, refs=refs, init=init, negative_prompt=negative_prompt,
+        edit=edit, edit_oversize=edit_oversize,
         mu=mu, std=std, ratio_clamped=ratio_clamped,
     )

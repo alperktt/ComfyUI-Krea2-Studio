@@ -60,6 +60,8 @@ CATEGORY = "Krea2/internal"
 VENDORED: list[tuple[str, str, str]] = [
     ("K2S_SVDQuantW4A4Loader", "svdquant.svdquant_w4a4", "Krea2SVDQuantW4A4Loader"),
     ("K2S_SVDQuantLoraLoader", "svdquant.svdquant_lora", "Krea2SVDQuantLoraLoader"),
+    ("K2S_Krea2EditModelPatch", "krea2edit", "Krea2EditModelPatch"),
+    ("K2S_Krea2EditGroundedEncode", "krea2edit", "Krea2EditGroundedEncode"),
 ]
 
 

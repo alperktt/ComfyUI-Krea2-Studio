@@ -624,9 +624,9 @@ expect_error("the SVDQuant loader is refused on Ideogram",
 # catalog.
 
 
-def emitted(payload, weights=None):
+def emitted(payload, weights=None, cfg=3.5):
     graph = ri.emit(payload, weights or ri.ImageWeights(arch="krea2", files=MODELS["krea2"]),
-                    render_mod.Sampling(seed=1, steps=52, cfg=3.5,
+                    render_mod.Sampling(seed=1, steps=52, cfg=cfg,
                                         sampler_name="euler", scheduler="simple"), NODE_ID)
     return by_class(graph.finalize())
 
@@ -650,6 +650,79 @@ check("the positive still carries the prompt and the board's prose",
       [t.startswith("p") and "hard chiaroscuro" in t
        for t in sorted((i["text"] for _, i in negged["CLIPTextEncode"]), reverse=True)][0],
       True)
+
+# ---- krea2edit ------------------------------------------------------------------
+#
+# Two halves of one recipe, and the check that matters is that both are wired:
+# the patch node carries the source's appearance, the grounded encoder carries
+# its semantics, and running either alone runs half the training.
+
+edit_payload = ci.compile_prestage(
+    {"arch": "krea2", "prompt": "put him in a red coat", "aspect": "1:1", "short_edge": 1024,
+     "edit": {"on": True, "source": {"filename": "man.png"}, "ref_boost": 1.3}})
+edited = emitted(edit_payload)
+
+check("the appearance half is patched onto the model", len(edited[ri.EDIT_PATCH]), 1)
+patch = edited[ri.EDIT_PATCH][0][1]
+check("wired the way the pack recommends: pixels, VAE and the sampler's own latent",
+      all(key in patch for key in ("source_image", "vae", "target_latent", "source_latent")),
+      True)
+check("the boost is passed through", patch["ref_boost"], 1.3)
+check("and the target latent is the one KSampler starts from",
+      patch["target_latent"], edited["KSampler"][0][1]["latent_image"])
+
+# The node takes its pixel path whenever vae + source_image are both wired, and
+# that path encodes the source itself. This emitter always wires both, so a
+# VAEEncode for `source_latent` would run every render and be discarded.
+check("no VAE encode is emitted for a socket the pixel path overrides",
+      "VAEEncode" in edited, False)
+check("the required socket is fed a latent the graph already has",
+      patch["source_latent"], patch["target_latent"])
+
+check("the semantic half replaces the text-only encode", "CLIPTextEncode" in edited, False)
+check("and at cfg 3.5 it is built twice — the negative is grounded too, as training's was",
+      len(edited[ri.EDIT_ENCODE]), 2)
+prompts = sorted(i["prompt"] for _, i in edited[ri.EDIT_ENCODE])
+check("one carries the instruction, one is empty",
+      (prompts[0], prompts[1]), ("", "put him in a red coat"))
+check("both are grounded on the same source",
+      len({i["image"][0] for _, i in edited[ri.EDIT_ENCODE]}), 1)
+
+# The one that cost real time. A graph is executed by dependency, so a grounded
+# encode wired into `negative` runs whether or not the sampler reads it — and at
+# cfg 1, which is where Turbo lives, it never does. Building it there is a second
+# full pass of Qwen3-VL's vision tower over the source for a result nothing looks
+# at, and on the first edit rendered here it was most of the render.
+cheap = emitted(edit_payload, cfg=1.0)
+check("at cfg 1 the grounded negative is not built at all",
+      len(cheap[ri.EDIT_ENCODE]), 1)
+check("and the socket is satisfied by the zeroed positive instead",
+      "ConditioningZeroOut" in cheap, True)
+check("the instruction is still grounded",
+      cheap[ri.EDIT_ENCODE][0][1]["prompt"], "put him in a red coat")
+check("the source is scaled to the render's canvas before either sees it",
+      edited["ImageScale"][0][1]["width"], edit_payload.width)
+
+two_ref = emitted(ci.compile_prestage(
+    {"arch": "krea2", "prompt": "p", "aspect": "1:1", "short_edge": 1024,
+     "edit": {"on": True, "source": {"filename": "scene.png"},
+              "source_b": {"filename": "face.png"}}}))
+check("a second reference reaches both halves",
+      ("source_image_b" in two_ref[ri.EDIT_PATCH][0][1],
+       all("image_b" in i for _, i in two_ref[ri.EDIT_ENCODE])),
+      (True, True))
+
+with_lora = emitted(ci.compile_prestage(
+    {"arch": "krea2", "prompt": "p", "aspect": "1:1", "short_edge": 1024,
+     "edit": {"on": True, "source": {"filename": "man.png"},
+              "lora": "krea2_identity_edit_v1_2.safetensors"}}))
+check("the edit LoRA is patched on, and before the patch node",
+      list(with_lora[ri.EDIT_PATCH][0][1]["model"]),
+      [with_lora["LoraLoaderModelOnly"][0][0], 0])
+
+# Off is off: nothing above reaches a render that did not ask for an edit.
+for absent in (ri.EDIT_PATCH, ri.EDIT_ENCODE):
+    check(f"no {absent} without the edit pill", absent in by_class(build().expand), False)
 
 if FAILURES:
     print(f"{len(FAILURES)} failure(s):")

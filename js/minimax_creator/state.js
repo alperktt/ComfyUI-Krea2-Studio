@@ -928,6 +928,32 @@ export const PRESTAGE_MOODBOARD_HINT = {
   strong: "Guidance, taste profile and keywords. Takes over the look; leaves the subject alone.",
 };
 
+/** krea2edit: the in-context edit path. `fit` is how the current weights were
+ *  trained; `crop (legacy)` is v1/v1.1 geometry. The strings are the vendored
+ *  node's own option values — mirrors compile_image.EDIT_FIT_MODES. */
+export const PRESTAGE_EDIT_FIT_MODES = ["fit", "crop (legacy)"];
+export const PRESTAGE_EDIT_FIT_HINT = {
+  fit: "Resample the source onto the target grid. What the current weights trained on.",
+  "crop (legacy)": "Centre-crop to the target aspect, then resize. Only for v1/v1.1 weights.",
+};
+export const PRESTAGE_GROUNDING_PX = 768;
+export const PRESTAGE_MAX_GROUNDING_PX = 4096;
+/** The fidelity dial. 4.0 rather than the node's own 1.0: the v1.2 release
+ *  workflow ships it at 4 and calls that "recommended", against "1.0 = classic
+ *  v1.1 behavior". Past ~10 the release notes report over-copying — removals and
+ *  replacements start failing because the reference is pulled in too hard. */
+export const PRESTAGE_REF_BOOST = 4.0;
+export const PRESTAGE_REF_BOOST_OVERCOPY = 10.0;
+export const PRESTAGE_MAX_REF_BOOST = 1000.0;
+/** Where the edit weights work best, in output pixels — the release notes' "1MP
+ *  is the sweet spot", and ~1.5 MP with a second reference. Advisory: the
+ *  resolution pill stays the user's and an oversize edit still renders. */
+export const PRESTAGE_EDIT_SWEET_SPOT = 1024 * 1024;
+export const PRESTAGE_EDIT_TWO_REF_MAX = 1536 * 1024;
+/** What the edit panel proposes when it can see a LoRA that looks like the one
+ *  krea2edit was trained against. A suggestion, never a requirement. */
+export const PRESTAGE_EDIT_LORA_HINTS = ["identity_edit", "krea2_edit", "krea2edit"];
+
 export const PRESTAGE_ADAPTER_MODES = ["bypass", "bake"];
 export const PRESTAGE_ADAPTER_LABEL = { bypass: "bypass", bake: "bake" };
 export const PRESTAGE_ADAPTER_HINT = {
@@ -1018,6 +1044,15 @@ export function emptyPreStage() {
       on: false, board: "", title: "", strength: "normal",
       collection: "krea", use_negative: true,
     },
+    // krea2edit. Off, and off adds nothing to the graph. `source` is the image
+    // being edited; `source_b` is the optional second reference, and the order
+    // is the training order — scene first, subject second.
+    edit: {
+      on: false, source: null, source_b: null,
+      lora: "", lora_strength: 1.0,
+      ref_boost: 4.0, ref_boost_a: 1.0,
+      fit_mode: "fit", grounding_px: 768,
+    },
     // Ideogram's speed axis: which official preset shapes the schedule.
     quality: "default",
     // The H3 branch: its own settings, and its generation in the Creator's
@@ -1077,6 +1112,36 @@ export function parsePreStage(raw) {
       state.loras = state.loras.map((entry) => (
         entry && typeof entry === "object" && !PRESTAGE_ADAPTER_MODES.includes(entry.adapters)
           ? { ...entry, adapters: "bypass" } : entry));
+      const edit = state.edit && typeof state.edit === "object" ? state.edit : {};
+      const editSource = (value) => (
+        value && typeof value === "object" && typeof value.filename === "string" && value.filename
+          ? { filename: value.filename } : null);
+      const clamp = (value, min, max, fallback) => {
+        const number = Number(value);
+        return Number.isFinite(number) ? Math.min(max, Math.max(min, number)) : fallback;
+      };
+      state.edit = {
+        // On with no source is not a state the compile accepts, so it is not one
+        // that can be loaded either — the same rule the moodboard block follows.
+        on: edit.on === true && !!editSource(edit.source),
+        source: editSource(edit.source),
+        source_b: editSource(edit.source_b),
+        lora: typeof edit.lora === "string" ? edit.lora : "",
+        lora_strength: clamp(edit.lora_strength, -10, 10, 1),
+        ref_boost: clamp(edit.ref_boost, 0, PRESTAGE_MAX_REF_BOOST, PRESTAGE_REF_BOOST),
+        // The scene dial stays at 1: the release notes say to leave it there
+        // unless you are exploring. Only the subject dial is pre-boosted.
+        ref_boost_a: clamp(edit.ref_boost_a, 0, PRESTAGE_MAX_REF_BOOST, 1.0),
+        fit_mode: PRESTAGE_EDIT_FIT_MODES.includes(edit.fit_mode) ? edit.fit_mode : "fit",
+        grounding_px: Math.round(clamp(edit.grounding_px, 0, PRESTAGE_MAX_GROUNDING_PX,
+                                       PRESTAGE_GROUNDING_PX)),
+      };
+      // An edit and style references both build the positive conditioning, so
+      // they cannot both be on. The pill greys out rather than letting this
+      // happen, but a hand-edited blob reaches here — the edit wins, because it
+      // is the one that named a file.
+      if (state.edit.on && state.refs.length) state.refs = [];
+
       const board = state.moodboard && typeof state.moodboard === "object" ? state.moodboard : {};
       state.moodboard = {
         // On with nothing chosen is not a state the compile accepts, so it is
