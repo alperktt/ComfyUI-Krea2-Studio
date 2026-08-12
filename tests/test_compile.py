@@ -615,18 +615,59 @@ wide = timeline([segment(), segment(), segment()], aspect="9:16", short_edge=512
 check("one canvas across the timeline",
       {(c.width, c.height) for c in wide}, {canvas.resolve_canvas(9 / 16, 512)})
 
-expect_error("references in a continuing segment",
-             lambda: timeline([segment(), segment(**{
-                 "continue": True,
-                 "assets": [{"handle": "img-1", "kind": "image", "role": "reference", "filename": "a.png"}],
-             })]),
-             "continuation off")
+# A continuing segment with references: the seam rides as pinned guides that
+# payload.py places on the segment's own timeline, so the checkpoint choice no
+# longer forbids the combination — REF2VA carries the seam.
+referenced_seam = timeline([segment(), segment("with @img-1", **{
+    "continue": True, "continue_audio": True,
+    "assets": [{"handle": "img-1", "kind": "image", "role": "reference", "filename": "a.png"}],
+})])
+check("a continuing segment with references compiles as REF2VA",
+      referenced_seam[1].mode, "REF2VA")
+check("...and keeps both seam flags",
+      (referenced_seam[1].continues, referenced_seam[1].continues_audio), (True, True))
+check("...on the ref2va checkpoint", referenced_seam[1].checkpoint, "ref2va")
 expect_error("a start frame in a continuing segment",
              lambda: timeline([segment(), segment(**{
                  "continue": True,
                  "assets": [{"handle": "img-1", "kind": "image", "role": "first_frame", "filename": "a.png"}],
              })]),
-             "already the previous segment")
+             "already the source segment")
+
+# --- the feather -------------------------------------------------------------
+#
+# How many of the source's last frames the seam inherits. Values off the video
+# VAE's temporal grid cannot be encoded standalone and are refused; a feather
+# on a hard cut is a leftover and is dropped, like the other seam keys.
+
+feathered = timeline([segment(), segment("closer", **{"continue": True, "feather": 22})])
+check("a feathered seam survives compilation", feathered[1].feather, 22)
+check("an unfeathered seam is the classic single frame",
+      timeline([segment(), segment(**{"continue": True})])[1].feather, 1)
+check("a feather on a hard cut is dropped, not refused",
+      timeline([segment(), segment(**{"feather": 22})])[1].feather, 1)
+check("a feathered tail is clamped to the overlap",
+      timeline([segment(), segment(**{"continue": True, "continue_audio": True,
+                                      "feather": 22})], audio_tail_s=4.0)[1].audio_tail_s,
+      22 / 24)
+check("a classic seam's tail is not",
+      timeline([segment(), segment(**{"continue": True, "continue_audio": True})],
+               audio_tail_s=4.0)[1].audio_tail_s,
+      4.0)
+check("the seam line rides a classic sound seam's prompt",
+      "<Audio 1> is the end of the preceding shot's soundtrack"
+      in timeline([segment(), segment(**{"continue": True, "continue_audio": True})])[1].prompt,
+      True)
+check("a feathered seam's tail rides unlabelled — no seam line",
+      timeline([segment(), segment(**{"continue": True, "continue_audio": True, "feather": 22})])[1].prompt,
+      timeline([segment(), segment(**{"continue": True})])[1].prompt)
+expect_error("a feather off the VAE grid",
+             lambda: timeline([segment(), segment(**{"continue": True, "feather": 10})]),
+             "not 10")
+expect_error("a feather wider than the clip affords",
+             lambda: timeline([segment(**{"duration_s": 6}),
+                               segment(**{"duration_s": 1, "continue": True, "feather": 39})]),
+             "at least 78 frames")
 expect_error("errors name the segment",
              lambda: timeline([segment(), segment(**{"duration_s": 6, "checkpoint": "nope"})]),
              "segment 2")
@@ -722,18 +763,107 @@ expect_error("a non-numeric tail",
              lambda: timeline([segment(), segment(**{"continue_audio": True})], audio_tail_s="long"),
              "must be a number")
 
-# REF2VA already fills minimax_refs from its own ordered plan, so the inherited
-# sound has no slot to take without being numbered into it.
-expect_error("the sound seam on a reference segment",
-             lambda: timeline([segment(), segment(**{
-                 "continue_audio": True,
-                 "assets": [{"handle": "img-1", "kind": "image", "role": "reference",
-                             "filename": "a.png"}],
-             })]),
-             "not yet supported")
+# The inherited sound rides after the reference plan's own blocks, unlabelled,
+# so a reference segment's sound seam is an ordinary thing now.
+check("the sound seam on a reference segment compiles",
+      timeline([segment(), segment(**{
+          "continue_audio": True,
+          "assets": [{"handle": "img-1", "kind": "image", "role": "reference",
+                      "filename": "a.png"}],
+      })])[1].continues_audio,
+      True)
 
 # A lone request is unchanged by any of this.
 check("compile_request still defaults to not continuing", build("x").continues, False)
+
+
+# --- the reference pool --------------------------------------------------------
+#
+# Assets attached to the timeline itself, injected into exactly the segments
+# whose own text cites their handle. The cite-gating is the load-bearing part:
+# an uncited pool must leave every payload byte-identical to a pool-less one,
+# or the cache re-renders segments nobody touched.
+
+sheet = {"handle": "ref-1", "kind": "image", "role": "reference", "filename": "sheet.png"}
+
+pooled = timeline([segment("wide shot"), segment("she turns, @ref-1")], assets=[sheet])
+check("a cited pool reference rides into the citing segment",
+      [a.filename for a in pooled[1].ref_images], ["sheet.png"])
+check("...as an ordinary reference generation", pooled[1].mode, "REF2VA")
+check("...with its label substituted", pooled[1].body, "she turns, <Picture 1>")
+check("a segment that cites nothing carries nothing",
+      (pooled[0].mode, pooled[0].ref_images), ("T2VA", []))
+
+# The injected asset leads the segment's own, so a shared reference keeps the
+# low ordinal wherever the citing sets agree.
+led = timeline([segment("@ref-1 beside @img-1", assets=[
+    {"handle": "img-1", "kind": "image", "role": "reference", "filename": "own.png"},
+])], assets=[sheet])
+check("the pool leads the segment's own references",
+      led[0].body, "<Picture 1> beside <Picture 2>")
+
+check("a segment's own handle shadows the pool's",
+      timeline([segment("keep @ref-1", assets=[
+          {"handle": "ref-1", "kind": "image", "role": "reference", "filename": "mine.png"},
+      ])], assets=[sheet])[0].ref_images[0].filename,
+      "mine.png")
+
+check("a citation in the refined body counts",
+      timeline([segment("plain", refined={"body": "her from @ref-1", "scope": "shot"})],
+               assets=[sheet])[0].mode,
+      "REF2VA")
+check("a citation in the segment's own soundscape counts",
+      timeline([segment("plain", soundscape="the room from @ref-1... hums",
+                        assets=[{"handle": "img-1", "kind": "image",
+                                 "role": "reference", "filename": "a.png"}])],
+               assets=[sheet])[0].ref_images[0].filename,
+      "sheet.png")
+
+# Cache stability: an uncited pool changes nothing about the payloads at all.
+plain_segments = [segment("wide"), segment("close")]
+check("an uncited pool leaves every payload byte-identical",
+      compiler.timeline_payloads({"segments": plain_segments}),
+      compiler.timeline_payloads({"segments": plain_segments, "assets": [sheet]}))
+
+# A citation in the global prompt is a citation in every segment — the join
+# carries it in front of each one, so a sheet cited there rides everywhere
+# without a per-segment mention. The attach-once gesture.
+everywhere = timeline([segment("wide"), segment("close")],
+                      prompt="the piece follows @ref-1", assets=[sheet])
+check("a global citation reaches every segment",
+      [c.mode for c in everywhere], ["REF2VA", "REF2VA"])
+check("...carrying the file into each",
+      [[a.filename for a in c.ref_images] for c in everywhere],
+      [["sheet.png"], ["sheet.png"]])
+check("...with the label substituted in the join",
+      everywhere[0].body, "the piece follows <Picture 1>\nwide")
+
+check("the global soundscape's citation inherits the same way",
+      timeline([segment("x")], soundscape="hums like @ref-1",
+               assets=[sheet])[0].ref_images[0].filename,
+      "sheet.png")
+check("...but not into a segment that writes its own soundscape",
+      timeline([segment("x", soundscape="underwater")],
+               soundscape="hums like @ref-1", assets=[sheet])[0].ref_images,
+      [])
+
+expect_error("a global citation against a keyframe segment names both",
+             lambda: timeline([segment("open", assets=[
+                 {"handle": "img-1", "kind": "image", "role": "first_frame",
+                  "filename": "a.png"}])],
+                 prompt="the piece follows @ref-1", assets=[sheet]),
+             "the global prompt cites @ref-1")
+
+expect_error("a pool keyframe is refused",
+             lambda: timeline([segment("x")], assets=[
+                 {"handle": "ref-1", "kind": "image", "role": "first_frame",
+                  "filename": "a.png"}]),
+             "belongs to one segment")
+expect_error("a keyframe segment citing the pool fails as the checkpoint clash it is",
+             lambda: timeline([segment("open on @ref-1", assets=[
+                 {"handle": "img-1", "kind": "image", "role": "first_frame",
+                  "filename": "a.png"}])], assets=[sheet]),
+             "different checkpoints")
 
 
 # ---- one pass ---------------------------------------------------------------
@@ -916,6 +1046,61 @@ check("one pass uses each shot's rewrite as its shot body",
       one_pass_refine.body,
       "[Shot 1] A courier waits, in 16mm. [Shot 2] At 00:06.000, Her hands, closer.")
 
+# A shot-scoped rewrite is the segment's own sentence, not the piece: the
+# refiner returns the global prompt as a field of its own now, so compile joins
+# it in front of the rewrite exactly as it joins it in front of typed text.
+# That is what keeps the timeline's global box a live input after refining —
+# and only the unmarked blobs from before the marker existed, which absorbed
+# the join when they were written, are still left whole.
+check("refined_scope reads the marker",
+      compiler.refined_scope({"refined": refined(scope="shot")}), "shot")
+check("...and not off a legacy blob",
+      compiler.refined_scope({"refined": refined()}), None)
+check("...nor off a disabled rewrite",
+      compiler.refined_scope({"refined": refined(scope="shot", enabled=False)}), None)
+check("...nor off an empty body",
+      compiler.refined_scope({"refined": {"body": "  ", "scope": "shot"}}), None)
+
+scoped = timeline([segment("a courier waits", refined=refined(body=PLAIN, scope="shot"))],
+                  prompt="Live-action")
+check("a shot-scoped rewrite gets the global prompt joined in front",
+      scoped[0].body, "Live-action\n" + PLAIN)
+check("...and an empty global prompt joins nothing",
+      timeline([segment("a courier waits",
+                        refined=refined(body=PLAIN, scope="shot"))])[0].body,
+      PLAIN)
+check("a disabled shot-scoped rewrite falls back to the typed join",
+      timeline([segment("a courier waits",
+                        refined=refined(body=PLAIN, scope="shot", enabled=False))],
+               prompt="Live-action")[0].body,
+      "Live-action\na courier waits")
+
+# The join composes with a reference card's own sections: the global prose
+# leads the body, and the body is still wrapped as the six-section form.
+scoped_ref = timeline(
+    [segment("her face is @img-1",
+             refined={"body": "The woman from @img-1 turns to the window.",
+                      "scope": "shot", "source": "her face is @img-1",
+                      "sections": {"subject_definitions": "<Subject 1>: the woman",
+                                   "summary": "[Ref2VA] a portrait",
+                                   "retention_analysis": "fully_preserved: her face"}},
+             assets=[ref("img-1", "her.png")])],
+    prompt="Live-action")
+check("a shot-scoped reference rewrite keeps its sections around the joined body",
+      scoped_ref[0].body, "Live-action\nThe woman from <Picture 1> turns to the window.")
+check("...and still compiles to the six-section form",
+      [line.split(":")[0] for line in scoped_ref[0].prompt.split("\n\n")][:4],
+      ["subject_definitions", "summary", "retention_analysis", "detailed_description"])
+
+one_pass_scoped = single(
+    [segment("a courier waits", refined=refined(body="A courier waits, in 16mm.", scope="shot")),
+     segment("her hands", refined=refined(body="Her hands, closer.", scope="shot"))],
+    prompt="Live-action")
+check("one pass joins the global prompt in front of a shot-scoped shot 1",
+      one_pass_scoped.body,
+      "[Shot 1] Live-action. A courier waits, in 16mm. "
+      "[Shot 2] At 00:06.000, Her hands, closer.")
+
 check("an absent render mode means chained", compiler.render_mode({}), "chained")
 expect_error("an unknown render mode", lambda: compiler.render_mode({"render": "stitched"}), "unknown render mode")
 
@@ -1012,4 +1197,38 @@ if FAILURES:
     for failure in FAILURES:
         print("  -", failure)
     sys.exit(1)
+# --- the reference pool, one pass ---------------------------------------------
+#
+# In one pass the shots share a single merged reference list already; a pool
+# asset cited in two shots must land in it once, with both citations renamed
+# onto the one merged handle.
+
+pool_single = single([segment("she waits, @ref-1", duration_s=5),
+                      segment("cut to her again, @ref-1", duration_s=5)],
+                     assets=[{"handle": "ref-1", "kind": "image",
+                              "role": "reference", "filename": "sheet.png"}])
+check("a pool reference cited twice merges to one",
+      [a.filename for a in pool_single.ref_images], ["sheet.png"])
+check("...and both citations point at it",
+      pool_single.body.count("<Picture 1>"), 2)
+check("a one-pass shot that cites nothing stays plain",
+      single([segment("just a field", duration_s=5)],
+             assets=[{"handle": "ref-1", "kind": "image",
+                      "role": "reference", "filename": "sheet.png"}]).mode,
+      "T2VA")
+
+# A global citation in one pass: the global prompt opens shot 1's description
+# un-renamed, so the merged pool has to keep calling the asset @ref-1 — and the
+# one merged generation then carries it for the whole clip.
+pool_global = single([segment("she waits", duration_s=5),
+                      segment("her hands", duration_s=5)],
+                     prompt="the piece follows @ref-1.",
+                     assets=[{"handle": "ref-1", "kind": "image",
+                              "role": "reference", "filename": "sheet.png"}])
+check("a global citation reaches the one-pass request",
+      [a.filename for a in pool_global.ref_images], ["sheet.png"])
+check("...under its own pool handle, so the join's citation resolves",
+      pool_global.body.startswith("the piece follows <Picture 1>."), True)
+check("...as a reference generation", pool_global.mode, "REF2VA")
+
 print("all contract tests passed")

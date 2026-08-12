@@ -7,8 +7,10 @@
 // LoRAs, same routing badge. There is no reduced "segment UI" to keep in step
 // with the node's, because there is only one editor.
 
+import { viewUrl } from "./api.js";
 import { el, icon, mountOverlay } from "./dom.js";
 import { CreatorEditor } from "./editor.js";
+import { t } from "./i18n.js";
 import { openLoras } from "./loras.js";
 import { openPicker } from "./picker.js";
 import { openAspectPopover, openResolutionPopover, openChoicePopover, stepperPill, aspectGlyph, PILL_GLYPH } from "./pills.js";
@@ -19,8 +21,12 @@ import { weightsPill, loadCatalog, catalogFiles } from "./models.js";
 import * as S from "./state.js";
 import * as Turbo from "./turbo.js";
 import {
-  framesForSeconds, secondsForFrames, resolveCanvas, ASPECT_PRESETS, describeRatio, isTrainedLength,
+  FPS, framesForSeconds, secondsForFrames, resolveCanvas, ASPECT_PRESETS, describeRatio, isTrainedLength,
 } from "./canvas.js";
+
+/** A seam blend's width as the user reads it: seconds, one decimal. */
+const blendSeconds = (frames) => (frames / FPS).toFixed(1);
+
 
 /**
  * @param {object} options
@@ -70,6 +76,10 @@ class Timeline {
         this.timeline[key] = event.target.value;
         this.onCommit?.();
         this.renderBar();
+        // The pool shelf reads these fields — a citation typed into the global
+        // prompt flips a chip from idle to "everywhere" as it is written. The
+        // shelf holds no caret, so rebuilding it here loses nothing.
+        this.renderPool();
       },
     });
     box.value = this.timeline[key] ?? "";
@@ -81,7 +91,7 @@ class Timeline {
 
   mount() {
     this.promptBox = this.textBox("prompt", {
-      placeholder: "The whole piece: setting, look, who is in it. Added in front of every segment's own prompt.",
+      placeholder: t("The whole piece: setting, look, who is in it. Added in front of every segment's own prompt."),
     });
 
     // The two audio fields H3's own prompt format has, kept side by side and
@@ -92,36 +102,37 @@ class Timeline {
     // behind them.
     this.soundscapeBox = this.textBox("soundscape", {
       className: "mmc-tl-prompt mmc-tl-small", rows: 3,
-      placeholder: "Ambience, action sounds, breathing — everything heard in the room. "
-                 + "Empty leaves it to the model; write N/A for silence.",
+      placeholder: t("Ambience, action sounds, breathing — everything heard in the room. "
+                   + "Empty leaves it to the model; write N/A for silence."),
     });
     this.musicBox = this.textBox("music", {
       className: "mmc-tl-prompt mmc-tl-small", rows: 3,
-      placeholder: "The score only the audience hears: instruments, tempo, how it moves. "
-                 + "Empty leaves it to the model; write N/A for none.",
+      placeholder: t("The score only the audience hears: instruments, tempo, how it moves. "
+                   + "Empty leaves it to the model; write N/A for none."),
     });
 
     this.audioHost = el("div", { class: "mmc-tl-audio" }, [
       el("label", { class: "mmc-tl-field" }, [
-        el("span", { class: "mmc-tl-field-name", text: "overall_soundscape" }),
+        el("span", { class: "mmc-tl-field-name", text: t("overall_soundscape") }),
         this.soundscapeBox,
       ]),
       el("label", { class: "mmc-tl-field" }, [
-        el("span", { class: "mmc-tl-field-name", text: "non_diegetic_music" }),
+        el("span", { class: "mmc-tl-field-name", text: t("non_diegetic_music") }),
         this.musicBox,
       ]),
     ]);
 
+    this.poolHost = el("div", { class: "mmc-tl-pool" });
     this.barHost = el("div", { class: "mmc-tl-bar" });
     this.stripHost = el("div", { class: "mmc-tl-strip" });
 
     this.modal = el("div", { class: "mmc-modal mmc-tl-modal" }, [
       el("div", { class: "mmc-modal-head" }, [
-        el("span", { class: "mmc-tab", "aria-selected": "true", text: "Timeline" }),
-        el("button", { class: "mmc-close", text: "✕", title: "Close", onclick: () => this.close() }),
+        el("span", { class: "mmc-tab", "aria-selected": "true", text: t("Timeline") }),
+        el("button", { class: "mmc-close", text: "✕", title: t("Close"), onclick: () => this.close() }),
       ]),
       el("div", { class: "mmc-tl-body" }, [
-        this.promptBox, this.audioHost, this.barHost, this.stripHost,
+        this.promptBox, this.audioHost, this.poolHost, this.barHost, this.stripHost,
       ]),
     ]);
 
@@ -147,10 +158,145 @@ class Timeline {
     // description when not — which is where the guide puts the style and the
     // opening composition, and is worth saying because it changes how to write it.
     this.promptBox.placeholder = S.isSingle(this.timeline)
-      ? "The whole piece: setting, look, who is in it. Opens Shot 1's description, so write it as the start of one."
-      : "The whole piece: setting, look, who is in it. Added in front of every segment's own prompt.";
+      ? t("The whole piece: setting, look, who is in it. Opens Shot 1's description, so write it as the start of one.")
+      : t("The whole piece: setting, look, who is in it. Added in front of every segment's own prompt.");
+    this.renderPool();
     this.renderBar();
     this.renderStrip();
+  }
+
+  /**
+   * The piece's reference pool: files attached to the timeline itself.
+   *
+   * A pool asset is cited by its @handle from any segment's text, and the
+   * citation is what attaches it — the file rides into exactly the segments
+   * that write the handle, and no other. That is the whole point: a character
+   * sheet is attached once here instead of once per segment it appears in,
+   * and every citing segment gets the same reference under the same handle.
+   */
+  renderPool() {
+    const assets = this.timeline.assets ?? [];
+    this.poolHost.replaceChildren(
+      el("div", { class: "mmc-tl-pool-head" }, [
+        el("span", { class: "mmc-tl-field-name", text: t("Piece references") }),
+        el("span", {
+          class: "mmc-tl-pool-hint",
+          text: t("Attached once. Cite the @handle in the global prompt to use it in every "
+                + "segment, or in a segment's own prompt to use it just there."),
+        }),
+        el("button", {
+          class: "mmc-ghost mmc-tl-pool-add",
+          title: t("Attach a reference to the whole piece — a character sheet, a location, "
+               + "a voice. Cite it with its @handle in every segment where it appears."),
+          onclick: () => this.addPoolAssets(),
+        }, [el("span", { text: "+" }), el("span", { text: t("Add") })]),
+      ]),
+      ...(assets.length ? [el("div", { class: "mmc-assets" }, assets.map((a) => this.poolChip(a)))] : []),
+    );
+  }
+
+  poolChip(asset) {
+    const everywhere = S.poolCitedGlobally(this.timeline, asset);
+    const cited = S.poolCitations(this.timeline, asset);
+    const where = everywhere
+      ? t("everywhere — cited in the global prompt")
+      : cited.length
+        ? t(cited.length === 1 ? "in segment {list}" : "in segments {list}", { list: cited.join(", ") })
+        : t("cited nowhere yet");
+    const thumb = asset.kind === "image"
+      ? el("img", { class: "mmc-asset-thumb", src: viewUrl(asset.filename, { preview: true }), alt: "" })
+      : el("span", { class: "mmc-asset-thumb", text: asset.kind === "video" ? "▶" : "♪" });
+    return el("div", {
+      class: `mmc-asset${everywhere || cited.length ? "" : " idle"}`,
+      title: everywhere || cited.length
+        ? t("{file} — {where}", { file: asset.filename, where })
+        : t("{file} — no segment cites @{handle} yet, so it rides into none of them.",
+            { file: asset.filename, handle: asset.handle }),
+    }, [
+      thumb,
+      el("button", {
+        class: `mmc-asset-handle mmc-tl-pool-cite mmc-tag-${S.tagIndex(asset.handle)}`,
+        text: `@${asset.handle}`,
+        title: t("Write @{handle} into the global prompt, so it applies to every segment.",
+                 { handle: asset.handle }),
+        onclick: () => this.citeInGlobal(asset),
+      }),
+      el("span", { class: "mmc-tl-pool-where", text: where }),
+      // What of the picture is the reference — a character sheet is usually the
+      // person, not the sheet's background. Images only, like the editor's own.
+      ...(asset.kind === "image" ? [el("button", {
+        class: "mmc-ghost",
+        style: { fontSize: "11px" },
+        title: t("What of this picture is the reference — narrowing it keeps the picture's "
+             + "background and palette out of the video."),
+        text: t(S.takes(asset)),
+        onclick: (event) => this.pickPoolTakes(event.currentTarget, asset),
+      })] : []),
+      el("button", {
+        class: "mmc-asset-x", text: "✕",
+        title: cited.length
+          ? t("Remove @{handle} — segments {list} still cite it and will refuse to queue "
+            + "until the mentions are edited out.", { handle: asset.handle, list: cited.join(", ") })
+          : t("Remove @{handle}", { handle: asset.handle }),
+        onclick: () => {
+          this.timeline.assets = (this.timeline.assets ?? []).filter((a) => a !== asset);
+          this.commit();
+        },
+      }),
+    ]);
+  }
+
+  /** Write a pool handle into the global prompt — the one-click way to say
+   *  "this reference applies to the whole piece". The join then carries the
+   *  citation into every segment, which is what attaches the file there. */
+  citeInGlobal(asset) {
+    if (S.poolCitedGlobally(this.timeline, asset)) return;
+    const current = this.timeline.prompt ?? "";
+    const joiner = current && !/\s$/.test(current) ? " " : "";
+    this.timeline.prompt = `${current}${joiner}@${asset.handle} `;
+    this.promptBox.value = this.timeline.prompt;
+    this.commit();
+  }
+
+  pickPoolTakes(anchor, asset) {
+    const label = (key) => t(key);
+    openChoicePopover(anchor, {
+      title: t("@{handle} is a reference to", { handle: asset.handle }),
+      options: S.TAKES.map(label),
+      value: label(S.takes(asset)),
+      onPick: (choice) => {
+        const key = S.TAKES.find((k) => label(k) === choice) ?? "full";
+        if (key === "full") delete asset.takes;
+        else asset.takes = key;
+        this.commit();
+      },
+    });
+  }
+
+  /** The same picker the segments use, filling the pool instead of a card. */
+  async addPoolAssets() {
+    const chosen = await openPicker({
+      kinds: ["image", "video", "audio", "renders"],
+      kind: "image",
+      // The per-segment reference caps are compile's, applied where a segment
+      // actually cites — the pool itself has no ceiling worth enforcing here.
+      capacity: () => ({ used: 0, max: S.MAX_REF_FILES, filesLeft: S.MAX_REF_FILES }),
+    });
+    if (!chosen) return;
+    for (const picked of chosen) {
+      const entry = {
+        handle: S.nextPoolHandle(this.timeline),
+        kind: picked.kind,
+        role: "reference",
+        filename: picked.path,
+        // Fidelity is why a reference is attached — same default as the editor.
+        ref_size: "max",
+      };
+      if (picked.kind === "video") entry.track = picked.track ?? S.DEFAULT_TRACK;
+      if (picked.trim) entry.trim = picked.trim;
+      this.timeline.assets.push(entry);
+    }
+    this.commit();
   }
 
   geometry() {
@@ -171,7 +317,7 @@ class Timeline {
     const single = S.isSingle(this.timeline);
     const option = (mode, label, title) => el("button", {
       class: `mmc-tl-render-opt${(mode === "single") === single ? " on" : ""}`,
-      text: label,
+      text: t(label),
       title,
       onclick: () => {
         if (this.timeline.render === mode) return;
@@ -181,13 +327,13 @@ class Timeline {
     });
     return el("div", { class: "mmc-tl-render" }, [
       option("chained", "Chained",
-        "One generation per segment, joined end to end. No limit on the finished length, "
-        + "and a segment can start from the previous one's last frame — but every join is a real seam."),
+        t("One generation per segment, joined end to end. No limit on the finished length, "
+        + "and a segment can start from the previous one's last frame — but every join is a real seam.")),
       option("single", "One pass",
-        "One generation. The segments become the shots of a single description, cut times and all, "
+        t("One generation. The segments become the shots of a single description, cut times and all, "
         + "so nothing is decoded and re-encoded mid-clip and there is no seam to cross. "
         + "Everything a single pass can only have one of — mode, checkpoint, LoRAs, seed — "
-        + "becomes the timeline's."),
+        + "becomes the timeline's.")),
     ]);
   }
 
@@ -214,7 +360,7 @@ class Timeline {
       this.renderMode(),
       el("button", {
         class: "mmc-pill",
-        title: "Aspect ratio, shared by every segment — they are joined end to end and have to match.",
+        title: t("Aspect ratio, shared by every segment — they are joined end to end and have to match."),
         onclick: (event) => openAspectPopover(event.currentTarget, this.timeline, () => this.commit()),
       }, [aspectGlyph(ratio, PILL_GLYPH),
           el("span", { text: this.timeline.aspect }),
@@ -222,9 +368,10 @@ class Timeline {
       el("button", {
         class: "mmc-pill",
         title: S.twoPass(this.timeline)
-          ? `Sampled at a ${S.sampleEdge(this.timeline)} px short edge, refined up to `
-            + `${width} × ${height} by a second pass — every segment alike.`
-          : "Short edge. Lower is faster; 768 is what the open weights were trained at.",
+          ? t("Sampled at a {edge} px short edge, refined up to "
+            + "{width} × {height} by a second pass — every segment alike.",
+              { edge: S.sampleEdge(this.timeline), width, height })
+          : t("Short edge. Lower is faster; 768 is what the open weights were trained at."),
         onclick: (event) => openResolutionPopover(
           event.currentTarget, this.timeline, () => this.geometry(), () => this.commit()),
       }, [
@@ -239,13 +386,15 @@ class Timeline {
       // which is the whole reason to have them separately from a segment's own.
       el("button", {
         class: `mmc-pill${active ? " on" : ""}`,
-        title: "LoRAs patched onto every segment, in front of whatever that segment adds. "
-             + "Where a turbo LoRA belongs.",
+        title: t("LoRAs patched onto every segment, in front of whatever that segment adds. "
+             + "Where a turbo LoRA belongs."),
         onclick: () => this.openLoras(),
       }, [
         icon("effect", 16),
-        el("span", { text: active ? `${active} LoRA${active === 1 ? "" : "s"}` : "LoRAs" }),
-        ...(idle ? [el("span", { class: "mmc-pill-sub", text: `${idle} idle` })] : []),
+        el("span", { text: active
+          ? t(active === 1 ? "{count} LoRA" : "{count} LoRAs", { count: active })
+          : t("LoRAs") }),
+        ...(idle ? [el("span", { class: "mmc-pill-sub", text: t("{idle} idle", { idle }) })] : []),
       ]),
       // Only once a seam actually carries sound: until then it is a setting for
       // a feature that is not in use — which includes all of one-pass mode,
@@ -253,41 +402,45 @@ class Timeline {
       ...(!single && this.timeline.segments.some(S.continuesAudio) ? [stepperPill({
         value: Number(this.timeline.audio_tail_s), min: 0.1, max: S.MAX_AUDIO_TAIL_S,
         step: 0.1, width: "52px", iconName: "audio",
-        title: "How much of the previous segment's sound a continuing seam inherits. "
-             + "Longer costs sampling time and pulls the inherited start frame off the clip's opening.",
-        format: (n) => `${n.toFixed(1)}s tail`,
+        title: t("How much of the previous segment's sound a continuing seam inherits. "
+             + "Longer costs sampling time and pulls the inherited start frame off the clip's opening."),
+        format: (n) => t("{n}s tail", { n: n.toFixed(1) }),
         onChange: (next) => { this.timeline.audio_tail_s = next; this.commit(); },
       })] : []),
       // The mode belongs to a generation, and in one pass there is one for the
       // whole timeline rather than one per card.
       ...(single ? [el("span", {
         class: "mmc-pill mmc-pill-static",
-        title: "What the merged request compiles to — every shot's references and "
-             + "keyframes are one pool, so this is asked of the whole timeline at once.",
+        title: t("What the merged request compiles to — every shot's references and "
+             + "keyframes are one pool, so this is asked of the whole timeline at once."),
       }, [el("span", { text: S.singleMode(this.timeline) })])] : []),
       // One call for the whole strip, not one per card: continuity across a cut
       // is only kept by a rewrite that wrote both sides of it.
       refineButton({
         run: () => this.refineAll(),
-        label: refined ? "Refine again" : "Refine all",
+        label: refined ? t("Refine again") : t("Refine all"),
         className: "mmc-pill mmc-tl-refine",
-        title: `Rewrite ${count === 1 ? "the shot" : `all ${count} shots`} into the expanded `
-             + `description H3 was trained to read, in one pass so the later shots keep what the `
-             + `first establishes. Everything you wrote is kept and expanded. A rewrite is queued `
-             + `in place of the card's own prompt, not alongside it.`,
+        title: t("Rewrite {what} into the expanded "
+             + "description H3 was trained to read, in one pass so the later shots keep what the "
+             + "first establishes. The global prompt is rewritten too, in its own box, and still "
+             + "stands in front of every shot. Everything you wrote is kept and expanded. A "
+             + "rewrite is queued in place of the card's own prompt, not alongside it.",
+             { what: count === 1 ? t("the shot") : t("all {count} shots", { count }) }),
       }),
       // The way back from that one press. Without it, undoing a whole-strip
       // refine means opening every card in turn.
       ...(refined ? [el("button", {
         class: "mmc-pill mmc-tl-unrefine",
-        title: "Throw every rewrite away and go back to the prompts you typed. The soundscape "
-             + "and score the refiner wrote go with them.",
+        title: t("Throw every rewrite away and go back to the prompts you typed. The global "
+             + "prompt, soundscape and score the refiner wrote go with them."),
         onclick: () => this.revertAll(),
-      }, [el("span", { text: "Revert all" })])] : []),
+      }, [el("span", { text: t("Revert all") })])] : []),
       el("div", { class: "mmc-tl-total" }, [
         el("b", { text: `${seconds.toFixed(1)} s` }),
-        el("span", { text: single ? `${count} shot${count === 1 ? "" : "s"} · ${frames} frames`
-                                  : `${count} segment${count === 1 ? "" : "s"}` }),
+        el("span", { text: single
+          ? t(count === 1 ? "{count} shot · {frames} frames" : "{count} shots · {frames} frames",
+              { count, frames })
+          : t(count === 1 ? "{count} segment" : "{count} segments", { count }) }),
       ]),
       // How many sampler passes this queue costs, which is not obvious either
       // way: a strip of cards looks like several small edits, and in one pass it
@@ -295,18 +448,18 @@ class Timeline {
       el("div", {
         class: "mmc-note",
         title: single
-          ? "The whole timeline is generated at once, so the shots cost no more than one clip of the same length."
-          : "Each segment is generated separately and they run one after another.",
+          ? t("The whole timeline is generated at once, so the shots cost no more than one clip of the same length.")
+          : t("Each segment is generated separately and they run one after another."),
       }, [
-        el("span", { class: "mmc-note-key", text: "cost" }),
-        el("span", { text: single ? "1 generation per queue"
-                                  : `${count} generation${count === 1 ? "" : "s"} per queue` }),
+        el("span", { class: "mmc-note-key", text: t("cost") }),
+        el("span", { text: single ? t("1 generation per queue")
+          : t(count === 1 ? "{count} generation per queue" : "{count} generations per queue", { count }) }),
       ]),
       // The refusals compile.py would raise, said here while the shots are still
       // in front of you. Only in one pass: they are all about things a chained
       // timeline is allowed to have and a single generation is not.
       ...(problem ? [el("div", { class: "mmc-tl-problem" }, [
-        el("span", { class: "mmc-note-key", text: "one pass" }),
+        el("span", { class: "mmc-note-key", text: t("one pass") }),
         el("span", { text: problem }),
       ])] : []),
       // Whatever the last refine had to say — no text encoder is chosen, or it
@@ -327,11 +480,11 @@ class Timeline {
     parts.push(el("button", {
       class: "mmc-tl-add",
       title: this.timeline.segments.length >= S.MAX_SEGMENTS
-        ? `A timeline holds at most ${S.MAX_SEGMENTS}.`
-        : `Add a ${what.toLowerCase()} to the end`,
+        ? t("A timeline holds at most {max}.", { max: S.MAX_SEGMENTS })
+        : t("Add a {what} to the end", { what: t(what.toLowerCase()) }),
       disabled: this.timeline.segments.length >= S.MAX_SEGMENTS || undefined,
       onclick: () => this.add(),
-    }, [el("span", { text: "+" }), el("span", { text: what })]));
+    }, [el("span", { text: "+" }), el("span", { text: t(what) })]));
     this.stripHost.replaceChildren(...parts);
   }
 
@@ -355,9 +508,10 @@ class Timeline {
     return el("div", { class: "mmc-tl-seam" }, [
       el("div", {
         class: "mmc-tl-cut",
-        title: `Shot ${index + 1} cuts in ${S.shotTime(at[index])} into the clip. `
-             + `Write its prompt as the cut — "the camera cuts to…", "the shot transitions to…" — `
-             + `and the timestamp is added for you.`,
+        title: t("Shot {n} cuts in {time} into the clip. "
+             + 'Write its prompt as the cut — "the camera cuts to…", "the shot transitions to…" — '
+             + "and the timestamp is added for you.",
+             { n: index + 1, time: S.shotTime(at[index]) }),
       }, [el("span", { text: "✂" }), el("span", { text: S.shotTime(at[index]) })]),
     ]);
   }
@@ -383,42 +537,88 @@ class Timeline {
         class: `mmc-tl-join${on ? " on" : ""}`,
         disabled: blocked ? true : undefined,
         title: blocked || (on
-          ? `Segment ${index + 1} starts on segment ${from}'s last frame. Click for a hard cut.`
-          : `Hard cut into segment ${index + 1}. Click to start it on segment ${index}'s last frame.`),
+          ? t("Segment {n} starts on segment {from}'s last frame. Click for a hard cut.",
+              { n: index + 1, from })
+          : t("Hard cut into segment {n}. Click to start it on segment {prev}'s last frame.",
+              { n: index + 1, prev: index })),
         onclick: blocked ? undefined : () => { segment.continue = !on; this.commit(); },
-      }, [el("span", { text: on ? "↝" : "✂" }), el("span", { text: on ? "continues" : "cut" })]),
+      }, [el("span", { text: on ? "↝" : "✂" }), el("span", { text: on ? t("continues") : t("cut") })]),
       el("button", {
         class: `mmc-tl-join mmc-tl-join-sound${sound ? " on" : ""}`,
         disabled: soundBlocked ? true : undefined,
         title: soundBlocked || (sound
-          ? `Segment ${index + 1}'s sound carries on from segment ${from}'s. `
-            + `Click to let it start its own.`
-          : `Segment ${index + 1} generates its own sound from scratch. `
-            + `Click to carry the last ${this.timeline.audio_tail_s}s of segment ${from}'s into it.`),
+          ? t("Segment {n}'s sound carries on from segment {from}'s. "
+            + "Click to let it start its own.", { n: index + 1, from })
+          : t("Segment {n} generates its own sound from scratch. "
+            + "Click to carry the last {tail}s of segment {from}'s into it.",
+              { n: index + 1, tail: this.timeline.audio_tail_s, from })),
         onclick: soundBlocked ? undefined : () => { segment.continue_audio = !sound; this.commit(); },
-      }, [icon("audio", 13), el("span", { text: sound ? "sound" : "silent seam" })]),
+      }, [icon("audio", 13), el("span", { text: sound ? t("sound") : t("silent seam") })]),
       // Where the seam inherits from. Only on a live seam, and only once there
       // is a choice to make: seam 2 can only continue from segment 1, and a
       // one-option picker would only raise the question it answers.
       ...((on || sound) && index >= 2 ? [el("button", {
         class: `mmc-tl-join mmc-tl-join-from${from !== index ? " on" : ""}`,
-        title: `What continues across this seam is segment ${from}'s last `
-             + `${on && sound ? "frame and sound" : on ? "frame" : "sound"}. `
-             + `Click to inherit from a different earlier segment — a story returning to `
-             + `segment 1 after an unrelated shot continues from segment 1.`,
+        title: t("What continues across this seam is segment {from}'s last {what}. "
+             + "Click to inherit from a different earlier segment — a story returning to "
+             + "segment 1 after an unrelated shot continues from segment 1.",
+             { from, what: t(on && sound ? "frame and sound" : on ? "frame" : "sound") }),
         onclick: (event) => this.pickContinueFrom(event.currentTarget, segment, index),
-      }, [el("span", { text: `from #${from}` })])] : []),
+      }, [el("span", { text: t("from #{from}", { from }) })])] : []),
+      // How much of the source's tail crosses the seam. Only on a live picture
+      // seam: the width is a property of the inherited frames, and the classic
+      // last-frame seam is what it says until widened. The chip and its picker
+      // speak in seconds of motion — the frame counts are the encoder's
+      // business, not the user's.
+      ...(on ? [el("button", {
+        class: `mmc-tl-join mmc-tl-join-from${S.feather(segment) > 1 ? " on" : ""}`,
+        title: (S.feather(segment) > 1
+          ? t("The last {s} s of segment {from}'s motion "
+            + "carries across this cut, so the movement flows through instead of restarting "
+            + "from a still. That blended moment is redone at the start of segment {n} "
+            + "and removed from the final video, so it plays about "
+            + "{s} s shorter than its set length.",
+              { s: blendSeconds(S.feather(segment)), from, n: index + 1 })
+          : t("This cut picks up from segment {from}'s last frame. Click to blend a moment "
+            + "of its motion across instead — a smoother handoff, in exchange for segment "
+            + "{n} playing slightly shorter.", { from, n: index + 1 })),
+        onclick: (event) => this.pickFeather(event.currentTarget, segment, index),
+      }, [el("span", {
+        text: S.feather(segment) > 1
+          ? t("blend {s} s", { s: blendSeconds(S.feather(segment)) }) : t("no blend"),
+      })])] : []),
     ]);
+  }
+
+  /** The seam's width. The options are the runs the video VAE can encode
+   *  standalone (state.FEATHER_GRID), named by what the user hears and sees:
+   *  how long a moment of motion crosses the cut. */
+  pickFeather(anchor, segment, index) {
+    const max = S.maxFeather(segment);
+    const label = (f) => (f === 1 ? t("None — start from the last frame")
+      : t("{name} · {s} s of motion",
+          { name: t({ 5: "Short", 22: "Medium", 39: "Long" }[f] ?? "Blend"), s: blendSeconds(f) }));
+    openChoicePopover(anchor, {
+      title: t("Blend into segment {n}", { n: index + 1 }),
+      options: S.FEATHER_GRID.filter((f) => f <= max).map(label),
+      value: label(Math.min(S.feather(segment), max)),
+      onPick: (choice) => {
+        const width = S.FEATHER_GRID.find((f) => label(f) === choice) ?? 1;
+        if (width > 1) segment.feather = width;
+        else delete segment.feather;
+        this.commit();
+      },
+    });
   }
 
   /** The seam's source, chosen from every segment before this one. */
   pickContinueFrom(anchor, segment, index) {
     const options = [];
     for (let n = 1; n <= index; n += 1) {
-      options.push(n === index ? `segment ${n} — previous` : `segment ${n}`);
+      options.push(n === index ? t("segment {n} — previous", { n }) : t("segment {n}", { n }));
     }
     openChoicePopover(anchor, {
-      title: `Segment ${index + 1} continues from`,
+      title: t("Segment {n} continues from", { n: index + 1 }),
       options,
       value: options[S.continueSource(segment, index) - 1],
       onPick: (choice) => {
@@ -438,7 +638,9 @@ class Timeline {
     // does — so the card shows what the user set and the bar shows the truth.
     const frames = framesForSeconds(segment.duration_s);
     const seconds = single ? Number(segment.duration_s) || 0 : secondsForFrames(frames);
-    const refs = S.references(segment).length;
+    // The segment's own references plus the piece references its text cites —
+    // both ride into this generation, so the card counts both.
+    const refs = S.references(segment).length + S.citedPool(segment).length;
     const loras = S.activeLoras(segment).length;
     const typed = (segment.prompt || "").trim();
     const rewrite = segment.refined?.body?.trim();
@@ -451,9 +653,9 @@ class Timeline {
     const prompt = typed || rewrite || "";
 
     const meta = [];
-    if (refs) meta.push(`${refs} ref${refs === 1 ? "" : "s"}`);
-    if (loras) meta.push(`${loras} LoRA${loras === 1 ? "" : "s"}`);
-    if (rewrite) meta.push(using ? "refined" : "refined (off)");
+    if (refs) meta.push(t(refs === 1 ? "{count} ref" : "{count} refs", { count: refs }));
+    if (loras) meta.push(t(loras === 1 ? "{count} LoRA" : "{count} LoRAs", { count: loras }));
+    if (rewrite) meta.push(using ? t("refined") : t("refined (off)"));
 
     return el("div", {
       class: "mmc-tl-card",
@@ -471,10 +673,11 @@ class Timeline {
           class: `mmc-tl-dur${single || isTrainedLength(frames) ? "" : " off-distribution"}`,
           text: `${segment.duration_s} s`,
           title: single
-            ? `${segment.duration_s} s of the one generation — the frame count is the timeline's.`
+            ? t("{s} s of the one generation — the frame count is the timeline's.",
+                { s: segment.duration_s })
             : isTrainedLength(frames)
-              ? `${frames} frames at 24 fps`
-              : `${frames} frames — outside the ~5–15 s the weights were trained on.`,
+              ? t("{frames} frames at 24 fps", { frames })
+              : t("{frames} frames — outside the ~5–15 s the weights were trained on.", { frames }),
         }),
         // The mode is a property of the generation, and in one pass there is one
         // of those for the whole timeline — so it moves to the bar.
@@ -485,29 +688,29 @@ class Timeline {
       // sentence under it were what this shot queues.
       el("div", {
         class: `mmc-tl-card-prompt${prompt ? "" : " empty"}${using && typed ? " superseded" : ""}`,
-        text: prompt || "No prompt yet",
-        title: using && typed ? "Not queued — this card's rewrite is. Open it to read or revert." : "",
+        text: prompt || t("No prompt yet"),
+        title: using && typed ? t("Not queued — this card's rewrite is. Open it to read or revert.") : "",
       }),
       ...(meta.length ? [el("div", { class: "mmc-tl-card-meta", text: meta.join(" · ") })] : []),
       el("div", { class: "mmc-tl-card-foot" }, [
-        el("button", { class: "mmc-tl-edit", text: "Edit", onclick: () => this.edit(index) }),
+        el("button", { class: "mmc-tl-edit", text: t("Edit"), onclick: () => this.edit(index) }),
         el("button", {
-          class: "mmc-ghost", text: "◀", title: "Move earlier",
+          class: "mmc-ghost", text: "◀", title: t("Move earlier"),
           disabled: index === 0 || undefined,
           onclick: () => this.move(index, -1),
         }),
         el("button", {
-          class: "mmc-ghost", text: "▶", title: "Move later",
+          class: "mmc-ghost", text: "▶", title: t("Move later"),
           disabled: index === this.timeline.segments.length - 1 || undefined,
           onclick: () => this.move(index, 1),
         }),
         el("button", {
-          class: "mmc-ghost", text: "⧉", title: "Duplicate",
+          class: "mmc-ghost", text: "⧉", title: t("Duplicate"),
           disabled: this.timeline.segments.length >= S.MAX_SEGMENTS || undefined,
           onclick: () => this.duplicate(index),
         }),
         el("button", {
-          class: "mmc-asset-x", text: "✕", title: "Remove this segment",
+          class: "mmc-asset-x", text: "✕", title: t("Remove this segment"),
           disabled: this.timeline.segments.length <= 1 || undefined,
           onclick: () => this.remove(index),
         }),
@@ -577,29 +780,41 @@ class Timeline {
   }
 
   /**
-   * The two fields a rewrite writes that belong to the piece rather than a shot.
+   * The fields a rewrite writes that belong to the piece rather than a shot:
+   * the global prompt, the soundscape and the score.
    *
    * Straight into the timeline's own textareas, which are the ones the user is
    * looking at — a refined soundscape hidden inside a card would be invisible
-   * and would then disagree with the box above it. An empty `music` is left
-   * alone rather than written: the refiner returns one only when the request
-   * asked for music, and clearing a score the user typed is not what "the model
-   * had nothing to add" means.
+   * and would then disagree with the box above it. The global prompt lands in
+   * its own box the same way, and stays a live input: compile joins it in
+   * front of every shot-scoped rewrite exactly as it joins it in front of
+   * typed text, so editing it here keeps meaning something. An empty `music`
+   * is left alone rather than written: the refiner returns one only when the
+   * request asked for music, and clearing a score the user typed is not what
+   * "the model had nothing to add" means.
    */
-  takeAudio(result) {
+  takePiece(result) {
     // What was in them first, so `revertAll` can put them back. Taken once and
     // then left alone: refining again must not record the last rewrite's prose
-    // as the thing the user typed.
+    // as the thing the user typed. The prompt joins the snapshot the first
+    // time a rewrite actually moves it — older snapshots simply lack the key,
+    // and reverting one leaves the prompt exactly where it stands.
     const replaced = this.timeline.refined?.replaced
       ?? { soundscape: this.timeline.soundscape ?? "", music: this.timeline.music ?? "" };
 
+    if (result.piece) {
+      if (replaced.prompt === undefined) replaced.prompt = this.timeline.prompt ?? "";
+      this.timeline.prompt = result.piece;
+      if (this.promptBox) this.promptBox.value = result.piece;
+    }
     if (result.soundscape) this.timeline.soundscape = result.soundscape;
     if (result.music) this.timeline.music = result.music;
     this.timeline.refined = {
       ...(this.timeline.refined || {}),
       replaced,
       // Only the reference form has these, and in one pass they describe the one
-      // merged generation, so they are the timeline's.
+      // merged generation, so they are the timeline's. Chained, each reference
+      // card carries its own set and they live on the card instead.
       ...(result.sections && S.isSingle(this.timeline) ? { sections: result.sections } : {}),
     };
     this.soundscapeBox.value = this.timeline.soundscape ?? "";
@@ -636,6 +851,12 @@ class Timeline {
     if (replaced) {
       this.timeline.soundscape = replaced.soundscape ?? "";
       this.timeline.music = replaced.music ?? "";
+      // Only when a rewrite actually moved it — see `takePiece` — so reverting
+      // an audio-only rewrite cannot blank a global prompt the user typed.
+      if (replaced.prompt !== undefined) {
+        this.timeline.prompt = replaced.prompt;
+        if (this.promptBox) this.promptBox.value = this.timeline.prompt;
+      }
       if (this.soundscapeBox) this.soundscapeBox.value = this.timeline.soundscape;
       if (this.musicBox) this.musicBox.value = this.timeline.music;
     }
@@ -662,18 +883,22 @@ class Timeline {
         if (!segment || !shot.body) continue;
         segment.refined = {
           body: shot.body,
-          // Chained, a segment is its own generation over its own references, so
-          // the reference form's analysis sections are the segment's. In one
-          // pass there is one merged pool and they go on the timeline instead —
-          // which is why the server refuses a chained strip of several reference
-          // segments rather than copying one analysis across all of them.
-          ...(result.sections && !S.isSingle(this.timeline) ? { sections: result.sections } : {}),
+          // The rewrite is the shot alone: compile joins the (rewritten) global
+          // prompt in front of it, exactly as it joins it in front of typed
+          // text, which is what keeps the global box live after refining.
+          ...(result.scope ? { scope: result.scope } : {}),
+          // Chained, a segment is its own generation over its own references,
+          // so each reference card carries its own analysis sections in its
+          // shot entry. In one pass there is one merged pool and the one
+          // top-level set goes on the timeline instead — see `takePiece`.
+          ...(shot.sections ? { sections: shot.sections } : {}),
+          ...(result.template ? { template: result.template, forced: !!result.forced } : {}),
           source: segment.prompt ?? "",
           model: refineModel(),
           enabled: true,
         };
       }
-      this.takeAudio(result);
+      this.takePiece(result);
       this.refineError = (result.problems ?? []).join(" · ") || null;
     } catch (error) {
       this.refineError = String(error.message || error);
@@ -709,20 +934,25 @@ class Timeline {
       }),
       // The soundscape and the score describe the piece rather than the shot, so
       // they land on the timeline's own fields where they are visible and
-      // editable — not inside the card that happened to be refined.
-      onRefined: (result) => this.takeAudio(result),
+      // editable — not inside the card that happened to be refined. A single
+      // card's refine never returns a rewritten global prompt — the other
+      // cards' rewrites were written against the standing one — so `takePiece`
+      // only moves the audio here.
+      onRefined: (result) => this.takePiece(result),
       // …and go with the last rewrite that was using them. The commit is this
       // callback's own: the editor's fired before it, so what it wrote out still
       // had the timeline's audio fields in it.
       onReverted: () => { this.dropTimelineRewrite(); this.onCommit?.(); },
     });
 
-    const what = S.isSingle(this.timeline) ? "Shot" : "Segment";
+    const single = S.isSingle(this.timeline);
     const modal = el("div", { class: "mmc-modal mmc-tl-editor" }, [
       el("div", { class: "mmc-modal-head" }, [
-        el("span", { class: "mmc-tab", "aria-selected": "true", text: `${what} ${index + 1}` }),
-        el("span", { class: "mmc-tl-editor-sub", text: `of ${this.timeline.segments.length}` }),
-        el("button", { class: "mmc-close", text: "✕", title: "Back to the timeline", onclick: () => done() }),
+        el("span", { class: "mmc-tab", "aria-selected": "true",
+                     text: t(single ? "Shot {n}" : "Segment {n}", { n: index + 1 }) }),
+        el("span", { class: "mmc-tl-editor-sub",
+                     text: t("of {count}", { count: this.timeline.segments.length }) }),
+        el("button", { class: "mmc-close", text: "✕", title: t("Back to the timeline"), onclick: () => done() }),
       ]),
       el("div", { class: "mmc-tl-editor-body" }, [editor.root]),
     ]);
@@ -771,6 +1001,12 @@ export class TimelineBody {
     this.root = el("div", { class: "mmc-root" });
     this.stage = new Stage({
       nodeId,
+      // Which segment the queue is on, said over the preview: the strip runs
+      // for minutes and a bare step count says nothing about where in the
+      // piece the sampler is. Read late — the strip may grow between queueing
+      // and the announce.
+      segmentLabel: (index) => t("Segment {n} of {count}",
+        { n: index, count: this.timeline.segments.length }),
       // View-only: a timeline's references live on its segments, so a pick from
       // here would have no card to land on. The Creator attaches; this browses.
       onGallery: () => openPicker({
@@ -863,16 +1099,16 @@ export class TimelineBody {
     const prompt = (this.timeline.prompt || "").trim();
     const globalLoras = S.activeGlobalLoras(this.timeline).length;
     const audio = [
-      ...(this.timeline.soundscape?.trim() ? ["soundscape"] : []),
-      ...(this.timeline.music?.trim() ? ["music"] : []),
+      ...(this.timeline.soundscape?.trim() ? [t("soundscape")] : []),
+      ...(this.timeline.music?.trim() ? [t("music")] : []),
     ];
 
     return el("div", { class: "mmc-panel mmc-tl-summary" }, [
       el("div", {
         class: `mmc-tl-summary-prompt${prompt ? "" : " empty"}`,
         text: prompt || (single
-          ? "No global prompt yet — the standing description that opens Shot 1."
-          : "No global prompt yet — the standing description every segment inherits."),
+          ? t("No global prompt yet — the standing description that opens Shot 1.")
+          : t("No global prompt yet — the standing description every segment inherits.")),
         onclick: () => this.open(),
       }),
       // The one picture of the timeline the node has room for: blocks at their
@@ -886,10 +1122,16 @@ export class TimelineBody {
           class: `mmc-tl-tick${continues ? " on" : ""}`,
           style: { flexGrow: String(Math.max(1, segment.duration_s)) },
           title: single
-            ? `Shot ${index + 1} · ${segment.duration_s} s`
-              + (index ? ` · cuts in at ${S.shotTime(at[index])}` : " · opens the clip")
-            : `Segment ${index + 1} · ${segment.duration_s} s · ${S.mode(segment)}`
-              + (continues ? ` · continues from segment ${S.continueSource(segment, index)}` : " · hard cut"),
+            ? (index
+                ? t("Shot {n} · {s} s · cuts in at {time}",
+                    { n: index + 1, s: segment.duration_s, time: S.shotTime(at[index]) })
+                : t("Shot {n} · {s} s · opens the clip", { n: index + 1, s: segment.duration_s }))
+            : (continues
+                ? t("Segment {n} · {s} s · {mode} · continues from segment {from}",
+                    { n: index + 1, s: segment.duration_s, mode: S.mode(segment),
+                      from: S.continueSource(segment, index) })
+                : t("Segment {n} · {s} s · {mode} · hard cut",
+                    { n: index + 1, s: segment.duration_s, mode: S.mode(segment) })),
         }, [
           ...(continues ? [icon("link", 13)] : []),
           el("span", { class: "mmc-tl-tick-n", text: String(index + 1) }),
@@ -902,26 +1144,27 @@ export class TimelineBody {
         el("span", {
           class: "mmc-pill mmc-pill-static",
           title: single
-            ? "One generation: the segments are the shots of a single description, cut times and all."
-            : "One generation per segment, joined end to end.",
+            ? t("One generation: the segments are the shots of a single description, cut times and all.")
+            : t("One generation per segment, joined end to end."),
         }, [
           icon("timeline", 16),
-          el("span", { text: single ? "one pass" : "chained" }),
+          el("span", { text: single ? t("one pass") : t("chained") }),
           el("span", {
             class: "mmc-pill-sub",
-            text: single ? `${segments.length} shot${segments.length === 1 ? "" : "s"}`
-                         : `${segments.length} segment${segments.length === 1 ? "" : "s"}`,
+            text: single
+              ? t(segments.length === 1 ? "{count} shot" : "{count} shots", { count: segments.length })
+              : t(segments.length === 1 ? "{count} segment" : "{count} segments", { count: segments.length }),
           }),
         ]),
-        el("span", { class: "mmc-pill mmc-pill-static", title: "The finished clip's length at 24 fps" }, [
+        el("span", { class: "mmc-pill mmc-pill-static", title: t("The finished clip's length at 24 fps") }, [
           icon("clock", 16),
           el("span", { text: `${seconds.toFixed(1)} s` }),
         ]),
         el("span", {
           class: "mmc-pill mmc-pill-static",
           title: single
-            ? "The canvas the one generation runs at."
-            : "Shared by every segment — they are joined end to end and have to match.",
+            ? t("The canvas the one generation runs at.")
+            : t("Shared by every segment — they are joined end to end and have to match."),
         }, [
           el("span", { text: this.timeline.aspect }),
           el("span", { class: "mmc-pill-sub", text: `${width} × ${height}` }),
@@ -931,21 +1174,33 @@ export class TimelineBody {
         ...(globalLoras ? [el("span", {
           class: "mmc-pill mmc-pill-static",
           title: single
-            ? "Patched onto the one generation, in front of whatever the shots add."
-            : "Patched onto every segment, in front of whatever that segment adds.",
+            ? t("Patched onto the one generation, in front of whatever the shots add.")
+            : t("Patched onto every segment, in front of whatever that segment adds."),
         }, [
           icon("effect", 16),
-          el("span", { text: `${globalLoras} LoRA${globalLoras === 1 ? "" : "s"}` }),
+          el("span", { text: t(globalLoras === 1 ? "{count} LoRA" : "{count} LoRAs", { count: globalLoras }) }),
+        ])] : []),
+        // Only when there are any, like the LoRAs: the modal introduces the
+        // feature, the node only reports what this timeline uses.
+        ...(this.timeline.assets?.length ? [el("span", {
+          class: "mmc-pill mmc-pill-static",
+          title: t("References attached to the piece itself, cited by @handle from "
+               + "the segments where they appear."),
+        }, [
+          icon("image", 16),
+          el("span", { text: t(this.timeline.assets.length === 1
+            ? "{count} piece ref" : "{count} piece refs",
+            { count: this.timeline.assets.length }) }),
         ])] : []),
         ...(audio.length ? [el("span", {
           class: "mmc-pill mmc-pill-static",
-          title: "The Context-IR audio fields this timeline sets for every segment.",
+          title: t("The Context-IR audio fields this timeline sets for every segment."),
         }, [icon("audio", 16), el("span", { text: audio.join(" · ") })])] : []),
         el("button", {
           class: "mmc-tl-open",
-          title: "Open the timeline: the global prompt, the segments, and what happens between them",
+          title: t("Open the timeline: the global prompt, the segments, and what happens between them"),
           onclick: () => this.open(),
-        }, [icon("sliders", 16), el("span", { text: "Edit timeline" })]),
+        }, [icon("sliders", 16), el("span", { text: t("Edit timeline") })]),
         ...(this.preStage ? [this.renderPreStagePill()] : []),
       ]),
     ]);
@@ -957,12 +1212,12 @@ export class TimelineBody {
     return el("button", {
       class: `mmc-pill mmc-prestage-toggle${on ? " on" : ""}`,
       title: on
-        ? "The pre-stage node on the left generates stills for this timeline — the opening "
-          + "frame, the closing frame, references. Click to remove it."
-        : "Add a pre-stage: an image node (Krea 2 / Ideogram 4) at this node's left edge whose "
-          + "stills land on the timeline's shots with one click.",
+        ? t("The pre-stage node on the left generates stills for this timeline — the opening "
+          + "frame, the closing frame, references. Click to remove it.")
+        : t("Add a pre-stage: an image node (Krea 2 / Ideogram 4) at this node's left edge whose "
+          + "stills land on the timeline's shots with one click."),
       onclick: () => { this.preStage.toggle(); this.render(); },
-    }, [icon("image", 16), el("span", { text: "pre-stage" })]);
+    }, [icon("image", 16), el("span", { text: t("pre-stage") })]);
   }
 
   /**
@@ -976,12 +1231,14 @@ export class TimelineBody {
     const shots = this.timeline.segments;
     const index = role === "last_frame" ? shots.length - 1 : 0;
     const segment = shots[index];
-    const where = `segment ${index + 1}`;
+    const where = t("segment {n}", { n: index + 1 });
     if (role === "reference") {
       const blocked = S.blockedReason(segment, "reference");
-      if (blocked) return `${where}: ${blocked}`;
+      if (blocked) return t("{where}: {blocked}", { where, blocked });
       const { used, max, filesLeft } = S.capacity(segment, "image");
-      if (used >= max || filesLeft <= 0) return `${where}: no image slots left (${used}/${max} used).`;
+      if (used >= max || filesLeft <= 0) {
+        return t("{where}: no image slots left ({used}/{max} used).", { where, used, max });
+      }
       segment.assets.push({
         handle: S.nextHandle(segment, "image"),
         kind: "image", role: "reference", filename, ref_size: "max",
@@ -990,7 +1247,7 @@ export class TimelineBody {
       return null;
     }
     const blocked = S.blockedReason(segment, role);
-    if (blocked) return `${where}: ${blocked}`;
+    if (blocked) return t("{where}: {blocked}", { where, blocked });
     const existing = S.frameAsset(segment, role);
     if (existing) segment.assets = segment.assets.filter((a) => a.handle !== existing.handle);
     segment.assets.push({

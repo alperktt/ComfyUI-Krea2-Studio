@@ -32,12 +32,16 @@
 import { api } from "../../../scripts/api.js";
 import { el } from "./dom.js";
 import { outputUrl } from "./api.js";
+import { t } from "./i18n.js";
 
 /** Every event this listens to. `b_preview` is the metadata-less legacy frame:
  *  it names no node, so it is only trusted while `progress_state` already says
- *  one of ours is the thing sampling — see the handler. */
+ *  one of ours is the thing sampling — see the handler. `mmc_segment` is our
+ *  own: the timeline's segment node announcing which segment the queue has
+ *  reached, the moment it starts encoding. */
 const EVENTS = ["progress_state", "b_preview_with_metadata", "b_preview",
-                "kj_preview_override", "executed", "execution_error", "execution_start"];
+                "kj_preview_override", "executed", "execution_error", "execution_start",
+                "mmc_segment"];
 
 /** A progress report this long is a sampler; the loaders and decoders report a
  *  step or two each. What lets the stage open on progress rather than waiting
@@ -59,12 +63,19 @@ export class Stage {
    *   for the finished-render overlay, built by the owner from the `executed`
    *   payload — the PreStage's "start frame / end frame / reference" hand-off.
    */
-  constructor({ nodeId, onVisibility, onGallery, resultChips }) {
+  /**
+   * @param {(index: number) => string} [spec.segmentLabel]  how to say which
+   *   segment is being rendered — the Timeline passes one that knows the strip
+   *   ("Segment 2 of 5"); without it the announce's index shows bare.
+   */
+  constructor({ nodeId, onVisibility, onGallery, resultChips, segmentLabel }) {
     this.nodeId = nodeId;
     this.onVisibility = onVisibility;
     this.onGallery = onGallery;
     this.resultChips = resultChips;
+    this.segmentLabel = segmentLabel;
     this.state = "idle";
+    this.segment = null;     // 1-based index of the segment now rendering
     this.progress = null;    // {step, total}
     this.frame = null;       // object URL or data URI of the newest preview
     this.result = null;      // {url, name} of the finished video
@@ -224,12 +235,22 @@ export class Stage {
         break;
       }
 
+      case "mmc_segment":
+        // The segment node announcing itself as it starts to encode — the one
+        // signal that says *whose* steps the sampler's are about to be. Held
+        // until the next announce: the sampler, the decoders and any refine
+        // pass that follow all belong to the same segment.
+        if (!this.ours(detail.node)) break;
+        this.segment = detail.index ?? null;
+        this.renderReadout();
+        break;
+
       case "execution_error":
         if (!this.ours(detail.node_id)) break;
         this.state = "failed";
         this.progress = null;
         clearInterval(this.ticker);
-        this.error = detail.exception_message || "the render failed";
+        this.error = detail.exception_message || t("the render failed");
         this.render();
         break;
     }
@@ -242,6 +263,7 @@ export class Stage {
     this.result = null;
     this.error = null;
     this.progress = null;
+    this.segment = null;
     this.releaseFrame();
     this.frame = null;
     this.frameIsClip = false;
@@ -305,8 +327,8 @@ export class Stage {
         ...(this.state === "done" && this.onGallery ? [
           el("button", {
             class: "mmc-stage-chip mmc-stage-gallery",
-            text: "Gallery",
-            title: "Browse finished renders",
+            text: t("Gallery"),
+            title: t("Browse finished renders"),
             onclick: () => this.onGallery(),
             onpointerdown: (event) => event.stopPropagation(),
           }),
@@ -317,9 +339,15 @@ export class Stage {
       return;
     }
     this.readout.replaceChildren(
+      // Which segment these steps belong to — announced by the segment node,
+      // so it names the one actually being made, cached ones skipped.
+      ...(this.segment ? [el("span", {
+        class: "mmc-stage-chip mmc-stage-segment",
+        text: this.segmentLabel?.(this.segment) ?? t("Segment {n}", { n: this.segment }),
+      })] : []),
       el("span", {
         class: "mmc-stage-chip",
-        text: this.progress?.total ? `${this.progress.step} / ${this.progress.total}` : "sampling",
+        text: this.progress?.total ? `${this.progress.step} / ${this.progress.total}` : t("sampling"),
       }),
       el("span", { class: "mmc-stage-chip", text: elapsed(Date.now() - this.startedAt) }),
     );

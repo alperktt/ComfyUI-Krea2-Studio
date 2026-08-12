@@ -4,6 +4,7 @@
 
 import { ASPECT_PRESETS, FPS, MIN_SHORT_EDGE, NATIVE_SHORT_EDGE, CANVAS_MULTIPLE,
          framesForSeconds, secondsForFrames, resolveCanvas } from "./canvas.js";
+import { t } from "./i18n.js";
 // Where files land is not in the blob any more — it is a preference of this
 // machine, in `settings.js`, so a shared workflow does not carry one person's
 // folder names onto another person's disk.
@@ -472,10 +473,18 @@ function serializeLoras(entries) {
 function serializeRefined(refined) {
   const body = (refined?.body ?? "").trim();
   const sections = refined?.sections;
-  if (!body && !sections) return {};
+  // A timeline's own `refined` may hold nothing but `replaced` — a chained
+  // refine-all writes the rewritten global prompt and audio into the visible
+  // fields and keeps only the originals here — and dropping it would leave
+  // Revert nothing to restore after a reload.
+  if (!body && !sections && !refined?.replaced) return {};
   return {
     refined: {
       ...(body ? { body } : {}),
+      // The rewrite is the shot alone, and compile joins the global prompt in
+      // front of it as it does for typed text. Absent means it absorbed the
+      // join when it was written, and compile leaves it whole.
+      ...(refined.scope === "shot" ? { scope: "shot" } : {}),
       ...(sections ? { sections: { ...sections } } : {}),
       // Kept so the panel can say the prompt has moved on since; compile.py
       // never reads either, and both are small enough not to be worth splitting
@@ -501,6 +510,30 @@ function serializeRefined(refined) {
   };
 }
 
+/** Asset entries, stripped to what compile.py reads. Shared by a state's own
+ *  list and the timeline's reference pool — same shape, same defaults. */
+function serializeAssets(assets) {
+  return assets.map((asset) => {
+    const out = { handle: asset.handle, kind: asset.kind, role: asset.role, filename: asset.filename };
+    if (asset.kind === "video") out.track = asset.track || DEFAULT_TRACK;
+    // Only what departs from the backend's own default for the kind, so the
+    // common setting adds nothing and an old blob round-trips unchanged.
+    if (sizeable(asset) && refSize(asset) !== DEFAULT_REF_SIZE[asset.kind]) {
+      out.ref_size = refSize(asset);
+    }
+    // Absent means the whole file, so a clip nobody trimmed adds nothing.
+    if (asset.trim && asset.kind !== "image") {
+      out.trim = { start: asset.trim.start, end: asset.trim.end };
+    }
+    // Absent means the whole picture, so an unnarrowed reference adds nothing
+    // and compile.py refuses the field anywhere it means nothing.
+    if (takeable(asset) && takes(asset) !== "full") {
+      out.takes = takes(asset);
+    }
+    return out;
+  });
+}
+
 /** The parts of a state every generation has, timeline segment or not. */
 function serializeCommon(state) {
   return {
@@ -511,25 +544,7 @@ function serializeCommon(state) {
     // timeline's rather than clearing them.
     ...(state.soundscape?.trim() ? { soundscape: state.soundscape } : {}),
     ...(state.music?.trim() ? { music: state.music } : {}),
-    assets: state.assets.map((asset) => {
-      const out = { handle: asset.handle, kind: asset.kind, role: asset.role, filename: asset.filename };
-      if (asset.kind === "video") out.track = asset.track || DEFAULT_TRACK;
-      // Only what departs from the backend's own default for the kind, so the
-      // common setting adds nothing and an old blob round-trips unchanged.
-      if (sizeable(asset) && refSize(asset) !== DEFAULT_REF_SIZE[asset.kind]) {
-        out.ref_size = refSize(asset);
-      }
-      // Absent means the whole file, so a clip nobody trimmed adds nothing.
-      if (asset.trim && asset.kind !== "image") {
-        out.trim = { start: asset.trim.start, end: asset.trim.end };
-      }
-      // Absent means the whole picture, so an unnarrowed reference adds nothing
-      // and compile.py refuses the field anywhere it means nothing.
-      if (takeable(asset) && takes(asset) !== "full") {
-        out.takes = takes(asset);
-      }
-      return out;
-    }),
+    assets: serializeAssets(state.assets),
     loras: serializeLoras(state.loras),
     duration_s: state.duration_s,
     // Absent means "follow the mode", so the common case adds nothing.
@@ -617,13 +632,24 @@ export function emptyTimeline() {
     // Patched onto every segment, in front of whatever that segment adds. What
     // a turbo LoRA is for: you want it on the whole clip, not shot by shot.
     loras: [],
+    // The piece's own reference pool — a character sheet, a location plate —
+    // cited by @handle from any segment's text and injected into exactly the
+    // segments that cite it. Mirrors compile.timeline_pool.
+    assets: [],
     // How much of the previous segment's sound a continuing seam inherits.
     // Mirrors compile.DEFAULT_AUDIO_TAIL_S.
     audio_tail_s: DEFAULT_AUDIO_TAIL_S,
     // One set of weights for the whole clip. Chained or not, the segments are
     // concatenated at the end and cannot come from different checkpoints of the
     // same name any more than they can come out different sizes.
-    models: emptyModels(),
+    //
+    // Routed to Ref2VA rather than auto: it is the stronger checkpoint — a
+    // superset of what FL2VA was trained for, handling text-only and keyframe
+    // segments alongside references — and one route means a strip mixing
+    // reference and plain cards runs on one set of weights. The pill still
+    // overrides it, and a saved timeline keeps whatever it stored (a blob with
+    // a models block and no route reads back as auto, exactly as it ran).
+    models: { ...emptyModels(), route: "ref2va" },
     // The turbo switch. Global like the LoRA it engages: a speed-up belongs to
     // the run, not to shot 3.
     turbo: emptyTurbo(),
@@ -643,6 +669,19 @@ function syncCanvas(timeline) {
     segment.upscale = timeline.upscale;
     segment.sample_edge = timeline.sample_edge;
     segment.refine_denoise = timeline.refine_denoise;
+    // The piece's reference pool, mirrored like the canvas so a segment state
+    // answers `mode()`, `checkpoint()` and the prompt box's chips on its own:
+    // a segment citing @ref-1 is a reference generation and every accessor has
+    // to say so. The global texts ride along because a citation in them is a
+    // citation here too — the join and the audio inheritance are compile's,
+    // and `citedPool` mirrors both. Never serialized — all of it is the
+    // timeline's.
+    segment.pool = timeline.assets ?? [];
+    segment.globalTexts = {
+      prompt: timeline.prompt ?? "",
+      soundscape: timeline.soundscape ?? "",
+      music: timeline.music ?? "",
+    };
   }
   // Segment 1 has nothing in front of it. Kept in step here rather than guarded
   // at every read, so reordering cannot leave a stale flag behind.
@@ -657,6 +696,12 @@ function syncCanvas(timeline) {
   timeline.segments.forEach((segment, index) => {
     const from = segment.continue_from;
     if (!Number.isInteger(from) || from < 1 || from >= index) delete segment.continue_from;
+    // A feather the duration can no longer afford — the overlap is trimmed
+    // off after decode, so it must stay under half the clip — is dropped the
+    // same way, rather than left to fail at queue time.
+    if (segment.feather && 2 * segment.feather > framesForSeconds(segment.duration_s)) {
+      delete segment.feather;
+    }
   });
   return timeline;
 }
@@ -671,6 +716,18 @@ export function parseTimeline(raw) {
       // Workflows saved before either existed have no key at all, and a
       // hand-edited blob can have the wrong type in it.
       if (!Array.isArray(timeline.loras)) timeline.loras = [];
+      if (!Array.isArray(timeline.assets)) timeline.assets = [];
+      timeline.assets = timeline.assets.filter(
+        (asset) => asset && typeof asset.handle === "string" && typeof asset.filename === "string");
+      for (const asset of timeline.assets) {
+        // A pool entry is a reference by definition — compile.timeline_pool
+        // refuses anything else, so nothing else is kept here either.
+        asset.role = "reference";
+        if (asset.kind === "video" && !TRACKS.includes(asset.track)) {
+          asset.track = asset.with_audio ? "picture+sound" : DEFAULT_TRACK;
+        }
+        delete asset.with_audio;
+      }
       if (!RENDER_MODES.includes(timeline.render)) timeline.render = "chained";
       timeline.audio_tail_s = clampTail(timeline.audio_tail_s);
       for (const key of ["soundscape", "music"]) {
@@ -698,6 +755,11 @@ export function parseTimeline(raw) {
         delete segment.continue_from;
         const from = Number(raw?.continue_from);
         if (Number.isInteger(from)) segment.continue_from = from;
+        // The seam's width. Off the grid means the classic single frame,
+        // which is also what absence means.
+        delete segment.feather;
+        const width = Number(raw?.feather);
+        if (FEATHER_GRID.includes(width) && width > 1) segment.feather = width;
         return segment;
       });
       return syncCanvas(timeline);
@@ -728,6 +790,9 @@ export function serializeTimeline(timeline) {
     ...(timeline.refine_denoise !== DEFAULT_REFINE_DENOISE
       ? { refine_denoise: timeline.refine_denoise } : {}),
     loras: serializeLoras(timeline.loras ?? []),
+    // The reference pool. Absent when empty, so a timeline that never used one
+    // round-trips exactly as it always did.
+    ...(timeline.assets?.length ? { assets: serializeAssets(timeline.assets) } : {}),
     audio_tail_s: clampTail(timeline.audio_tail_s),
     ...serializeModels(timeline.models),
     ...serializeTurbo(timeline.turbo),
@@ -744,6 +809,9 @@ export function serializeTimeline(timeline) {
           && segment.continue_from >= 1 && segment.continue_from < index) {
         out.continue_from = segment.continue_from;
       }
+      // The seam's width — only on a live picture seam, and only past the
+      // classic single frame, which absence already says.
+      if (out.continue && feather(segment) > 1) out.feather = feather(segment);
       return out;
     }),
   }, null, 2);
@@ -788,7 +856,12 @@ export function shotTime(seconds) {
  */
 export function timelineFrames(timeline) {
   if (isSingle(timeline)) return framesForSeconds(cutTimes(timeline).total);
-  return timeline.segments.reduce((total, segment) => total + framesForSeconds(segment.duration_s), 0);
+  // A feathered seam re-generates its inherited run at the segment's head and
+  // trims it off after decode, so those frames are sampled but never delivered.
+  return timeline.segments.reduce((total, segment, index) => {
+    const overlap = index > 0 && continues(segment) && feather(segment) > 1 ? feather(segment) : 0;
+    return total + framesForSeconds(segment.duration_s) - overlap;
+  }, 0);
 }
 
 /** What the finished clip will run to. */
@@ -1646,22 +1719,25 @@ export function singleProblem(timeline) {
     // was written for it at all.
     const text = (refinedBody(shot) || shot.prompt || "").trim();
     if (!text && !(index === 0 && globalPrompt)) {
-      return `Shot ${index + 1} has no prompt. In one pass the shots are one description `
-           + `with cuts in it, so an empty one leaves a cut with nothing on the far side.`;
+      return t("Shot {shot} has no prompt. In one pass the shots are one description "
+             + "with cuts in it, so an empty one leaves a cut with nothing on the far side.",
+             { shot: index + 1 });
     }
     if (frameAsset(shot, "first_frame") && index !== 0) {
-      return `Shot ${index + 1} has a start frame, but one pass opens on shot 1.`;
+      return t("Shot {shot} has a start frame, but one pass opens on shot 1.", { shot: index + 1 });
     }
     if (frameAsset(shot, "last_frame") && index !== shots.length - 1) {
-      return `Shot ${index + 1} has an end frame, but one pass ends on shot ${shots.length}.`;
+      return t("Shot {shot} has an end frame, but one pass ends on shot {last}.",
+               { shot: index + 1, last: shots.length });
     }
   }
 
   const withRefs = shots.findIndex(hasReferences);
   const withFrames = shots.findIndex((s) => frameAsset(s, "first_frame") || frameAsset(s, "last_frame"));
   if (withRefs >= 0 && withFrames >= 0) {
-    return `Shot ${withFrames + 1} has a start/end frame and shot ${withRefs + 1} has references. `
-         + `Those are different checkpoints and one pass runs on one of them.`;
+    return t("Shot {frames} has a start/end frame and shot {refs} has references. "
+           + "Those are different checkpoints and one pass runs on one of them.",
+           { frames: withFrames + 1, refs: withRefs + 1 });
   }
 
   for (const [key, what] of [["checkpoint", "the checkpoint"], ["soundscape", "the soundscape"],
@@ -1670,7 +1746,7 @@ export function singleProblem(timeline) {
       .map((shot) => (key === "checkpoint" ? shot.checkpoint : (shot[key] || "").trim()))
       .filter((value) => value && value !== "auto"));
     if (key !== "checkpoint" && (timeline[key] || "").trim()) seen.add((timeline[key] || "").trim());
-    if (seen.size > 1) return `The shots disagree about ${what}. One pass has only one.`;
+    if (seen.size > 1) return t("The shots disagree about {what}. One pass has only one.", { what: t(what) });
   }
   return null;
 }
@@ -1689,6 +1765,85 @@ export function removeLora(state, name) {
 
 // ---- assets -----------------------------------------------------------------
 
+/** Every @handle in a text, in order of first appearance. Mirrors
+ *  compile.HANDLE_RE — the one shape a handle may take. */
+export const HANDLE_RE = /@([A-Za-z]+-\d+)/g;
+
+/** The handles the given texts cite, as a Set. */
+function citedHandles(texts) {
+  const found = new Set();
+  for (const text of texts) {
+    for (const match of String(text ?? "").matchAll(HANDLE_RE)) found.add(match[1]);
+  }
+  return found;
+}
+
+/** The texts of `state` that compile will substitute, global joins included:
+ *  the global prompt rides in front of every segment, and the global audio
+ *  fields are inherited by a segment that writes none of its own. `own: true`
+ *  drops the global parts — for telling a segment's own citation from one the
+ *  global prompt put there. */
+function poolTexts(state, { own = false } = {}) {
+  const global_ = (own ? null : state.globalTexts) ?? {};
+  const texts = [state.prompt ?? "", global_.prompt ?? "",
+                 state.soundscape || global_.soundscape || "",
+                 state.music || global_.music || ""];
+  if (state.refined && state.refined.enabled !== false) {
+    texts.push(state.refined.body ?? "");
+    for (const text of Object.values(state.refined.sections ?? {})) texts.push(text ?? "");
+  }
+  return texts;
+}
+
+/** The pool assets a segment's text cites, in pool order. Mirrors
+ *  `compile.cited_pool`: the prompt with the global one joined in front (a
+ *  citation there is a citation everywhere), the rewrite standing in for it
+ *  with its sections, and the two audio fields with their inheritance — a
+ *  citation anywhere in them is what injects the asset into this segment's
+ *  generation at queue time. The pool rides on the segment as `state.pool`,
+ *  mirrored by `syncTimeline` the way the canvas is; a lone Creator state has
+ *  none. */
+export function citedPool(state) {
+  const pool = state.pool ?? [];
+  if (!pool.length) return [];
+  const found = citedHandles(poolTexts(state));
+  const own = new Set(state.assets.map((a) => a.handle));
+  return pool.filter((asset) => found.has(asset.handle) && !own.has(asset.handle));
+}
+
+/** The subset of `citedPool` this segment cites in its own text — what remains
+ *  when the global prompt's citations are set aside. For messages that tell
+ *  the user *where* to edit a mention out. */
+export function citedPoolOwn(state) {
+  const found = citedHandles(poolTexts(state, { own: true }));
+  return citedPool(state).filter((asset) => found.has(asset.handle));
+}
+
+/** Whether the timeline's own texts cite a pool asset — the "applies to every
+ *  segment" state the shelf reports as such. */
+export function poolCitedGlobally(timeline, asset) {
+  return citedHandles([timeline.prompt, timeline.soundscape, timeline.music])
+    .has(asset.handle);
+}
+
+/** Which segments cite a pool asset, as 1-based card numbers — the shelf's
+ *  "used in segments 2, 4" readout. */
+export function poolCitations(timeline, asset) {
+  return timeline.segments
+    .map((segment, index) => (citedPool(segment).includes(asset) ? index + 1 : null))
+    .filter((n) => n !== null);
+}
+
+/** Next free pool handle: ref-1, ref-2, ... One counter across kinds — the
+ *  prefix says "the piece's", not what the file is; the glossary says that. */
+export function nextPoolHandle(timeline) {
+  const taken = new Set((timeline.assets ?? []).map((a) => a.handle));
+  for (let n = 1; ; n += 1) {
+    const handle = `ref-${n}`;
+    if (!taken.has(handle)) return handle;
+  }
+}
+
 export const references = (state) => state.assets.filter((a) => a.role === "reference");
 export const refImages = (state) => references(state).filter((a) => a.kind === "image");
 // The same bucketing compile.py does: a video kept for its soundtrack alone is
@@ -1699,11 +1854,32 @@ export const refAudios = (state) => references(state).filter((a) => a.kind === "
 export const frameAsset = (state, role) => state.assets.find((a) => a.role === role) || null;
 
 export function hasReferences(state) {
-  return references(state).length > 0;
+  // A cited pool reference is a reference of this generation in every way that
+  // matters — the mode, the checkpoint, the pin — even though the asset lives
+  // on the timeline. Mirrors what compile's injection makes true.
+  return references(state).length > 0 || citedPool(state).length > 0;
 }
 
 /** A timeline segment that starts from the previous segment's last frame. */
 export const continues = (state) => state.continue === true;
+
+/** Mirrors compile.FEATHER_GRID: the seam widths the video VAE's temporal
+ *  grid can encode standalone. 1 is the classic single-frame seam; more pins
+ *  the source's last run as motion context, re-generated at this segment's
+ *  head and trimmed off after decode. */
+export const FEATHER_GRID = [1, 5, 22, 39];
+
+/** The seam's width in frames — a valid grid value, or the classic 1. */
+export function feather(segment) {
+  return FEATHER_GRID.includes(segment.feather) && segment.feather > 1 ? segment.feather : 1;
+}
+
+/** The widest feather this segment's duration allows. Mirrors compile: the
+ *  overlap is trimmed off after decode, so it must stay under half the clip. */
+export function maxFeather(segment) {
+  const frames = framesForSeconds(segment.duration_s);
+  return FEATHER_GRID.filter((f) => 2 * f <= frames).pop() ?? 1;
+}
 
 /** The 1-based number of the segment the seam in front of `index` inherits
  *  from — the previous one unless a valid `continue_from` names an earlier
@@ -1729,10 +1905,11 @@ export function remapContinueFrom(timeline, map) {
 /** ...and one whose sound carries on from it. Not implied by the above. */
 export const continuesAudio = (state) => state.continue_audio === true;
 
-/** Continuing *is* having a start frame — it is the previous segment's last one
- *  — which is why it locks out references exactly as a real keyframe does. */
-export function hasFrames(state) {
-  return continues(state) || !!(frameAsset(state, "first_frame") || frameAsset(state, "last_frame"));
+/** A frame the segment names itself — a file in a slot, not an inherited one.
+ *  This is what still locks references out: an inherited frame rides as a
+ *  pinned guide references can coexist with, a named file cannot. */
+export function frameFile(state) {
+  return !!(frameAsset(state, "first_frame") || frameAsset(state, "last_frame"));
 }
 
 export function mode(state) {
@@ -1770,12 +1947,12 @@ export function capacity(state, kind) {
  */
 export function overflow(state) {
   const used = counts(state);
-  if (used.image > MAX_REF_IMAGES) return `At most ${MAX_REF_IMAGES} reference images.`;
-  if (used.video > MAX_REF_VIDEOS) return `At most ${MAX_REF_VIDEOS} reference videos.`;
+  if (used.image > MAX_REF_IMAGES) return t("At most {max} reference images.", { max: MAX_REF_IMAGES });
+  if (used.video > MAX_REF_VIDEOS) return t("At most {max} reference videos.", { max: MAX_REF_VIDEOS });
   if (used.audio > MAX_REF_AUDIOS) {
-    return `At most ${MAX_REF_AUDIOS} reference audio clips, counting video soundtracks.`;
+    return t("At most {max} reference audio clips, counting video soundtracks.", { max: MAX_REF_AUDIOS });
   }
-  if (used.files > MAX_REF_FILES) return `At most ${MAX_REF_FILES} reference files in total.`;
+  if (used.files > MAX_REF_FILES) return t("At most {max} reference files in total.", { max: MAX_REF_FILES });
   return null;
 }
 
@@ -1798,31 +1975,36 @@ export function resolved(state, keyframeSize = null) {
  * out rather than letting the backend reject the graph at queue time.
  */
 export function blockedReason(state, action) {
-  if (action === "reference" && continues(state)) {
-    return "This segment continues from an earlier one, which is a keyframe generation on FL2VA — "
-         + "references need Ref2VA. Turn continuation off to attach references.";
-  }
-  if (action === "reference" && hasFrames(state)) {
-    return "Remove the start/end frame first — references use the Ref2VA checkpoint, frames use FL2VA.";
+  // A continuing segment no longer locks references out (or the other way
+  // round): the inherited frames ride as pinned guides that payload.py places
+  // on the segment's own timeline, which Ref2VA reads alongside its
+  // references. Only a segment's *own* frame files still conflict with them.
+  if (action === "reference" && frameFile(state)) {
+    return t("Remove the start/end frame first — references use the Ref2VA checkpoint, frames use FL2VA.");
   }
   if (action === "first_frame" && continues(state)) {
-    return "This segment's start frame is an earlier segment's last frame. Turn continuation off to choose one.";
+    return t("This segment's start frame is an earlier segment's last frame. Turn continuation off to choose one.");
   }
   if ((action === "first_frame" || action === "last_frame") && hasReferences(state)) {
-    return "Remove the references first — start/end frames use the FL2VA checkpoint, references use Ref2VA.";
-  }
-  // Turning continuation *on* is refused by the same rule read the other way.
-  if (action === "continue" && hasReferences(state)) {
-    return "Remove this segment's references first — continuing from the last frame is an FL2VA "
-         + "generation and references need Ref2VA.";
-  }
-  if (action === "continue_audio" && hasReferences(state)) {
-    return "Remove this segment's references first — the reference list owns the audio slots, "
-         + "so the inherited soundtrack has nowhere to go.";
+    // The reference may be a cited pool asset rather than an attached file, in
+    // which case "remove" means editing the mention out — of this segment's
+    // text, or of the global prompt whose join put the citation everywhere.
+    if (references(state).length) {
+      return t("Remove the references first — start/end frames use the FL2VA checkpoint, references use Ref2VA.");
+    }
+    const own = citedPoolOwn(state);
+    if (own.length) {
+      return t("This segment cites a piece reference ({handles}) — edit the mention out first: "
+        + "start/end frames use the FL2VA checkpoint, references use Ref2VA.",
+          { handles: own.map((a) => `@${a.handle}`).join(", ") });
+    }
+    return t("The global prompt cites {handles}, which rides into every segment — edit the "
+      + "mention out of the global prompt to use start/end frames here.",
+        { handles: citedPool(state).map((a) => `@${a.handle}`).join(", ") });
   }
   if (action === "continue" && frameAsset(state, "first_frame")) {
-    return "Remove this segment's start frame first — continuing would replace it with the source "
-         + "segment's last frame.";
+    return t("Remove this segment's start frame first — continuing would replace it with the source "
+           + "segment's last frame.");
   }
   return null;
 }

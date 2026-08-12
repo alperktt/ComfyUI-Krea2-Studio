@@ -35,6 +35,17 @@ pinned, the core loaders are emitted unchanged, so a graph nobody asked to split
 never quietly depends on a pack being present. Pinning a device *does* raise when
 the pack is missing, because unlike a preview that is a request the render cannot
 honour.
+
+**ComfyUI-GGUF is a third loader path, chosen by the file rather than by a
+setting.** city96's pack registers `unet_gguf` / `clip_gguf` folder keys over
+the same model directories filtered to `.gguf`, and loader nodes taking the same
+filename input and returning the same MODEL/CLIP links, dequantizing per layer
+at compute time. So a quantized checkpoint is not a mode anyone switches on:
+`available` merges the pack's folders into the same pickers, and `loader_for`
+swaps the class whenever the picked filename ends in `.gguf`. Picking one
+without the pack raises and names it, exactly as a pinned device does — both are
+requests the render cannot honour. `weight_dtype` is a core-loader input and is
+not emitted for GGUF files, whose precision was decided at quantization time.
 """
 
 from dataclasses import dataclass, field
@@ -56,6 +67,25 @@ MULTIGPU = {
     "UNETLoader": "UNETLoaderMultiGPU",
     "CLIPLoader": "CLIPLoaderMultiGPU",
     "VAELoader": "VAELoaderMultiGPU",
+    "UnetLoaderGGUF": "UnetLoaderGGUFMultiGPU",
+    "CLIPLoaderGGUF": "CLIPLoaderGGUFMultiGPU",
+}
+
+GGUF_SOURCE = "https://github.com/city96/ComfyUI-GGUF"
+
+# ComfyUI-GGUF's loader for each core loader it can stand in for. No VAE entry
+# because the pack has no VAE loader — and none is needed: nobody quantizes a
+# VAE to GGUF blocks.
+GGUF_LOADERS = {
+    "UNETLoader": "UnetLoaderGGUF",
+    "CLIPLoader": "CLIPLoaderGGUF",
+}
+
+# The pack's folder keys, per core key of ours they extend: same directories,
+# filtered to `.gguf`, which core's own listing leaves out.
+GGUF_FOLDERS = {
+    "diffusion_models": "unet_gguf",
+    "text_encoders": "clip_gguf",
 }
 
 # Which fields a device can be chosen for: the five that become a loader.
@@ -226,17 +256,46 @@ def device_options():
     return [str(option) for option in declared[0]]
 
 
-def loader_for(node_id, device):
-    """The class to emit for a core loader, given where it should load.
+def is_gguf(filename):
+    """Whether a picked file is a GGUF checkpoint. The extension *is* the
+    format — the listing only ever offers `.gguf` names out of the pack's own
+    folder keys, so there is nothing subtler to detect."""
+    return bool(filename) and filename.lower().endswith(".gguf")
 
-    MultiGPU's wrapper takes the same inputs under the same names plus `device`,
-    so this is a name swap and nothing else. Without a device chosen — which is
-    the normal case and the only case on a single-GPU machine — the core loader
-    is emitted, so a graph nobody asked to split does not quietly depend on
-    another pack being installed.
+
+def loader_for(node_id, device, filename=None):
+    """The class to emit for a core loader, given its file and where it loads.
+
+    Two swaps, composed in the order the packs themselves compose. A `.gguf`
+    filename swaps the core loader for ComfyUI-GGUF's, which takes the same
+    filename input minus `weight_dtype` (the caller drops that — quantized
+    weights already chose their precision). A pinned device then swaps whichever
+    class that produced for its MultiGPU subclass, same inputs plus `device`.
+    With neither — the normal case — the core loader is emitted, so a graph
+    nobody asked to quantize or split never depends on another pack.
+
+    Either half missing its pack raises and names it: a GGUF file without a GGUF
+    loader, like a pinned device without MultiGPU, is a request the render
+    cannot honour.
     """
     import nodes
 
+    if is_gguf(filename):
+        gguf = GGUF_LOADERS.get(node_id)
+        if gguf is None:
+            raise ValueError(
+                f"'{filename}' is a GGUF file, and nothing loads a GGUF "
+                f"{node_id.replace('Loader', '') or 'file'} — not even "
+                f"ComfyUI-GGUF. Pick a safetensors file instead."
+            )
+        if gguf not in nodes.NODE_CLASS_MAPPINGS:
+            raise ValueError(
+                f"'{filename}' is a GGUF checkpoint, which needs the '{gguf}' "
+                f"node from ComfyUI-GGUF ({GGUF_SOURCE}). Install it and restart "
+                f"ComfyUI, or pick a safetensors file in the node's 'weights' "
+                f"control."
+            )
+        node_id = gguf
     if not device:
         return node_id, {}
     wrapper = MULTIGPU[node_id]
@@ -258,12 +317,22 @@ def available():
     import folder_paths
     import nodes
 
+    def listing(folder):
+        try:
+            return folder_paths.get_filename_list(folder)
+        except Exception:  # noqa: BLE001 — an unconfigured folder is an empty one
+            return []
+
     listings = {}
     for folder in set(FOLDERS.values()):
-        try:
-            listings[folder] = sorted(folder_paths.get_filename_list(folder))
-        except Exception:  # noqa: BLE001 — an unconfigured folder is an empty one
-            listings[folder] = []
+        # Core's listing filters on its own extensions, which leave `.gguf` out;
+        # ComfyUI-GGUF registers keys over the same directories filtered to
+        # exactly those. Merged into one list because the pick is one question —
+        # which file — and `loader_for` reads the format off the answer. With
+        # the pack absent its keys do not exist, the merge adds nothing, and no
+        # GGUF file is offered that nothing could load.
+        names = {*listing(folder), *listing(GGUF_FOLDERS.get(folder, ""))}
+        listings[folder] = sorted(names)
 
     return {
         "files": {name: listings[folder] for name, folder in FOLDERS.items()},
@@ -330,19 +399,25 @@ def emit_links(graph, weights, checkpoints, audio=True):
     """
     from .render import Links
 
-    def loader(field, node_id, **inputs):
-        wrapper, extra = loader_for(node_id, weights.device(field))
+    def loader(field, node_id, filename, **inputs):
+        wrapper, extra = loader_for(node_id, weights.device(field), filename)
+        # `weight_dtype` is the core loader's input; a GGUF file's precision was
+        # decided when it was quantized, and its loader takes no such widget.
+        if not is_gguf(filename) and node_id == "UNETLoader":
+            inputs["weight_dtype"] = weights.dtype
         return graph.node(wrapper, **inputs, **extra).out(0)
 
     models = {}
     for name in sorted(checkpoints):
-        models[name] = loader(name, "UNETLoader",
-                              unet_name=weights.get(name), weight_dtype=weights.dtype)
+        models[name] = loader(name, "UNETLoader", weights.get(name),
+                              unet_name=weights.get(name))
 
     return Links(
-        clip=loader("clip", "CLIPLoader", clip_name=weights.clip, type=CLIP_TYPE),
-        vae=loader("vae", "VAELoader", vae_name=weights.vae),
-        audio_vae=loader("audio_vae", "VAELoader", vae_name=weights.audio_vae) if audio else None,
+        clip=loader("clip", "CLIPLoader", weights.clip,
+                    clip_name=weights.clip, type=CLIP_TYPE),
+        vae=loader("vae", "VAELoader", weights.vae, vae_name=weights.vae),
+        audio_vae=loader("audio_vae", "VAELoader", weights.audio_vae,
+                         vae_name=weights.audio_vae) if audio else None,
         model_fl2va=models.get("fl2va"),
         model_ref2va=models.get("ref2va"),
     )

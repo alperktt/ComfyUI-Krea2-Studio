@@ -45,6 +45,15 @@ MAX_SEGMENTS = 24
 DEFAULT_AUDIO_TAIL_S = 1.0
 MAX_AUDIO_TAIL_S = 4.0
 
+# How many of the source segment's last frames a seam may inherit — the counts
+# the H3 video VAE can encode standalone. Its temporal grid compresses runs of
+# (1, 4, 4, 4, 4) pixel frames per latent step, so only a run ending on a
+# whole cycle boundary encodes to steps that cover exactly the frames given:
+# 1, 5, 22 and 39 frames. Anything else would pin a run ending short of the
+# source's last frame, and the join would jump by the difference. Mirrored by
+# the seam's feather picker in `timeline.js`.
+FEATHER_GRID = (1, 5, 22, 39)
+
 HANDLE_RE = re.compile(r"@([A-Za-z]+-\d+)")
 
 # Whether a render whose first pass sits under the slider's canvas gets the
@@ -166,6 +175,13 @@ class Compiled:
     # Timeline only: the first frame is the previous segment's last frame, which
     # is a tensor produced mid-graph and so has no Asset and no filename.
     continues: bool = False
+    # How many of the source segment's last frames the seam inherits. 1 is the
+    # classic seam — the last frame becomes this segment's first. More pins the
+    # whole run as never-denoised context at the head of this segment's
+    # timeline, so the model reads real motion instead of guessing it from a
+    # still; those frames are re-generated and trimmed off after decode. Only
+    # the counts the video VAE's temporal grid can encode standalone.
+    feather: int = 1
     # Timeline only: the previous segment's audio tail rides in as a reference so
     # the sound carries across the seam. Independent of `continues` — a hard cut
     # whose music keeps playing is an ordinary thing to want.
@@ -352,31 +368,29 @@ def _parse_track(handle, kind, item):
 
 def _derive_mode(first_frame, last_frame, ref_images, ref_videos, ref_audios, continues=False):
     has_refs = bool(ref_images or ref_videos or ref_audios)
-    has_frames = first_frame is not None or last_frame is not None or continues
+    has_frames = first_frame is not None or last_frame is not None
 
-    # Continuing *is* having a start frame — it is the previous segment's last
+    # Continuing *is* having a start frame — it is the source segment's last
     # one — so a segment cannot also name a file for the slot.
     if continues and first_frame is not None:
         raise CompileError(
-            "this segment continues from the previous one, so its start frame is "
-            "already the previous segment's last frame — remove the start frame "
+            "this segment continues from an earlier one, so its start frame is "
+            "already the source segment's last frame — remove the start frame "
             "or turn continuation off"
         )
 
     # FL2VA and Ref2VA are two different DiT checkpoints. The hosted API can mix
     # a start frame with references in one call; the open weights cannot, so the
     # UI greys one out against the other. Refuse loudly rather than silently
-    # dropping whichever the user cared about less.
+    # dropping whichever the user cared about less. A *continuing* segment is
+    # the exception: its inherited frames ride in as pinned guides that
+    # payload.py places on the target timeline, which Ref2VA reads alongside
+    # its references — so a seam no longer forces a checkpoint choice.
     if has_refs and has_frames:
         raise CompileError(
-            ("continuing from the previous segment's last frame is a keyframe "
-             "generation (FL2VA) and references need the Ref2VA checkpoint, so "
-             "one segment cannot do both. Turn continuation off, or remove the "
-             "references."
-             ) if continues else
-            ("Start/end frames and references need different checkpoints "
-             "(FL2VA vs Ref2VA) and cannot be combined in one generation. "
-             "Remove the frames or remove the references.")
+            "Start/end frames and references need different checkpoints "
+            "(FL2VA vs Ref2VA) and cannot be combined in one generation. "
+            "Remove the frames or remove the references."
         )
 
     if has_refs:
@@ -546,6 +560,27 @@ def refined_body(data):
     return body or None
 
 
+def refined_scope(data):
+    """What a refined body stands for: `"shot"`, or None for the whole request.
+
+    A rewrite made since the global prompt became the refiner's own field is
+    the shot alone — `scope: "shot"` — and the global prompt is joined in front
+    of it at compile time exactly as it is for typed text, which is what keeps
+    the timeline's global box live after refining. A blob without the marker
+    was written when the rewrite absorbed the join, and is left whole: joining
+    the global onto one of those would say it twice.
+
+    None when there is no usable rewrite at all, so callers can gate the join
+    on the scope without re-checking `refined_body`.
+    """
+    refined = data.get("refined")
+    if not isinstance(refined, dict) or refined.get("enabled") is False:
+        return None
+    if not str(refined.get("body") or "").strip():
+        return None
+    return "shot" if refined.get("scope") == "shot" else None
+
+
 def refined_sections(data):
     """The reference form's three extra sections, when a refiner wrote them."""
     refined = data.get("refined")
@@ -600,7 +635,7 @@ def first_pass_edge(raw, short_edge):
 
 
 def compile_request(data, image_size_lookup=None, continues=False, canvas_spec=None,
-                    continues_audio=False, shots=1):
+                    continues_audio=False, shots=1, feather=1):
     """`creator_data` dict -> `Compiled`.
 
     `image_size_lookup(filename) -> (width, height)` supplies the keyframe
@@ -635,18 +670,25 @@ def compile_request(data, image_size_lookup=None, continues=False, canvas_spec=N
 
     mode = _derive_mode(first_frame, last_frame, ref_images, ref_videos, ref_audios, continues)
 
-    # A REF2VA segment already fills `minimax_refs` with its own ordered plan, and
-    # slotting the inherited sound into it means giving it an <Audio N> in that
-    # numbering rather than a line of its own. Worth doing; not done here, and
-    # refused rather than silently dropped so the seam never claims to carry
-    # sound it did not send.
-    if continues_audio and mode == "REF2VA":
+    feather = int(feather or 1)
+    if feather not in FEATHER_GRID:
         raise CompileError(
-            "continuing the sound is not yet supported on a segment with @ references — "
-            "the reference list owns the audio slots. Turn the sound seam off, or "
-            "remove the references."
+            f"a seam can inherit {', '.join(map(str, FEATHER_GRID))} frames — "
+            f"the runs the video VAE's temporal grid can encode — not {feather}"
+        )
+    if feather > 1 and not continues:
+        raise CompileError(
+            "feathering is a property of a continuing seam — this segment does "
+            "not continue from an earlier one"
         )
     audio_tail_s = audio_tail_seconds(data.get("audio_tail_s")) if continues_audio else 0.0
+    # A feathered seam pins the tail end-aligned with the inherited frames on
+    # this segment's own timeline, so a tail longer than the pinned run would
+    # reach back past the clip's origin into coordinates nothing was trained
+    # on. Clamped to the overlap instead — the two are the tail of the same
+    # source and should cover the same instants.
+    if feather > 1 and continues_audio:
+        audio_tail_s = min(audio_tail_s, feather / canvas.FPS)
 
     checkpoint, pinned = _resolve_checkpoint(mode, data.get("checkpoint"))
     if mode == "REF2VA":
@@ -680,6 +722,18 @@ def compile_request(data, image_size_lookup=None, continues=False, canvas_spec=N
     seconds_shown = data.get("duration_s", 6)
     frames = canvas.frames_for_seconds(seconds_shown)
     short_edge = data.get("short_edge", canvas.NATIVE_SHORT_EDGE)
+
+    # The inherited run is re-generated at the head of this segment and trimmed
+    # off after decode, so it spends this segment's frames without delivering
+    # any. It must stay a small fraction of the clip: at half or more, what is
+    # left after the trim is shorter than the overlap that produced it.
+    if frames < 2 * feather:
+        raise CompileError(
+            f"a {feather}-frame feather needs a segment of at least "
+            f"{2 * feather} frames (~{2 * feather / canvas.FPS:.1f} s) — the "
+            f"inherited run is trimmed off after decode, and this segment has "
+            f"only {frames}"
+        )
 
     # A render whose first pass sits under the slider goes one of two ways: one
     # pass at the slider's size ("direct" — past native, off-distribution), or
@@ -715,8 +769,13 @@ def compile_request(data, image_size_lookup=None, continues=False, canvas_spec=N
         mode, body, soundscape, music, canvas.seconds_for_frames(frames),
         # The inherited tail is presented to the tokenizer as <Audio 1>, so the
         # prompt has to say what it is or the label points at nothing. Phrased
-        # the way the reference guide defines its own labels.
-        preamble=contextir.AUDIO_SEAM_LINE if continues_audio else "",
+        # the way the reference guide defines its own labels. Only on the
+        # classic seam: a REF2VA segment's references own the audio numbering,
+        # and a feathered seam pins the tail on this segment's own timeline —
+        # in both, the tail rides unlabelled and the line would point at
+        # nothing.
+        preamble=contextir.AUDIO_SEAM_LINE
+                 if continues_audio and mode != "REF2VA" and feather == 1 else "",
         # Which shot the end frame is reached by. A one-pass render says so
         # outright — it assembled the description and counted the cards' shots —
         # and any body that numbers its own shots says so by carrying them, which
@@ -792,6 +851,7 @@ def compile_request(data, image_size_lookup=None, continues=False, canvas_spec=N
         continues=continues,
         continues_audio=continues_audio,
         audio_tail_s=audio_tail_s,
+        feather=feather,
         refine=refine,
     )
 
@@ -830,8 +890,11 @@ def _join_prompt(global_prompt, segment_prompt):
     Two lines rather than a comma splice: the global prompt is a standing
     description of the piece and the segment's is what happens in this shot, and
     running them together as one sentence reads as one clause qualifying the
-    other. No `@handle` can appear in the global prompt — assets are per-segment
-    in this pass — so `_substitute` sees the join as ordinary prose.
+    other. The only `@handles` with meaning in the global prompt are the
+    reference pool's: citing one there injects the asset into every segment
+    (see `cited_pool`), so `_substitute` finds it attached wherever the join
+    lands. A segment-asset handle stays what it always was — a name that means
+    a different file in every card, and prose to this pass.
     """
     parts = [p for p in (global_prompt.strip(), str(segment_prompt or "").strip()) if p]
     return "\n".join(parts)
@@ -854,6 +917,86 @@ def merge_loras(global_entries, segment_entries):
     kept = [e for e in (global_entries or [])
             if isinstance(e, dict) and e.get("name") not in named]
     return kept + segment_entries
+
+
+def timeline_pool(data):
+    """The timeline's own reference pool, validated: assets any segment may cite.
+
+    Attached once, on the timeline, and injected into exactly the segments
+    whose text cites the asset's handle. Cited per segment, a character sheet
+    rides into shots 2 and 5 and no other; cited in the *global prompt*, the
+    join carries the citation into every segment, which is the attach-once,
+    applies-everywhere gesture. Injection stays cite-gated rather than
+    unconditional because an uncited reference is not free: it forces the
+    segment onto the Ref2VA checkpoint (refusing any keyframe segment
+    outright), costs packed-sequence rows through every sampling step, and
+    would put the whole pool into every segment's cache key.
+
+    Only references: a keyframe is a fact about one segment's opening or
+    closing frame, so a pool entry claiming a frame role is a mistake, not a
+    feature to resolve.
+    """
+    raw = data.get("assets")
+    if not raw:
+        return []
+    pool = _parse_assets(raw)
+    for asset in pool:
+        if asset.role != "reference":
+            raise CompileError(
+                f"@{asset.handle}: a timeline-level asset is a reference any "
+                f"segment can cite — a {asset.role.replace('_', ' ')} belongs "
+                f"to one segment, so attach it there"
+            )
+    return pool
+
+
+def cited_pool(pool, request, extra_texts=()):
+    """Which pool assets this segment's text cites, in pool order.
+
+    The texts scanned are exactly the ones `compile_request` will substitute:
+    the prompt (or the refined body standing in for it — both, since the
+    toggle can flip after queueing was planned), the refined reference
+    sections, and the two audio fields. A citation anywhere in them is what
+    carries the asset into this segment's generation — and since the chained
+    prompt already holds the global prompt joined in front, a citation *there*
+    is a citation in every segment, which is the whole "attach once, applies
+    everywhere" gesture. `extra_texts` is for callers whose request does not
+    carry those global fields yet (one pass joins them later).
+    """
+    if not pool:
+        return []
+    texts = [str(request.get("prompt") or ""),
+             str(request.get("soundscape") or ""),
+             str(request.get("music") or "")]
+    texts.extend(str(text or "") for text in extra_texts)
+    refined = request.get("refined")
+    if isinstance(refined, dict) and refined.get("enabled") is not False:
+        texts.append(str(refined.get("body") or ""))
+        sections = refined.get("sections")
+        if isinstance(sections, dict):
+            texts.extend(str(text or "") for text in sections.values())
+    found = set()
+    for text in texts:
+        found.update(HANDLE_RE.findall(text))
+    return [asset for asset in pool if asset.handle in found]
+
+
+def _inject_pool(pool, request, extra_texts=()):
+    """The cited pool assets, merged in front of the segment's own list.
+
+    In front, so a reference shared by several segments keeps the low ordinals
+    and the same `<Picture N>` wherever the citing sets agree. A segment whose
+    own list already uses a cited handle keeps its own — the more specific
+    entry is the one the user was editing, the same rule `merge_loras` applies
+    to a shadowed name.
+    """
+    cited = cited_pool(pool, request, extra_texts)
+    if not cited:
+        return request.get("assets")
+    own = list(request.get("assets") or [])
+    named = {item.get("handle") for item in own if isinstance(item, dict)}
+    inject = [_asset_dict(asset) for asset in cited if asset.handle not in named]
+    return inject + own if inject else own
 
 
 def timeline_segments(data):
@@ -906,6 +1049,15 @@ def timeline_payloads(data, image_size_lookup=None):
     """
     segments = timeline_segments(data)
     global_prompt = str(data.get("prompt") or "")
+    pool = timeline_pool(data)
+    # A pool handle written in the global prompt is a citation in *every*
+    # segment — the join puts it in front of each one, and the scan below reads
+    # the joined prompt. That is the attach-once gesture: a character sheet
+    # cited globally rides into the whole strip without a per-segment mention.
+    # The one thing it cannot ride into is a keyframe segment, and that clash
+    # is named against the global prompt below rather than left to surface as
+    # a checkpoint error on a segment nobody edited.
+    global_cited = {asset.handle for asset in pool} & set(HANDLE_RE.findall(global_prompt))
     payloads = []
 
     for index, segment in enumerate(segments):
@@ -915,7 +1067,18 @@ def timeline_payloads(data, image_size_lookup=None):
         request.pop("continue", None)
         request.pop("continue_audio", None)
         request.pop("continue_from", None)
+        request.pop("feather", None)
         request["prompt"] = _join_prompt(global_prompt, segment.get("prompt"))
+        # A shot-scoped rewrite gets the same join: it stands in for the
+        # segment's own sentence, not for the piece, so the global prompt goes
+        # in front of it here exactly as it goes in front of typed text — which
+        # is what keeps the timeline's global box a live input after refining.
+        # An unmarked rewrite absorbed the join when it was written and is left
+        # whole; see `refined_scope`.
+        if refined_scope(segment) == "shot":
+            request["refined"] = {**segment["refined"],
+                                  "body": _join_prompt(global_prompt,
+                                                       segment["refined"].get("body"))}
         request["aspect"] = data.get("aspect", "16:9")
         request["short_edge"] = data.get("short_edge", canvas.NATIVE_SHORT_EDGE)
         # The two-pass choice travels with the canvas it is a property of.
@@ -932,6 +1095,28 @@ def timeline_payloads(data, image_size_lookup=None):
         # The tail length is the timeline's — one seam sounding different from
         # the next is not a thing anyone tunes per cut.
         request["audio_tail_s"] = data.get("audio_tail_s", DEFAULT_AUDIO_TAIL_S)
+        # The piece's own references, where this segment cites them — its own
+        # text, or the global prompt riding in front of it. After every text
+        # field above is final, so the scan reads exactly what will be
+        # substituted; a segment citing none is byte-identical to one compiled
+        # before the pool existed, which is what keeps its cache key still.
+        merged_assets = _inject_pool(pool, request)
+        if merged_assets is not request.get("assets"):
+            request["assets"] = merged_assets
+            if global_cited:
+                frame = next((a for a in (segment.get("assets") or [])
+                              if isinstance(a, dict)
+                              and a.get("role") in ("first_frame", "last_frame")), None)
+                if frame is not None:
+                    raise CompileError(
+                        f"segment {index + 1} has a {frame['role'].replace('_', ' ')}, and "
+                        f"the global prompt cites "
+                        + ", ".join("@" + h for h in sorted(global_cited))
+                        + " — a reference cited there rides into every segment, and "
+                        "references cannot share a generation with start/end frames "
+                        "(FL2VA vs Ref2VA). Cite it only in the segments where it "
+                        "appears, or remove the frame."
+                    )
         payloads.append({
             "request": request,
             # Segment 1 has nothing in front of it, so the flags are ignored there
@@ -953,6 +1138,17 @@ def timeline_payloads(data, image_size_lookup=None):
             source = _continue_source(segment.get("continue_from"), index)
             if source is not None:
                 payloads[-1]["continue_from"] = source
+        # The seam's width. Validated in compile_request, where the segment's
+        # frame count is known; only carried when it says something — absent
+        # means the classic single-frame seam, like the other seam keys.
+        if payloads[-1]["continue"]:
+            try:
+                feather = int(segment.get("feather") or 1)
+            except (TypeError, ValueError) as exc:
+                raise CompileError(f"segment {index + 1}: feather must be a "
+                                   f"number of frames") from exc
+            if feather > 1:
+                payloads[-1]["feather"] = feather
 
     # Resolved the way a lone generation would resolve it — segment 1 may take
     # its aspect from its own keyframe — then imposed on the rest.
@@ -1033,6 +1229,14 @@ def single_payload(data):
     segments = timeline_segments(data)
     last_index = len(segments)
     global_prompt = str(data.get("prompt") or "").strip()
+    pool = timeline_pool(data)
+    pool_handles = {asset.handle for asset in pool}
+    # The global prompt opens shot 1's description and the global audio fields
+    # are merged into the one request, so a pool citation in any of them is
+    # shot 1's to carry — the merge below then owns it for the whole clip.
+    global_texts = (global_prompt,
+                    str(data.get("soundscape") or ""),
+                    str(data.get("music") or ""))
 
     assets = []          # the merged reference list, in first-appearance order
     position_of = {}     # dedup key -> index into `assets`
@@ -1044,7 +1248,13 @@ def single_payload(data):
 
     for number, segment in enumerate(segments, start=1):
         try:
-            parsed = _parse_assets(segment.get("assets"))
+            # A cited pool reference joins this shot exactly as it joins a
+            # chained segment — the global texts count as shot 1's, since that
+            # is the shot the join lands on. The merge below dedups on the
+            # handle, so a sheet cited in shots 1 and 4 lands in the pool once
+            # and takes one <Picture N> — which is the point of citing it twice.
+            parsed = _parse_assets(_inject_pool(
+                pool, segment, extra_texts=global_texts if number == 1 else ()))
         except CompileError as exc:
             raise CompileError(f"shot {number}: {exc}") from exc
 
@@ -1066,22 +1276,29 @@ def single_payload(data):
             else:
                 with_frames.append(number)
 
-            key = (asset.kind, asset.role, asset.filename, asset.track,
+            # A pool asset keys — and keeps — its own handle: the global prompt
+            # is prepended to shot 1's text *without* the shot's rename pass,
+            # so a citation there only resolves if the merged list still calls
+            # the asset what the pool does. Its handle is globally unique
+            # already, which is the ref- prefix's whole job.
+            pooled = asset.handle in pool_handles
+            key = (asset.handle if pooled else None,
+                   asset.kind, asset.role, asset.filename, asset.track,
                    asset.ref_size, asset.trim, asset.takes)
             position = position_of.get(key)
             if position is None:
-                counters[asset.kind] = counters.get(asset.kind, 0) + 1
                 position = position_of[key] = len(assets)
-                assets.append(replace(
-                    asset, handle=f"{_HANDLE_PREFIX[asset.kind]}-{counters[asset.kind]}"))
+                if pooled:
+                    assets.append(asset)
+                else:
+                    counters[asset.kind] = counters.get(asset.kind, 0) + 1
+                    assets.append(replace(
+                        asset, handle=f"{_HANDLE_PREFIX[asset.kind]}-{counters[asset.kind]}"))
             rename[asset.handle] = assets[position].handle
 
         # A refined shot replaces the typed one here rather than downstream,
         # because the merged request is a single generation and `compile_request`
         # would otherwise see one `refined` blob standing for the whole strip.
-        # The refiner was shown the global prompt as the piece's standing
-        # description, so a refined shot 1 has already absorbed it and is not
-        # given it a second time.
         written = refined_body(segment)
 
         # One pass, single-pass substitution: a rename map applied in two passes
@@ -1090,11 +1307,16 @@ def single_payload(data):
             lambda m: "@" + rename.get(m.group(1), m.group(1)),
             written or str(segment.get("prompt") or ""),
         ).strip()
-        if number == 1 and global_prompt and not written:
-            # The standing description of the piece opens the description, which
-            # is where the guide puts the style and the initial composition. A
-            # terminator is added when the user left none, because without one the
-            # two clauses run together into a sentence neither of them is.
+        # The standing description of the piece opens the description, which is
+        # where the guide puts the style and the initial composition — in front
+        # of typed text, and in front of a shot-scoped rewrite, which stands in
+        # for the shot alone. Only a rewrite from before the scope marker
+        # existed absorbed the global itself and is not given it a second time;
+        # see `refined_scope`. A terminator is added when the user left none,
+        # because without one the two clauses run together into a sentence
+        # neither of them is.
+        if number == 1 and global_prompt and (not written
+                                              or refined_scope(segment) == "shot"):
             joiner = "" if global_prompt[-1] in ".!?,;:—" else "."
             text = f"{global_prompt}{joiner} {text}".strip()
         shots.append((at, text))
@@ -1160,6 +1382,7 @@ def compile_segment(payload, image_size_lookup=None):
         continues=bool(payload.get("continue")),
         continues_audio=bool(payload.get("continue_audio")),
         shots=int(payload.get("shots", 1)),
+        feather=int(payload.get("feather", 1)),
         canvas_spec=CanvasSpec(**spec) if spec else None)
 
 

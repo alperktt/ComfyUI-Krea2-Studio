@@ -62,6 +62,13 @@ You pick the files in the node itself, on the **weights** pill. Anything a rende
 needs and does not have is refused before the queue starts, naming the field and
 the folder it looks in.
 
+GGUF-quantized checkpoints and text encoders work too, with
+[ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) installed: drop the
+`.gguf` in the same folders and pick it like any other file — the format is read
+off the extension and the right loader is emitted, no setting to switch. The
+precision control does not apply to them (theirs was decided at quantization),
+and picking one without the pack refuses up front naming it.
+
 > The single-image VAE is a merged H3 VAE and loads through the same node as the
 > real one, so nothing downstream can tell them apart. It belongs in the
 > PreStage's VAE slot and nowhere else — in a video workflow it costs multi-frame
@@ -255,11 +262,42 @@ earlier segment's last frame and inherit a tail of its sound. The seam continues
 from the previous segment by default, but from segment 3 on a *from* control under
 the seam's two switches lets it name any earlier one — a story that returns to
 segment 1's hallway after an unrelated segment 2 continues from segment 1, while
-segment 2 stays a hard cut. **One pass** compiles the
+segment 2 stays a hard cut.
+
+A continuing seam works in every mode, references included: a Ref2VA segment can
+continue from another Ref2VA segment's last frame, with its `@` references intact.
+The seam's width is adjustable too — the *last frame / blend* control widens it
+from the classic single frame to a 5-, 22- or 39-frame blend. A blended seam pins
+the source's last run as motion context, so the model reads real movement across
+the cut instead of guessing it from a still, and the sound seam is then pinned
+on the new segment's own timeline — continued phase-locked rather than imitated.
+The overlap is re-generated at the segment's head and trimmed off after decode,
+so a blended segment delivers up to 1.6 s less than its card says. **One pass**
+compiles the
 same cards into a *single* generation, since H3's prompt format is already a shot
 list — nothing is decoded and re-encoded mid-clip, so there is no seam and music or
 dialogue carries across a cut. **Refine all** rewrites every card in one call, which
 is the only way a later shot keeps the look an earlier one established.
+
+**Piece references** attach a file to the timeline itself — a character sheet, a
+location plate, a voice — instead of once per segment it appears in. The shelf
+above the strip hands out `@ref-N` handles, and the citation is the attachment:
+write the handle in the **global prompt** (or click the handle on its chip) and
+the reference rides into *every* segment; write it in one segment's prompt and it
+rides into that segment alone. Uncited, it rides into none — so editing an
+unrelated segment re-renders nothing extra. A globally cited reference cannot
+share the strip with a start/end-frame segment (references and frames are
+different checkpoints), and the compiler says so naming both. The `@` menu
+inside every segment offers the pool under *Piece references*, the refiner is
+shown it once and may cite it where the subject appears — globally included —
+and a reference image can be narrowed (*person*, *object*, *scene*, *style*) so
+a sheet contributes the likeness without its background. In one pass, all
+citations of the same piece reference share a single `<Picture N>`.
+
+While a chained timeline renders, the preview overlay names the segment the
+sampler is on — *Segment 3 of 5* — so a long strip's step count finally says
+where in the piece you are. Cached segments are skipped, so the chip always
+names the segment actually being made.
 
 ## Modes and duration
 
@@ -377,6 +415,31 @@ Two things worth knowing:
   check is what stops a crafted filename reaching the rest of your disk — so it is
   not something this pack works around. Use `--input-directory` instead.
 
+## Language
+
+The UI speaks English, 日本語, 한국어 and 简体中文. There is no language picker in
+the pack: it follows ComfyUI's own — **Settings → Comfy → Locale** — so the nodes
+and the app around them always agree. Traditional Chinese falls back to
+Simplified until someone contributes it.
+
+Every string the UI shows goes through one gate (`js/minimax_creator/i18n.js`),
+keyed by the English sentence itself. A key with no translation shows the
+English, so a half-finished dictionary degrades to the UI this pack always had
+rather than to bare token names. The dictionaries live in
+`js/minimax_creator/locales/` as plain English → translation pairs a native
+speaker can review without the source open — corrections are one-line edits, and
+pull requests for them (or for new languages) are welcome. Node names and
+descriptions in ComfyUI's own library and search are translated separately, in
+`locales/<lang>/nodeDefs.json` at the pack root, which core merges by itself.
+
+The translations are machine-drafted against a fixed glossary. The short labels
+are safe; the long tooltips would profit from a native speaker's pass.
+
+The six Krea 2 pills this fork adds — moodboard, edit, style, position, the
+loader row and the stage count — are not in the dictionaries yet, so they show
+English under any locale. That is the fallback working as designed rather than a
+break, and it is the obvious next thing to contribute.
+
 ## Thanks
 
 This pack is glue. The work underneath it belongs to other people:
@@ -391,6 +454,8 @@ This pack is glue. The work underneath it belongs to other people:
   live preview a real decoder. Kijai's turbo conversions are in the switch too.
 - **[ComfyUI-MultiGPU](https://github.com/pollockjj/ComfyUI-MultiGPU)** by pollockjj —
   puts a device chip on every row of the weights popover.
+- **[ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF)** by city96 — loads the
+  `.gguf` files the weights popover offers once it is installed.
 - **[MiniMax-H3-Image-VAE](https://huggingface.co/Mamad8/MiniMax-H3-Image-VAE)** by
   Mamad8 — the experimental single-image decoder the PreStage's H3 branch reads a
   still through. Trained with H3's own encoder frozen, which is what lets one file

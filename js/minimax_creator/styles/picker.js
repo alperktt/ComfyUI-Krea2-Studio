@@ -1,0 +1,225 @@
+// Picker modal, shelves, organize mode.
+// No backticks or ${} anywhere in the CSS: each chunk is one template literal.
+export const css = `
+/* --- picker modal --------------------------------------------------------- */
+.mmc-overlay {
+  position: fixed; inset: 0; z-index: 1400; background: rgba(0,0,0,.62);
+  display: flex; align-items: center; justify-content: center; padding: 40px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+}
+.mmc-modal {
+  background: #161616; border: 1px solid var(--mmc-line); border-radius: 22px;
+  width: min(1100px, 100%); height: min(760px, 100%);
+  display: flex; flex-direction: column; color: #ededed; overflow: hidden;
+  box-shadow: 0 30px 80px rgba(0,0,0,.65);
+}
+.mmc-modal-head {
+  display: flex; align-items: center; gap: 22px; padding: 20px 24px 14px;
+  border-bottom: 1px solid var(--mmc-line);
+}
+.mmc-tab {
+  background: none; border: 0; padding: 4px 0; color: var(--mmc-dim);
+  font-size: 17px; font-family: inherit; cursor: pointer;
+}
+.mmc-tab[aria-selected="true"] { color: #fff; font-weight: 500; }
+.mmc-close {
+  margin-left: auto; width: 34px; height: 34px; border-radius: 50%;
+  background: #2a2a2a; border: 0; color: #ededed; cursor: pointer; font-size: 16px;
+}
+.mmc-modal-bar { display: flex; gap: 12px; padding: 16px 24px; align-items: center; }
+.mmc-search {
+  flex: 1; height: 40px; border-radius: 12px; background: #202020;
+  border: 1px solid var(--mmc-line); color: #ededed; padding: 0 14px;
+  font-size: 14px; font-family: inherit; outline: none;
+}
+.mmc-upload {
+  height: 40px; padding: 0 18px; border-radius: 20px; background: #fff; border: 0;
+  color: #111; font-size: 14px; font-weight: 500; font-family: inherit; cursor: pointer;
+}
+/* padding-bottom clears the floating Add/Cancel bar, which is positioned over
+   the grid — without it the last row sits underneath and cannot be clicked. */
+.mmc-grid {
+  flex: 1; overflow-y: auto; padding: 4px 24px 96px;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 14px;
+  align-content: start;
+  /* The grid is a flex child with a definite height, and implicit auto rows in
+     one get fitted into that height rather than sized to their contents: with
+     more rows than fit, every row is squeezed and the cards clip. max-content
+     pins each row to the cards in it and lets the grid scroll, which is what
+     overflow-y is here for. */
+  grid-auto-rows: max-content;
+}
+/* The lazy-load sentinel takes a full grid row of its own: left in the normal
+   flow it would sit beside the last cells and be "visible" from the start. */
+.mmc-grid-sentinel { grid-column: 1 / -1; height: 1px; }
+/* Page numbers for a folder too large to scroll end to end. Floats bottom-left,
+   mirroring the foot bottom-right; hidden while everything fits on one page. */
+.mmc-pager {
+  position: absolute; bottom: 34px; left: 44px;
+  display: flex; align-items: center; gap: 4px; padding: 8px 10px;
+  background: #202020; border: 1px solid var(--mmc-line); border-radius: 14px;
+  box-shadow: 0 12px 32px rgba(0,0,0,.5);
+}
+.mmc-page {
+  min-width: 28px; height: 28px; padding: 0 6px; border-radius: 8px;
+  background: none; border: 0; color: var(--mmc-dim);
+  font-size: 12px; font-family: inherit; cursor: pointer;
+}
+.mmc-page:hover { color: #ededed; background: #2a2a2a; }
+.mmc-page[aria-current="true"] { background: #333; color: #fff; }
+.mmc-page:disabled { opacity: .35; cursor: default; background: none; }
+.mmc-page-gap { color: var(--mmc-dim); font-size: 12px; padding: 0 2px; }
+/* The square is height:0 + padding-bottom:100%, not aspect-ratio, and the media
+   is positioned out of flow.
+   With aspect-ratio and in-flow media, thumbnails rendered at their natural
+   height and spilled over the rows above and below. Whatever the host page does
+   to img/video sizing, an absolutely positioned child cannot push its
+   container taller, so the cell stays square and clips. */
+.mmc-cell {
+  position: relative; display: block; box-sizing: border-box;
+  height: 0; padding: 0 0 100%;
+  border-radius: 12px; overflow: hidden;
+  background: #202020; border: 2px solid transparent; cursor: pointer;
+}
+.mmc-cell[aria-selected="true"] { border-color: #fff; }
+.mmc-cell:focus-visible { outline: none; border-color: #7a7a7a; }
+.mmc-cell img, .mmc-cell video, .mmc-cell-fallback {
+  position: absolute; inset: 0; width: 100%; height: 100%; box-sizing: border-box;
+}
+.mmc-cell img, .mmc-cell video { object-fit: cover; display: block; }
+.mmc-cell-fallback {
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 8px; color: var(--mmc-dim);
+  font-size: 11px; padding: 8px; text-align: center; word-break: break-all;
+}
+.mmc-cell-fallback svg { width: 26px; height: 26px; stroke: currentColor; fill: none; stroke-width: 1.5; }
+.mmc-check {
+  position: absolute; top: 8px; right: 8px; width: 22px; height: 22px;
+  border-radius: 50%; background: #2f7bf6; display: none;
+  align-items: center; justify-content: center;
+}
+.mmc-cell[aria-selected="true"] .mmc-check { display: flex; }
+.mmc-check::after {
+  content: ""; width: 5px; height: 10px; border: solid #fff;
+  border-width: 0 2px 2px 0; transform: rotate(45deg) translate(-1px,-1px);
+}
+/* The segment badge. Invisible until the cell is hovered, focused or selected,
+   unless it carries a setting — an untouched grid should look untouched. */
+.mmc-cell-trim {
+  position: absolute; top: 8px; left: 8px; display: none;
+  align-items: center; gap: 5px; max-width: calc(100% - 44px);
+  padding: 3px 8px 3px 6px; border-radius: 9px; border: 1px solid var(--mmc-line);
+  background: rgba(0,0,0,.72); color: #ededed;
+  font-size: 10px; font-family: inherit; cursor: pointer;
+  white-space: nowrap; overflow: hidden;
+}
+.mmc-cell:hover .mmc-cell-trim,
+.mmc-cell:focus-visible .mmc-cell-trim,
+.mmc-cell[aria-selected="true"] .mmc-cell-trim,
+.mmc-cell-trim.set { display: flex; }
+.mmc-cell-trim.set { background: rgba(47,123,246,.9); border-color: transparent; }
+.mmc-cell-trim:hover { background: rgba(0,0,0,.9); }
+.mmc-cell-trim.set:hover { background: var(--mmc-blue); }
+.mmc-cell-trim svg { width: 12px; height: 12px; flex: none; stroke: currentColor; fill: none;
+  stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* --- shelves -------------------------------------------------------------- */
+/* One row of places between the search bar and the grid: All, favorites, every
+   input subfolder, and the "+" that makes a new one. The same chip family as
+   the refiner's language row, so the picker keeps the node's vocabulary. */
+.mmc-shelves { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 0 24px 12px; }
+.mmc-shelf {
+  display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px;
+  border-radius: 15px; background: var(--mmc-surface-2); border: 1px solid var(--mmc-line);
+  color: var(--mmc-dim); font-size: 12px; font-family: inherit; cursor: pointer;
+  transition: background .12s ease, color .12s ease, transform .12s ease;
+}
+.mmc-shelf:hover { color: var(--mmc-text); background: var(--mmc-surface-3); }
+.mmc-shelf[aria-selected="true"] { color: var(--mmc-bg); background: var(--mmc-accent); border-color: var(--mmc-accent); }
+.mmc-shelf svg { width: 13px; height: 13px; flex: none; }
+.mmc-shelf-n { font-size: 10px; opacity: .7; }
+/* A chip with cargo hovering over it: swell and light up. The one place the
+   picker spends motion. */
+.mmc-shelf.drop {
+  transform: scale(1.08); color: var(--mmc-text);
+  background: var(--mmc-surface-3); border-color: var(--mmc-accent);
+}
+/* While a cell is riding, the chips announce they are drop targets. */
+.mmc-modal.dragging .mmc-shelf { border-style: dashed; }
+.mmc-shelf-new { font-size: 15px; line-height: 1; }
+.mmc-shelf-input {
+  height: 30px; width: 140px; border-radius: 15px; background: #202020;
+  border: 1px solid var(--mmc-accent); color: #ededed; padding: 0 12px;
+  font-size: 12px; font-family: inherit; outline: none;
+}
+
+/* The star. Same quiet-until-hover rule as the segment badge — an untouched
+   grid stays untouched — but a set star stays lit. Steps left when the
+   selection check needs the corner. */
+.mmc-cell-star {
+  position: absolute; top: 8px; right: 8px; width: 24px; height: 24px;
+  display: none; align-items: center; justify-content: center;
+  border: 0; border-radius: 50%; background: rgba(0,0,0,.55);
+  color: #ededed; cursor: pointer; padding: 0;
+}
+.mmc-cell:hover .mmc-cell-star,
+.mmc-cell:focus-visible .mmc-cell-star,
+.mmc-cell-star.on { display: flex; }
+.mmc-cell-star.on { color: var(--mmc-accent); }
+.mmc-cell-star.on svg { fill: currentColor; }
+.mmc-cell-star svg { width: 13px; height: 13px; }
+.mmc-cell[aria-selected="true"] .mmc-cell-star { right: 36px; }
+/* Where a file lives — worth a caption only on the All shelf, where everything
+   is mixed together. Sits above the name gradient. */
+.mmc-cell-home {
+  position: absolute; left: 6px; bottom: 22px; max-width: calc(100% - 12px);
+  padding: 2px 8px; border-radius: 8px; background: rgba(0,0,0,.6);
+  color: #bdbdbd; font-size: 10px; pointer-events: none;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* --- organize mode --------------------------------------------------------- */
+/* The bar toggle. Outlined next to the solid Upload button — a mode you enter,
+   not an action you fire — and lit like a selected shelf while it is on. */
+.mmc-organize {
+  display: flex; align-items: center; gap: 7px; height: 40px; padding: 0 16px;
+  border-radius: 20px; background: none; border: 1px solid var(--mmc-line);
+  color: var(--mmc-dim); font-size: 14px; font-family: inherit; cursor: pointer;
+  white-space: nowrap;
+}
+.mmc-organize:hover { color: var(--mmc-text); background: var(--mmc-surface-2); }
+.mmc-organize[aria-pressed="true"] {
+  color: var(--mmc-bg); background: var(--mmc-accent); border-color: var(--mmc-accent);
+}
+.mmc-organize svg { width: 14px; height: 14px; flex: none; }
+/* Delete reads as danger from the start, and arming it turns it solid: the
+   second press is the one that removes files. */
+.mmc-del {
+  background: none; border: 0; color: #e0743c; font-size: 14px;
+  font-family: inherit; cursor: pointer; white-space: nowrap;
+}
+.mmc-del:hover { color: #f08a55; }
+.mmc-del:disabled { color: var(--mmc-off); cursor: not-allowed; }
+.mmc-del.armed {
+  height: 36px; padding: 0 14px; border-radius: 10px;
+  background: #b03a2a; color: #fff;
+}
+.mmc-del.armed:hover { color: #fff; background: #c74433; }
+/* The Move to… popover, pinned above the footer it opened from. */
+.mmc-move-menu {
+  position: absolute; right: 44px; bottom: 100px; z-index: 5;
+  display: flex; flex-direction: column; gap: 2px;
+  min-width: 210px; max-height: 320px; overflow-y: auto; padding: 8px;
+  background: #202020; border: 1px solid var(--mmc-line); border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0,0,0,.5);
+}
+.mmc-move-opt {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  border-radius: 8px; background: none; border: 0; color: #ededed;
+  font-size: 13px; font-family: inherit; cursor: pointer; text-align: left;
+}
+.mmc-move-opt:hover { background: var(--mmc-surface-3); }
+.mmc-move-opt svg { width: 13px; height: 13px; flex: none; }
+.mmc-move-menu .mmc-shelf-input { margin-top: 6px; width: auto; }
+
+`;

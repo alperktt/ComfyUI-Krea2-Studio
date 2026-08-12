@@ -10,6 +10,7 @@
 import { el, icon, drawFrame, mountOverlay } from "./dom.js";
 import { viewUrl, probe } from "./api.js";
 import { peaks, draw } from "./waveform.js";
+import { t } from "./i18n.js";
 
 const WAVE_COLOUR = "rgba(255,255,255,.34)";
 
@@ -26,7 +27,7 @@ export function formatTime(seconds) {
 
 /** What the "full / 0:02–0:07" buttons show. */
 export function trimLabel(asset) {
-  return asset.trim ? `${formatTime(asset.trim.start)}–${formatTime(asset.trim.end)}` : "full";
+  return asset.trim ? `${formatTime(asset.trim.start)}–${formatTime(asset.trim.end)}` : t("full");
 }
 
 // The track switch, in the order it reads on screen. The labels say what comes
@@ -102,7 +103,7 @@ class Trim {
     this.media.addEventListener("pause", () => this.onPlayState());
 
     this.playButton = el("button", {
-      class: "mmc-trim-play", title: "Play the segment", onclick: () => this.togglePlay(),
+      class: "mmc-trim-play", title: t("Play the segment"), onclick: () => this.togglePlay(),
     }, [icon("play", 16)]);
 
     this.selection = this.buildSelection();
@@ -124,7 +125,7 @@ class Trim {
 
     this.readout = el("div", { class: "mmc-trim-read" });
     this.fullButton = el("button", {
-      class: "mmc-ghost", text: "Whole clip", title: "Reset to the whole file",
+      class: "mmc-ghost", text: t("Whole clip"), title: t("Reset to the whole file"),
       onclick: () => { this.start = 0; this.end = this.duration; this.paint(); },
     });
 
@@ -132,7 +133,7 @@ class Trim {
     if (this.options.showTrack) {
       this.trackButtons = TRACK_ORDER.map((track) => el("button", {
         class: "mmc-seg-opt",
-        text: TRACK_LABEL[track],
+        text: t(TRACK_LABEL[track]),
         onclick: () => {
           if (this.hasAudio === false && track !== "picture") return;
           this.track = track;
@@ -140,13 +141,13 @@ class Trim {
         },
       }));
       foot.push(el("div", {
-        class: "mmc-seg", role: "group", "aria-label": "What to reference from this clip",
+        class: "mmc-seg", role: "group", "aria-label": t("What to reference from this clip"),
       }, this.trackButtons));
     }
     foot.push(
       el("span", { class: "mmc-trim-spacer" }),
-      el("button", { class: "mmc-ghost", text: "Cancel", onclick: () => this.close(null) }),
-      el("button", { class: "mmc-add", text: "Use", onclick: () => this.commit() }),
+      el("button", { class: "mmc-ghost", text: t("Cancel"), onclick: () => this.close(null) }),
+      el("button", { class: "mmc-add", text: t("Use"), onclick: () => this.commit() }),
     );
 
     this.modal = el("div", { class: "mmc-trim" }, [
@@ -237,7 +238,7 @@ class Trim {
   fail() {
     // The duration is left alone: the header probe may already have supplied it,
     // or may be about to, and the range is still editable without a picture.
-    this.status = "This browser cannot play this file — the segment can still be set by time.";
+    this.status = t("This browser cannot play this file — the segment can still be set by time.");
     this.paint();
   }
 
@@ -301,7 +302,7 @@ class Trim {
     const node = el("div", {
       class: `mmc-trim-handle mmc-trim-${edge}`,
       role: "slider", tabindex: "0",
-      title: edge === "start" ? "Segment start" : "Segment end",
+      title: edge === "start" ? t("Segment start") : t("Segment end"),
     });
     this.drag(node, () => (at) => this.setEdge(edge, at * this.duration));
     return this.arrows(node, (delta) => this.setEdge(edge, this[edge] + delta));
@@ -311,7 +312,7 @@ class Trim {
    *  can be slid along the clip without re-dialling both edges. */
   buildSelection() {
     const node = el("div", {
-      class: "mmc-trim-sel", tabindex: "0", title: "Drag to slide the segment",
+      class: "mmc-trim-sel", tabindex: "0", title: t("Drag to slide the segment"),
     });
     this.drag(node, (from) => {
       // Frozen at grab time: the length must not creep as the window is pushed
@@ -399,16 +400,16 @@ class Trim {
         const unavailable = silent && track !== "picture";
         button.disabled = unavailable || undefined;
         button.setAttribute("aria-pressed", track === shown);
-        button.title = unavailable ? "This clip has no audio track." : TRACK_TITLE[track];
+        button.title = unavailable ? t("This clip has no audio track.") : t(TRACK_TITLE[track]);
       });
     }
     if (!this.duration) {
-      this.readout.textContent = this.status || "Reading the clip…";
+      this.readout.textContent = this.status || t("Reading the clip…");
       return;
     }
     this.readout.replaceChildren(
-      el("span", { text: whole ? `Whole clip · ${formatTime(this.duration)}` : `${formatTime(this.start)} – ${formatTime(end)}` }),
-      el("span", { class: "mmc-trim-len", text: `${(end - this.start).toFixed(1)} s` }),
+      el("span", { text: whole ? t("Whole clip · {time}", { time: formatTime(this.duration) }) : `${formatTime(this.start)} – ${formatTime(end)}` }),
+      el("span", { class: "mmc-trim-len", text: t("{length} s", { length: (end - this.start).toFixed(1) }) }),
       // A length that came from the header rather than the player: say so, or the
       // dead picture above looks like a bug rather than a missing codec.
       ...(this.status ? [el("span", { class: "mmc-trim-note", text: this.status })] : []),

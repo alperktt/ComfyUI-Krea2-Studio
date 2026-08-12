@@ -886,6 +886,40 @@ expect_error("a multi-stage run with no Turbo checkpoint picked says which file"
                  render_mod.Sampling(seed=1, steps=52, cfg=4.0,
                                      sampler_name="euler", scheduler="simple"), NODE_ID),
              "Turbo checkpoint")
+# ---- GGUF checkpoints -------------------------------------------------------
+#
+# The image branch reuses `models.loader_for`, so the claims are the creator
+# graph's: a `.gguf` file swaps the loader class, drops `weight_dtype` (a core
+# widget the GGUF nodes lack), and refuses up front without the pack.
+
+GGUF_MODEL = "krea2_raw_Q4_K_M.gguf"
+
+expect_error("a GGUF checkpoint without the pack is refused up front",
+             lambda: build(blob(models={**MODELS, "krea2": {
+                 **MODELS["krea2"], "model": GGUF_MODEL}})),
+             "ComfyUI-GGUF")
+
+
+class _FakeGGUF:
+    FUNCTION = "load"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+
+
+_restore_gguf = dict(comfy_nodes.NODE_CLASS_MAPPINGS)
+comfy_nodes.NODE_CLASS_MAPPINGS["UnetLoaderGGUF"] = _FakeGGUF
+try:
+    quant = by_class(build(blob(models={**MODELS, "krea2": {
+        **MODELS["krea2"], "model": GGUF_MODEL}})).expand)
+    check("a .gguf checkpoint loads through the pack's loader",
+          quant["UnetLoaderGGUF"][0][1], {"unet_name": GGUF_MODEL})
+    check("...and no core UNETLoader beside it", "UNETLoader" in quant, False)
+    check("the text encoder stays on the core loader", len(quant["CLIPLoader"]), 1)
+finally:
+    comfy_nodes.NODE_CLASS_MAPPINGS.clear()
+    comfy_nodes.NODE_CLASS_MAPPINGS.update(_restore_gguf)
 
 if FAILURES:
     print(f"{len(FAILURES)} failure(s):")

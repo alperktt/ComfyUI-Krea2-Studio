@@ -432,6 +432,110 @@ check("junk falls back rather than failing a refine",
       refine.reply_tokens("lots"), refine.NUM_PREDICT)
 
 
+# ---- the piece --------------------------------------------------------------
+#
+# A whole-timeline refine rewrites the global prompt as a field of its own —
+# `PIECE_FIELD` — instead of absorbing it into every body. The join onto each
+# segment stays compile-time (`compile.refined_scope`), which is what keeps the
+# timeline's global box a live input after refining. And a chained strip's
+# reference cards carry their own analysis sections inside their shot entries,
+# because each card is its own generation over its own reference pool — the one
+# reason mixed and all-reference strips used to be refused.
+
+piece_shape = refine.reply_shape("REF2VA", 3, piece=True, ref_shots=(1,))
+check("a whole-timeline shape asks for the global prompt",
+      '"%s": "...",' % refine.PIECE_FIELD in piece_shape, True)
+check("the marked entries carry their own sections",
+      '{"subject_definitions": "...", "summary": "...", "retention_analysis": "...", '
+      '"body": "..."}' in piece_shape, True)
+check("...the unmarked entries stay plain", '{"body": "..."},' in piece_shape, True)
+check("...and the top-level set is gone",
+      '\n  "subject_definitions"' in piece_shape, False)
+check("which entries carry sections is said in words",
+      "Shot entry 2 carries its own" in piece_shape, True)
+check("several are said in the plural",
+      "Shot entries 1, 3 each carry their own"
+      in refine.reply_shape("REF2VA", 3, ref_shots=(0, 2)), True)
+check("a single-document reply keeps the top-level set",
+      '\n  "subject_definitions": "...",' in refine.reply_shape("REF2VA", 1), True)
+
+PIECED = (
+    '{"global_prompt": "A live-action piece.", "shots": ['
+    '{"body": "a courier waits"}, '
+    '{"subject_definitions": "<Subject 1> is the woman in @img-1", '
+    '"summary": "[Ref2VA] a portrait", "retention_analysis": "fully_preserved", '
+    '"body": "she turns"}], '
+    '"overall_soundscape": "rain", "non_diegetic_music": ""}'
+)
+pieced = refine.parse_reply(PIECED, "REF2VA", 2, piece=True, ref_shots=(1,))
+check("the rewritten global prompt is read back", pieced["piece"], "A live-action piece.")
+check("per-shot sections come back aligned with the bodies",
+      [own is None for own in pieced["shot_sections"]], [True, False])
+check("...holding that shot's own analysis",
+      pieced["shot_sections"][1]["summary"], "[Ref2VA] a portrait")
+check("with per-shot sections there is no top-level set", "sections" in pieced, False)
+check("a skipped global prompt reads back empty",
+      refine.parse_reply(GOOD, "FL2VA", 1, piece=True)["piece"], "")
+check("an unasked reply carries no piece", "piece" in refine.parse_reply(GOOD, "FL2VA", 1), False)
+
+piece_msg = refine.user_message(
+    [{"text": "a courier waits", "seconds": 6}, {"text": "her hands", "seconds": 6}],
+    seconds=12, mode="T2VA", piece={"text": "Live-action, 16mm.", "rewrite": True})
+check("the piece is shown once, fenced",
+      "<global>\nLive-action, 16mm.\n</global>" in piece_msg, True)
+check("...and asked for as its own field", refine.PIECE_FIELD in piece_msg, True)
+check("...with the no-references rule beside it", "no @handle" in piece_msg, True)
+check("the shots' own requests stay their own",
+      ("<request>\na courier waits\n</request>" in piece_msg
+       and "Live-action, 16mm. a courier waits" not in piece_msg), True)
+
+check("an empty global prompt is still asked for",
+      "hoist what every shot shares"
+      in refine.user_message([{"text": "x"}], piece={"text": "", "rewrite": True}), True)
+
+context_msg = refine.user_message([{"text": "her hands", "seconds": 6}], seconds=6,
+                                  mode="T2VA", piece={"text": "Live-action.", "rewrite": False})
+check("a single-card refine shows the piece as context",
+      "It is context, not material" in context_msg, True)
+check("...and does not ask for the field", refine.PIECE_FIELD in context_msg, False)
+check("an empty global with nothing to rewrite adds no block",
+      "THE PIECE" in refine.user_message([{"text": "x"}],
+                                         piece={"text": "", "rewrite": False}), False)
+check("no piece, no block",
+      "THE PIECE" in refine.user_message([{"text": "x"}]), False)
+
+# --- the reference pool -------------------------------------------------------
+#
+# The piece's own references, listed once at the top: their handles are the only
+# ones stable across every shot, and citing one in a shot's prose is what
+# attaches it there at queue time.
+
+pool_msg = refine.user_message(
+    [{"text": "she waits", "seconds": 6}, {"text": "her hands", "seconds": 6}],
+    seconds=12, mode="T2VA",
+    pool=[{"handle": "ref-1", "what": "a person reference (sheet.png)", "image": 1}])
+check("the pool is shown once, at the top",
+      "ATTACHED TO THE PIECE" in pool_msg, True)
+check("...with the handle's glossary line",
+      "@ref-1 [image 1]: a person reference (sheet.png)" in pool_msg, True)
+check("...and the citing rule beside it",
+      "Writing one's handle in a shot's prose is what attaches it" in pool_msg, True)
+check("no pool, no block",
+      "ATTACHED TO THE PIECE" in refine.user_message([{"text": "x"}]), False)
+
+# With a pool beside the piece, the global rewrite may cite the pool — a
+# citation there applies the reference to every shot — and only the pool.
+piece_pool_msg = refine.user_message(
+    [{"text": "she waits", "seconds": 6}], seconds=6, mode="T2VA",
+    piece={"text": "The piece follows @ref-1.", "rewrite": True},
+    pool=[{"handle": "ref-1", "what": "a person reference (sheet.png)"}])
+check("with a pool, the piece may cite it",
+      "no @handle except the piece's own references" in piece_pool_msg, True)
+check("...and without one, the old rule stands",
+      "Write no @handle and no <Picture N> label" in refine.user_message(
+          [{"text": "x"}], piece={"text": "y", "rewrite": True}), True)
+
+
 if FAILURES:
     print(f"{len(FAILURES)} failure(s):")
     for failure in FAILURES:

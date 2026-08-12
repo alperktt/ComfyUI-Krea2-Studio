@@ -341,6 +341,15 @@ _REF_SECTIONS = ("subject_definitions", "summary", "retention_analysis")
 # actually look at my images" is the question this whole field exists to answer.
 SEEN_FIELD = "what_i_see"
 
+# The piece's standing description, rewritten. Only a whole-timeline refine asks
+# for it: the global prompt is placed ahead of every shot's own description at
+# generation time, so what the shots share — the style, the world, the cast —
+# belongs in it, said once, rather than copied into every body. It is written
+# right after `SEEN_FIELD` so the establishing pass comes before the shots that
+# inherit from it, and it is stored back into the same editable box it came
+# from: the join stays a compile-time fact, not something baked into the prose.
+PIECE_FIELD = "global_prompt"
+
 # The shortest a shot may be, and the most a rewrite may hold. The floor is what
 # turns a duration into a shot ceiling: a six-second clip cannot be five cuts,
 # and saying so in the grammar is better than clamping it afterwards.
@@ -409,7 +418,7 @@ def join_shots(bodies, cuts, seconds):
     return contextir.shot_body(plan_cuts(clean, times, seconds))
 
 
-def reply_shape(mode, shots, cuts=0, images=0):
+def reply_shape(mode, shots, cuts=0, images=0, piece=False, ref_shots=()):
     """The JSON contract, written out for the model to read.
 
     Nothing in ComfyUI's generation loop constrains a reply to a shape —
@@ -423,20 +432,53 @@ def reply_shape(mode, shots, cuts=0, images=0):
 
     `images` is how many pictures ride with the message. Where there are any,
     the object opens with `SEEN_FIELD` — see there for why it is first.
+
+    `piece` asks for `PIECE_FIELD` — the rewritten global prompt, on a
+    whole-timeline refine.
+
+    `ref_shots` is which shots (0-based) carry their own reference sections.
+    A chained strip is one generation per card, each over its own reference
+    pool, so each reference card needs its own `subject_definitions` and
+    `retention_analysis` — the top-level set, which describes one document,
+    moves inside those entries instead.
     """
     timed = int(cuts) >= 2
+    ref_shots = set(ref_shots or ())
     lines = ["Return exactly this JSON object, and nothing before or after it:", "{"]
     if int(images) > 0:
         lines.append('  "%s": "...",' % SEEN_FIELD)
-    if mode == "REF2VA":
+    if piece:
+        lines.append('  "%s": "...",' % PIECE_FIELD)
+    if mode == "REF2VA" and not ref_shots:
         lines += ['  "%s": "...",' % name for name in _REF_SECTIONS]
     if timed:
         lines.append('  "shots": [{"at_seconds": 0, "body": "..."}],')
     else:
-        lines.append('  "shots": [%s],' % ", ".join('{"body": "..."}' for _ in range(shots)))
+        entry = '{"body": "..."}'
+        sectioned = '{%s, "body": "..."}' % ", ".join(
+            '"%s": "..."' % name for name in _REF_SECTIONS)
+        lines.append('  "shots": [%s],' % ", ".join(
+            sectioned if index in ref_shots else entry for index in range(shots)))
     lines.append('  "overall_soundscape": "...",')
     lines.append('  "non_diegetic_music": "..."')
     lines.append("}")
+    if piece:
+        lines.append(
+            "Write `%s` right after any `%s`: the piece's standing description, "
+            "rewritten — see THE PIECE in the user message." % (PIECE_FIELD, SEEN_FIELD)
+            if int(images) > 0 else
+            "Write `%s` first: the piece's standing description, rewritten — "
+            "see THE PIECE in the user message." % PIECE_FIELD
+        )
+    if ref_shots:
+        which = ", ".join(str(index + 1) for index in sorted(ref_shots))
+        lines.append(
+            ("Shot entry %s carries its own" if len(ref_shots) == 1
+             else "Shot entries %s each carry their own") % which
+            + " subject_definitions, summary and retention_analysis, "
+            "describing only the references attached to that shot. Entries "
+            "without references have only a body."
+        )
     if timed:
         lines.append(
             "Every `...` is one string of prose. `shots` holds 1 to %d entries in "
@@ -518,7 +560,7 @@ def describe_slots(slots):
     return lines
 
 
-def user_message(shots, seconds=None, images=0, mode=None):
+def user_message(shots, seconds=None, images=0, mode=None, piece=None, pool=None):
     """What to rewrite, and what is attached to rewrite it against.
 
     `shots` is one entry per body wanted back, in play order:
@@ -526,6 +568,19 @@ def user_message(shots, seconds=None, images=0, mode=None):
     generation or a single timeline card; several is a whole-timeline refine,
     which is the only arrangement in which shot 4 can be written knowing what
     shot 1 established — the reason it is one call and not one per card.
+
+    `piece` is the timeline's global prompt, `{"text", "rewrite"}` — shown once
+    here rather than joined into every shot's request, because the join is a
+    compile-time fact and a model shown N copies writes N echoes of it. With
+    `rewrite` it is material like the shots and comes back as `PIECE_FIELD`;
+    without — a single-card refine, where the other cards' rewrites were
+    written against it — it is context that the body must not restate.
+
+    `pool` is the timeline's own reference pool as glossary slots — the assets
+    attached to the piece rather than to one card. Listed once, at the top,
+    because their handles are the only ones stable across every shot: writing
+    one into a shot's prose is what attaches it to that shot's generation at
+    queue time, so the model is told it may.
 
     Each shot's own attachments are listed under it rather than in one glossary
     at the top, because handles are allocated per segment: two cards both have an
@@ -551,6 +606,56 @@ def user_message(shots, seconds=None, images=0, mode=None):
             f"place, the light — every later shot keeps. Return exactly "
             f"{len(shots)} entries in `shots`, in this order."
         )
+
+    if piece and (piece.get("rewrite") or str(piece.get("text") or "").strip()):
+        text = str(piece.get("text") or "").strip()
+        lines.append("")
+        lines.append("THE PIECE")
+        lines.append(
+            "The timeline has a standing global description. At generation time "
+            "it is placed ahead of the shots' own descriptions, so it carries "
+            "what the whole piece shares: the style, the world, who is in it, "
+            "the light."
+        )
+        lines += ["<global>", text or "(nothing is written there yet)", "</global>"]
+        if piece.get("rewrite"):
+            lines.append(
+                ("Rewrite it as `%s`, expanded like the shots: it is material, "
+                 "not a message, and everything it names survives." % PIECE_FIELD)
+                if text else
+                ("Write `%s` yourself: hoist what every shot shares — the style, "
+                 "the world, who is in it — into it." % PIECE_FIELD)
+            )
+            lines.append(
+                ("Write no <Picture N> label in it, and no @handle except the "
+                 "piece's own references under ATTACHED TO THE PIECE — cited "
+                 "here, one of those applies to every shot, and a citation "
+                 "already here must survive the rewrite. "
+                 if pool else
+                 "Write no @handle and no <Picture N> label in it — it stands in "
+                 "front of every shot, and references belong to single shots. ")
+                + "Then write each shot's body to be read after it: keep its look "
+                "and its subjects without restating them."
+            )
+        else:
+            lines.append(
+                "It is context, not material: another rewrite owns it, so leave "
+                "it as it stands and write the body to be read after it, "
+                "without restating it."
+            )
+
+    if pool:
+        lines.append("")
+        lines.append("ATTACHED TO THE PIECE")
+        lines.append(
+            "These references belong to the whole piece, not to one shot. "
+            "Writing one's handle in a shot's prose is what attaches it to that "
+            "shot's generation; a shot that never writes it does not carry it. "
+            "A handle cited in the piece's global description applies to every "
+            "shot at once. Cite each one where its subject appears — per shot, "
+            "or globally when it runs through the whole piece."
+        )
+        lines.extend("  " + line for line in describe_slots(pool))
     lines.append("")
 
     for number, shot in enumerate(shots, start=1):
@@ -776,7 +881,7 @@ _FENCE_RE = re.compile(r"^```(?:\w+)?\s*(.*?)\s*```$", re.DOTALL)
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
-def parse_reply(content, mode, shots, cuts=0):
+def parse_reply(content, mode, shots, cuts=0, piece=False, ref_shots=()):
     """The model's content string -> `{"shots": [str], "soundscape", "music", ...}`.
 
     Tolerant on the way in — reasoning models leak a `<think>` block, chat models
@@ -788,6 +893,12 @@ def parse_reply(content, mode, shots, cuts=0):
     start on returned alongside them under `"cuts"`. The times are taken as
     written here and made monotonic by `plan_cuts`, so a model that numbers them
     backwards is a mangled ordering rather than a failed refine.
+
+    `piece` and `ref_shots` mirror `reply_shape`: with `piece` the rewritten
+    global prompt is read back under `"piece"`, and with `ref_shots` each shot's
+    own reference sections come back under `"shot_sections"`, aligned with the
+    bodies — a shot that was not asked for any, or skipped its own, holds None
+    there, which the caller reports rather than papers over.
     """
     text = _THINK_RE.sub("", content).strip()
     fenced = _FENCE_RE.match(text)
@@ -810,11 +921,13 @@ def parse_reply(content, mode, shots, cuts=0):
     for item in data.get("shots") or []:
         if isinstance(item, dict):
             body, at = str(item.get("body") or "").strip(), item.get("at_seconds")
+            own = {name: str(item.get(name) or "").strip() for name in _REF_SECTIONS}
+            own = own if any(own.values()) else None
         else:
-            body, at = str(item or "").strip(), None
+            body, at, own = str(item or "").strip(), None, None
         if body:
-            written.append((body, at))
-    bodies = [body for body, _ in written]
+            written.append((body, at, own))
+    bodies = [body for body, _, _ in written]
 
     timed = int(cuts) >= 2
     if timed and not 1 <= len(bodies) <= int(cuts):
@@ -838,7 +951,11 @@ def parse_reply(content, mode, shots, cuts=0):
         "seen": str(data.get(SEEN_FIELD) or "").strip(),
     }
     if timed:
-        out["cuts"] = [at for _, at in written]
-    if mode == "REF2VA":
+        out["cuts"] = [at for _, at, _ in written]
+    if piece:
+        out["piece"] = str(data.get(PIECE_FIELD) or "").strip()
+    if ref_shots:
+        out["shot_sections"] = [own for _, _, own in written]
+    elif mode == "REF2VA":
         out["sections"] = {name: str(data.get(name) or "").strip() for name in _REF_SECTIONS}
     return out

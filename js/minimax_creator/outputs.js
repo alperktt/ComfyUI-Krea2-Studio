@@ -7,6 +7,8 @@
 // blob never reaches this file at all. `tests/test_outputs_mirror.py` asserts
 // the two still agree.
 
+import { t } from "./i18n.js";
+
 export const VIDEO_PREFIX = "minimax/renders/H3";
 export const IMAGE_PREFIX = "minimax/stills/prestage";
 
@@ -33,8 +35,8 @@ export function cleanPrefix(raw, fallback) {
   if (!text) return { prefix: fallback };
 
   if (text.startsWith("/") || /^[A-Za-z]:/.test(text)) {
-    return { error: "Absolute paths are not allowed — this is relative to ComfyUI's "
-                  + "output folder. Use --output-directory to move that." };
+    return { error: t("Absolute paths are not allowed — this is relative to ComfyUI's "
+                    + "output folder. Use --output-directory to move that.") };
   }
 
   // A trailing slash names a folder; keep the default's filename stem.
@@ -42,12 +44,12 @@ export function cleanPrefix(raw, fallback) {
 
   const parts = whole.split("/");
   for (const part of parts) {
-    if (!part) return { error: "Empty folder name." };
-    if (part === "." || part === "..") return { error: "'.' and '..' are not allowed." };
-    if (part.startsWith(".")) return { error: "Folder names cannot start with a dot." };
-    if (ILLEGAL.test(part)) return { error: 'A name cannot contain any of < > : " | ? *' };
+    if (!part) return { error: t("Empty folder name.") };
+    if (part === "." || part === "..") return { error: t("'.' and '..' are not allowed.") };
+    if (part.startsWith(".")) return { error: t("Folder names cannot start with a dot.") };
+    if (ILLEGAL.test(part)) return { error: t('A name cannot contain any of < > : " | ? *') };
     if (part.endsWith(" ") || part.endsWith(".")) {
-      return { error: "A name cannot end with a space or a dot." };
+      return { error: t("A name cannot end with a space or a dot.") };
     }
   }
   return { prefix: parts.join("/") };

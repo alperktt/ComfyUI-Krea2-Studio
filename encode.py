@@ -16,6 +16,8 @@ list instead of two loops that have to be kept in agreement by hand.
 import math
 
 import node_helpers
+from comfy.ldm.minimax.model import FRAME_PER_TOKEN
+from .payload import AUDIO_END_KEY, FRAME_INDEX_KEY
 from comfy_extras.nodes_minimax_h3 import (
     CANVAS_MULTIPLE,
     FPS,
@@ -40,6 +42,66 @@ PREV_FRAME = "__prev__"
 PREV_AUDIO = "__prev_audio__"
 
 
+def _frames_covered(steps):
+    """Pixel frames the first `steps` latent steps of a video encode cover."""
+    return sum(FRAME_PER_TOKEN[k % 5] for k in range(steps))
+
+
+def _context_keyframes(vae, tail, feather):
+    """The inherited run as pinned guides on this segment's own timeline.
+
+    One video-VAE call over the whole tail — the motion lives inside the
+    temporal compression — then one guide block per latent step, each pinned
+    at the pixel offset that step's content starts at. The stock layout
+    constructor accepts only frame 0, so every block passes it that and
+    carries its real position for `payload.py` to write in.
+
+    The coverage check is the seam's integrity check: `compile` only allows
+    feathers on the VAE's own grid, so steps that cover a different span mean
+    the VAE's downscale changed underneath us — the pinned run would end short
+    of the source's last frame and the join would jump by the difference.
+    """
+    encoded = vae.encode(tail)
+    if getattr(encoded, "ndim", 0) != 5:
+        # The batch axis is time to the H3 video VAE; anything that came back
+        # flat is some other VAE, and slicing it by "step" would pin noise.
+        raise ValueError(
+            f"encoding the inherited run returned shape "
+            f"{tuple(getattr(encoded, 'shape', ()))}, expected [B, C, T, H, W] "
+            f"— is the H3 video VAE wired to 'vae'?"
+        )
+    steps = int(encoded.shape[2])
+    covered = _frames_covered(steps)
+    if covered != feather:
+        raise ValueError(
+            f"{feather} inherited frames encoded to {steps} latent steps "
+            f"covering {covered} frames — the video VAE's temporal grid no "
+            f"longer matches the seam's. Refusing to render a shifted join."
+        )
+    return [{
+        "resolved_frame_index": 0,
+        FRAME_INDEX_KEY: _frames_covered(k),
+        "latent": encoded[:, :, k:k + 1],
+    } for k in range(steps)]
+
+
+def _seam_audio(audio_vae, compiled, loaded):
+    """The inherited tail as an audio reference block.
+
+    On the classic seam it sits where core puts reference audio — the span
+    before the clip, which the model imitates. A feathered seam pins it
+    end-aligned with the inherited frames on this segment's own timeline
+    instead, so the model reads it as this clip's sound so far and continues
+    it phase-locked; `compile` clamped the tail to the overlap so the two
+    cover the same instants.
+    """
+    audio_latent, ref_audio_t = _encode_ref_audio(audio_vae, loaded[PREV_AUDIO]["audio"])
+    seam = {"kind": "audio", "ref_audio_t": ref_audio_t, "audio_latent": audio_latent}
+    if compiled.feather > 1:
+        seam[AUDIO_END_KEY] = compiled.feather
+    return seam
+
+
 def encode(clip, vae, audio_vae, compiled, loaded):
     """-> (conditioning, latent). `loaded` maps asset handle -> decoded media."""
     if compiled.mode == "REF2VA":
@@ -62,12 +124,19 @@ def _encode_frames(clip, vae, audio_vae, compiled, loaded):
     keyframes = []
 
     if compiled.continues:
-        # The previous segment's last frame. It was generated on this same canvas
+        # The source segment's tail. It was generated on this same canvas
         # — the timeline pins one geometry across every segment — so the resize
         # is a no-op that exists only so a hand-built request cannot skip it.
-        image = _resize(loaded[PREV_FRAME]["image"], compiled.width, compiled.height, "center")
-        images.append(image)
-        keyframes.append({"resolved_frame_index": 0, "image": image})
+        tail = _resize(loaded[PREV_FRAME]["image"], compiled.width, compiled.height, "center")
+        # What Qwen sees is the last frame either way: the feather's extra
+        # frames are motion context for the DiT, not something the prompt
+        # names, so the presentation — and with it the prompt cache — does not
+        # change with the seam's width.
+        images.append(tail[-1:])
+        if compiled.feather > 1:
+            keyframes.extend(_context_keyframes(vae, tail[-compiled.feather:], compiled.feather))
+        else:
+            keyframes.append({"resolved_frame_index": 0, "image": tail[-1:]})
     elif compiled.first_frame is not None:
         # Geometry anchor: plain stretch, because the canvas was derived from
         # this image's own aspect ratio and already matches it.
@@ -84,7 +153,7 @@ def _encode_frames(clip, vae, audio_vae, compiled, loaded):
         images.append(image)
         keyframes.append({"resolved_frame_index": frame_count - 1, "image": image})
 
-    if compiled.continues_audio:
+    if compiled.continues_audio and compiled.feather == 1:
         # The tokenizer's `images=` branch is an `else` on `minimax_ref_items`:
         # pass both and the keyframes vanish from the presentation. So when there
         # is an audio reference to send, the keyframes are presented as reference
@@ -92,6 +161,10 @@ def _encode_frames(clip, vae, audio_vae, compiled, loaded):
         # tokens, so this is the same presentation by a different road — and the
         # keyframe *latents* still go in through `minimax_keyframes`, which is
         # what makes them pinned frames rather than loose references.
+        #
+        # Only on the classic seam: a feathered tail is pinned on this
+        # segment's own timeline rather than sent as a reference, so it takes
+        # no <Audio 1> and the prompt carries no seam line naming one.
         items = [{"type": "image", "data": image} for image in images]
         items.append({"type": "audio"})
         tokens = clip.tokenize(compiled.prompt, minimax_ref_items=items)
@@ -101,17 +174,18 @@ def _encode_frames(clip, vae, audio_vae, compiled, loaded):
 
     if keyframes:
         for keyframe in keyframes:
-            keyframe["latent"] = vae.encode(keyframe.pop("image"))
+            # A feathered seam's context blocks arrive already encoded — one
+            # VAE call over the run, not one per frame.
+            if "image" in keyframe:
+                keyframe["latent"] = vae.encode(keyframe.pop("image"))
         cond = node_helpers.conditioning_set_values(cond, {
             "minimax_keyframes": keyframes,
             "minimax_frame_count": frame_count,
         })
 
     if compiled.continues_audio:
-        audio_latent, ref_audio_t = _encode_ref_audio(audio_vae, loaded[PREV_AUDIO]["audio"])
-        cond = node_helpers.conditioning_set_values(cond, {"minimax_refs": [
-            {"kind": "audio", "ref_audio_t": ref_audio_t, "audio_latent": audio_latent},
-        ]})
+        cond = node_helpers.conditioning_set_values(
+            cond, {"minimax_refs": [_seam_audio(audio_vae, compiled, loaded)]})
     return cond, latent
 
 
@@ -231,8 +305,33 @@ def _encode_references(clip, vae, audio_vae, compiled, loaded):
         else:
             raise ValueError(f"unknown reference plan step {step['op']!r}")
 
+    if compiled.continues_audio:
+        # After the user's blocks, so their <Audio N> numbering is untouched.
+        # No presentation item and no label: the tail is not a reference the
+        # prompt cites, it is the seam's own sound riding in conditioning.
+        blocks.append(_seam_audio(audio_vae, compiled, loaded))
+
     tokens = clip.tokenize(compiled.prompt, minimax_ref_items=items)
     cond = clip.encode_from_tokens_scheduled(tokens)
     if blocks:
         cond = node_helpers.conditioning_set_values(cond, {"minimax_refs": blocks})
+
+    if compiled.continues:
+        # The seam alongside references — the combination core's node surface
+        # stops short of. The inherited frames ride as pinned guides with
+        # their real positions under FRAME_INDEX_KEY: with references in the
+        # layout the target clip no longer starts where stock computes keyframe
+        # anchors, so even the classic single-frame seam is keyed and
+        # repositioned by `payload.py`, which also rebuilds the latent list the
+        # reference branch of core's `extra_conds` overwrites.
+        tail = _resize(loaded[PREV_FRAME]["image"], compiled.width, compiled.height, "center")
+        if compiled.feather > 1:
+            keyframes = _context_keyframes(vae, tail[-compiled.feather:], compiled.feather)
+        else:
+            keyframes = [{"resolved_frame_index": 0, FRAME_INDEX_KEY: 0,
+                          "latent": vae.encode(tail[-1:])}]
+        cond = node_helpers.conditioning_set_values(cond, {
+            "minimax_keyframes": keyframes,
+            "minimax_frame_count": frame_count,
+        })
     return cond, latent

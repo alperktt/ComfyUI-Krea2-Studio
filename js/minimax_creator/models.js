@@ -14,6 +14,7 @@
 // of your life.
 
 import { el, icon, dismissable, placeNear } from "./dom.js";
+import { t } from "./i18n.js";
 import { openChoicePopover } from "./pills.js";
 import { listModels } from "./api.js";
 import * as S from "./state.js";
@@ -93,20 +94,25 @@ export function weightsPill({ models, checkpoints, onChange, turbo }) {
   // then nothing worth saying.
   const spread = new Set(S.DEVICE_FIELDS.map((f) => models.devices[f]).filter(Boolean));
   const settled = models.route !== "auto"
-    ? `weights · always ${S.CHECKPOINT_LABEL[models.route]}`
+    ? t("weights · always {checkpoint}", { checkpoint: S.CHECKPOINT_LABEL[models.route] })
     : spread.size
-      ? `weights · ${spread.size > 1 ? `${spread.size} devices` : [...spread][0]}`
-      : models.dtype === "default" ? "weights" : `weights · ${models.dtype.replace("fp8_", "fp8 ")}`;
+      ? (spread.size > 1
+          ? t("weights · {count} devices", { count: spread.size })
+          : t("weights · {device}", { device: [...spread][0] }))
+      : models.dtype === "default" ? t("weights") : t("weights · {dtype}", { dtype: models.dtype.replace("fp8_", "fp8 ") });
   const label = missing.length
-    ? (missing.length === 1 ? `no ${S.MODEL_LABEL[missing[0]].toLowerCase()}` : `${missing.length} weights missing`)
+    ? (missing.length === 1
+        ? t("no {model}", { model: t(S.MODEL_LABEL[missing[0]]).toLowerCase() })
+        : t("{count} weights missing", { count: missing.length }))
     : settled;
 
   return el("button", {
     class: `mmc-pill mmc-weights${missing.length ? " missing" : ""}`,
     title: missing.length
-      ? `Not picked yet: ${missing.map((f) => S.MODEL_LABEL[f]).join(", ")}. `
-        + "The render is refused without them."
-      : "Which checkpoints, text encoder and VAEs this node loads.",
+      ? t("Not picked yet: {models}. The render is refused without them.", {
+          models: missing.map((f) => t(S.MODEL_LABEL[f])).join(", "),
+        })
+      : t("Which checkpoints, text encoder and VAEs this node loads."),
     onclick: (event) => openWeightsPopover(event.currentTarget, { models, checkpoints, onChange, turbo }),
   }, [icon("weights", 16), el("span", { text: label })]);
 }
@@ -135,23 +141,23 @@ export function openWeightsPopover(anchor, { models, checkpoints, onChange, turb
     // it are used at all. Forced, the other one is never loaded and never
     // required — which is also why `required` is recomputed on every pick.
     const routeRow = el("div", { class: "mmc-weight-row" }, [
-      el("span", { class: "mmc-weight-name", text: "Route" }),
+      el("span", { class: "mmc-weight-name", text: t("Route") }),
       el("button", {
         class: `mmc-weight-file${models.route === "auto" ? "" : " forced"}`,
-        title: "Which checkpoint every generation runs on.\n\n"
+        title: t("Which checkpoint every generation runs on.\n\n"
              + "auto follows the mode: references go to Ref2VA, everything else to FL2VA.\n"
              + "Forced, that is ignored and one checkpoint takes the lot — the two are one "
              + "architecture trained twice, and Ref2VA handles text-only and keyframe "
              + "payloads perfectly well.\n\n"
              + "FL2VA cannot take references at all, so forcing it is refused on a "
-             + "generation that has any.",
-        text: ROUTE_LABEL[models.route],
+             + "generation that has any."),
+        text: t(ROUTE_LABEL[models.route]),
         onclick: (event) => openChoicePopover(event.currentTarget, {
-          title: "Route",
-          options: S.ROUTES.map((route) => ROUTE_LABEL[route]),
-          value: ROUTE_LABEL[models.route],
+          title: t("Route"),
+          options: S.ROUTES.map((route) => t(ROUTE_LABEL[route])),
+          value: t(ROUTE_LABEL[models.route]),
           onPick: (picked) => {
-            models.route = S.ROUTES.find((route) => ROUTE_LABEL[route] === picked) ?? "auto";
+            models.route = S.ROUTES.find((route) => t(ROUTE_LABEL[route]) === picked) ?? "auto";
             onChange();
             render();
           },
@@ -174,16 +180,16 @@ export function openWeightsPopover(anchor, { models, checkpoints, onChange, turb
       return el("button", {
         class: `mmc-weight-device${pinned ? " pinned" : ""}`,
         title: pinned
-          ? `Loaded on ${pinned}, through ComfyUI-MultiGPU.`
-          : "Loaded wherever ComfyUI would put it. Pick a device to pin it — "
-            + "putting the text encoder on a second card frees the first one for the DiT.",
-        text: pinned || "auto",
+          ? t("Loaded on {device}, through ComfyUI-MultiGPU.", { device: pinned })
+          : t("Loaded wherever ComfyUI would put it. Pick a device to pin it — "
+            + "putting the text encoder on a second card frees the first one for the DiT."),
+        text: pinned || t("auto"),
         onclick: (event) => openChoicePopover(event.currentTarget, {
-          title: `${S.MODEL_LABEL[field]} — device`,
-          options: [AUTO, ...devices],
-          value: pinned || AUTO,
+          title: t("{model} — device", { model: t(S.MODEL_LABEL[field]) }),
+          options: [t(AUTO), ...devices],
+          value: pinned || t(AUTO),
           onPick: (picked) => {
-            if (picked === AUTO) delete models.devices[field];
+            if (picked === t(AUTO)) delete models.devices[field];
             else models.devices[field] = picked;
             onChange();
             render();
@@ -207,25 +213,25 @@ export function openWeightsPopover(anchor, { models, checkpoints, onChange, turb
              // same treatment an idle LoRA gets.
              + (S.CHECKPOINTS.includes(field) && !needed.has(field) ? " idle" : ""),
       }, [
-        el("span", { class: "mmc-weight-name", text: S.MODEL_LABEL[field] }),
+        el("span", { class: "mmc-weight-name", text: t(S.MODEL_LABEL[field]) }),
         el("button", {
           class: `mmc-weight-file${chosen ? "" : " empty"}`,
           title: unavailable
-            ? "Needs KJNodes' Model Preview Override. Without it the live preview "
-              + "falls back to latent2rgb, and the render is unaffected either way."
-            : S.MODEL_HINT[field],
+            ? t("Needs KJNodes' Model Preview Override. Without it the live preview "
+              + "falls back to latent2rgb, and the render is unaffected either way.")
+            : t(S.MODEL_HINT[field]),
           // The tail of a folder-qualified name is the part that identifies it;
           // the button ellipsises from the left so that is what survives.
-          text: chosen || (unavailable ? "unavailable" : "not set"),
+          text: chosen || (unavailable ? t("unavailable") : t("not set")),
           onclick: (event) => openChoicePopover(event.currentTarget, {
-            title: S.MODEL_LABEL[field],
+            title: t(S.MODEL_LABEL[field]),
             // "none" is a real answer for the optional fields and for a
             // checkpoint this graph does not route to, so it is offered rather
             // than only reachable by clearing the blob by hand.
-            options: [NONE, ...options],
-            value: chosen || NONE,
+            options: [t(NONE), ...options],
+            value: chosen || t(NONE),
             onPick: (picked) => {
-              models[field] = picked === NONE ? "" : picked;
+              models[field] = picked === t(NONE) ? "" : picked;
               onChange();
               render();
             },
@@ -238,14 +244,16 @@ export function openWeightsPopover(anchor, { models, checkpoints, onChange, turb
     // One precision for both checkpoints — they are the same architecture, and
     // two controls would imply a choice nobody has.
     rows.push(el("div", { class: "mmc-weight-row" }, [
-      el("span", { class: "mmc-weight-name", text: "Precision" }),
+      el("span", { class: "mmc-weight-name", text: t("Precision") }),
       el("button", {
         class: "mmc-weight-file",
-        title: "How the checkpoints are loaded. fp8 halves the weights in VRAM at "
-             + "some cost in fidelity; 'default' loads them as they were saved.",
+        title: t("How the checkpoints are loaded. fp8 halves the weights in VRAM at "
+             + "some cost in fidelity; 'default' loads them as they were saved. "
+             + "GGUF files ignore this — their precision was baked in when they "
+             + "were quantized."),
         text: models.dtype,
         onclick: (event) => openChoicePopover(event.currentTarget, {
-          title: "Precision",
+          title: t("Precision"),
           options: catalog?.dtypes ?? S.MODEL_DTYPES,
           value: models.dtype,
           onPick: (picked) => { models.dtype = picked; onChange(); render(); },
@@ -266,7 +274,7 @@ export function openWeightsPopover(anchor, { models, checkpoints, onChange, turb
     body.replaceChildren(routeRow, ...rows);
   };
 
-  pop.append(el("div", { class: "mmc-pop-title", text: "Weights" }), body);
+  pop.append(el("div", { class: "mmc-pop-title", text: t("Weights") }), body);
   render();
   document.body.appendChild(pop);
   placeNear(pop, anchor);

@@ -6,8 +6,9 @@ Python's side and total from the user's: one throw anywhere in the module graph
 and `app.registerExtension` never runs, so every node in the pack renders as its
 raw widgets and nothing says why.
 
-That has now happened twice for reasons no syntax check could catch — `styles.js`
-is one long template literal, so a backtick inside a CSS comment ends the string
+That has now happened twice for reasons no syntax check could catch — the CSS
+lives in template literals (one per module under `js/minimax_creator/styles/`,
+concatenated by `styles.js`), so a backtick inside a CSS comment ends the string
 and turns the rest of the stylesheet into code that still parses. `node --check`
 passes; the extension is dead.
 

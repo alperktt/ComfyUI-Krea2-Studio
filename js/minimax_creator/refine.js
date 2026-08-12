@@ -17,6 +17,7 @@
 
 import { el, icon, dismissable, placeNear } from "./dom.js";
 import { stepperPill } from "./pills.js";
+import { t } from "./i18n.js";
 import { api } from "../../../scripts/api.js";
 
 // Machine-level, not workflow-level. Which text encoder is on this disk is a
@@ -139,9 +140,13 @@ export async function listSkills({ force = false } = {}) {
  * because the server has to compile it to find out what the request is: the
  * mode, the reference slots, and which ordinal each handle will be given.
  *
- * @returns {Promise<{mode, shots: {index, body}[], soundscape, music,
- *                    sections: object|null, seen: string, problems: string[],
+ * @returns {Promise<{mode, shots: {index, body, sections?}[], soundscape, music,
+ *                    sections: object|null, piece: string|null,
+ *                    scope: string|null, seen: string, problems: string[],
  *                    skill?: string}>}
+ *   `piece` is the rewritten global prompt (whole-timeline refines only);
+ *   `scope: "shot"` marks bodies that compile joins the global prompt onto,
+ *   like typed text; chained reference cards carry their own `sections`.
  */
 export async function refine(payload) {
   const { model, temperature, seed, language, maxTokens, skill, template } = settings();
@@ -152,8 +157,51 @@ export async function refine(payload) {
                            max_tokens: maxTokens, skill, template }),
   });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || `the refiner failed (${response.status})`);
-  return body;
+  if (!response.ok) throw new Error(body.error || t("the refiner failed ({status})", { status: response.status }));
+  return await collect(body.job);
+}
+
+/**
+ * Wait for a started job and hand back its result.
+ *
+ * A rewrite runs for many minutes with nothing on the wire, and no browser
+ * holds a silent HTTP request open that long — Chromium drops one flat at five
+ * minutes, a proxy in between usually sooner. So the POST above only starts
+ * the job; the server announces the end on the websocket, and the result is
+ * collected here with a GET. The event is just the nudge — a slow poll backs
+ * it up, so a dropped websocket costs seconds, not the rewrite.
+ */
+function collect(job) {
+  return new Promise((resolve, reject) => {
+    let timer = null;
+    let inFlight = false;
+    const settle = (fn, value) => {
+      clearInterval(timer);
+      api.removeEventListener("minimax_creator.refine.done", nudge);
+      fn(value);
+    };
+    const check = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const response = await api.fetchApi(`/minimax_creator/refine/job/${job}`);
+        const body = await response.json().catch(() => ({}));
+        if (response.status === 404) {
+          settle(reject, new Error(body.error || t("the refine was lost — the server may have restarted")));
+        } else if (body.done && body.error) {
+          settle(reject, new Error(body.error));
+        } else if (body.done) {
+          settle(resolve, body.result);
+        }
+        // Anything else is "still writing", or a blip the next poll retries.
+      } catch { /* a network blip; the next poll retries */ }
+      inFlight = false;
+    };
+    const nudge = ({ detail }) => { if (detail?.job === job) check(); };
+    api.addEventListener("minimax_creator.refine.done", nudge);
+    timer = setInterval(check, 5000);
+    check(); // it may have finished before the listener existed
+  });
 }
 
 // ---- settings popover -------------------------------------------------------
@@ -198,18 +246,18 @@ export function openSettings(anchor, onChange) {
     }
     const chosen = settings().template || "auto";
     templateHost.replaceChildren(
-      el("span", { class: "mmc-note-key", text: "template" }),
+      el("span", { class: "mmc-note-key", text: t("template") }),
       el("div", { class: "mmc-chips" }, TEMPLATES.map(([name, why]) => el("button", {
         class: "mmc-chip",
         "aria-checked": name === chosen,
         text: name === "auto" ? "auto" : name.toLowerCase(),
-        title: why,
+        title: t(why),
         onclick: () => { saveSettings({ template: name }); changed(); },
       }))),
       el("div", { class: "mmc-refine-hint",
-                  text: "Which of the built-in prompt templates writes the rewrite. "
+                  text: t("Which of the built-in prompt templates writes the rewrite. "
                       + "auto follows the request, like the weights route; the result "
-                      + "panel says which one was used." }),
+                      + "panel says which one was used.") }),
     );
   }
 
@@ -239,33 +287,33 @@ export function openSettings(anchor, onChange) {
       onclick: () => { saveSettings({ skill: value }); changed(); drawSkills(); },
     }, [
       el("span", { class: "mmc-opt-label mmc-refine-name", text: label }),
-      el("span", { class: "mmc-opt-kind", text: kind }),
+      el("span", { class: "mmc-opt-kind", text: t(kind) }),
       el("span", { class: "mmc-radio" }),
     ]);
     skillHost.replaceChildren(
-      el("span", { class: "mmc-note-key", text: "prompting" }),
-      row("built-in", "", "prompt",
-          "The node's own instructions and guides, with the format assembled around the model's prose."),
+      el("span", { class: "mmc-note-key", text: t("prompting") }),
+      row(t("built-in"), "", "prompt",
+          t("The node's own instructions and guides, with the format assembled around the model's prose.")),
       ...names.map((name) => row(name, name, "skill",
-          `The '${name}' skill package, handed to the model as its only instruction. `
+          t("The '{name}' skill package, handed to the model as its only instruction. "
         + "The model writes the whole prompt document itself — instruction line, shot "
-        + "markers and timestamps included — and the rewrite lands as one block.")),
+        + "markers and timestamps included — and the rewrite lands as one block.", { name }))),
       el("div", { class: "mmc-refine-hint",
-                  text: "A skill replaces the built-in prompting entirely, and rewrites one "
-                      + "generation at a time." }),
+                  text: t("A skill replaces the built-in prompting entirely, and rewrites one "
+                      + "generation at a time.") }),
     );
   }
 
   async function drawModels(force = false) {
-    modelHost.replaceChildren(el("div", { class: "mmc-refine-hint", text: "Looking for models…" }));
+    modelHost.replaceChildren(el("div", { class: "mmc-refine-hint", text: t("Looking for models…") }));
     const names = await listModels({ force });
     if (!names.length) {
       // An empty list is a state with an action in it, not a blank panel: where
       // to put a model is the whole of the answer.
       modelHost.replaceChildren(el("div", { class: "mmc-refine-empty" }, [
-        el("div", { text: "No text encoders found." }),
+        el("div", { text: t("No text encoders found.") }),
         el("code", { text: "models/text_encoders/qwen3vl_4b.safetensors" }),
-        el("button", { class: "mmc-ghost", text: "Look again", onclick: () => drawModels(true) }),
+        el("button", { class: "mmc-ghost", text: t("Look again"), onclick: () => drawModels(true) }),
       ]));
       return;
     }
@@ -291,46 +339,46 @@ export function openSettings(anchor, onChange) {
     const chip = (name) => el("button", {
       class: "mmc-chip",
       "aria-checked": name === current.language,
-      text: name,
+      text: t(name),
       onclick: () => { saveSettings({ language: name }); changed(); },
     });
 
     const random = current.seed < 0;
     moreHost.replaceChildren(
       el("div", { class: "mmc-refine-group" }, [
-        el("span", { class: "mmc-note-key", text: "language" }),
+        el("span", { class: "mmc-note-key", text: t("language") }),
         el("div", { class: "mmc-chips" }, LANGUAGES.map(chip)),
         el("div", { class: "mmc-refine-hint",
-                    text: "The prose and the dialogue. Field names, labels and camera terms stay English." }),
+                    text: t("The prose and the dialogue. Field names, labels and camera terms stay English.") }),
       ]),
       el("div", { class: "mmc-refine-group" }, [
-        el("span", { class: "mmc-note-key", text: "reply length" }),
+        el("span", { class: "mmc-note-key", text: t("reply length") }),
         el("div", { class: "mmc-refine-row" }, [
           stepperPill({
             value: Number(current.maxTokens), ...TOKENS, width: "62px",
-            title: "How many tokens the rewrite may run to. Raise it if a whole-timeline "
-                 + "refine comes back cut off; there is no cost to a model that stops early.",
-            format: (n) => `${Math.round(n / 1024)}k tokens`,
+            title: t("How many tokens the rewrite may run to. Raise it if a whole-timeline "
+                 + "refine comes back cut off; there is no cost to a model that stops early."),
+            format: (n) => t("{n}k tokens", { n: Math.round(n / 1024) }),
             onChange: (next) => { saveSettings({ maxTokens: next }); changed(); },
           }),
         ]),
         el("div", { class: "mmc-refine-hint",
-                    text: "The answer's budget, not a context size — the prompt is never "
-                        + "truncated to fit, however long it gets." }),
+                    text: t("The answer's budget, not a context size — the prompt is never "
+                        + "truncated to fit, however long it gets.") }),
       ]),
       el("div", { class: "mmc-refine-group" }, [
-        el("span", { class: "mmc-note-key", text: "sampling" }),
+        el("span", { class: "mmc-note-key", text: t("sampling") }),
         el("div", { class: "mmc-refine-row" }, [
           stepperPill({
             value: Number(current.temperature), min: 0, max: 2, step: 0.05, width: "58px",
-            title: "Lower keeps closer to your wording; higher invents more around it.",
-            format: (n) => `temp ${n.toFixed(2)}`,
+            title: t("Lower keeps closer to your wording; higher invents more around it."),
+            format: (n) => t("temp {n}", { n: n.toFixed(2) }),
             onChange: (next) => { saveSettings({ temperature: next }); changed(); },
           }),
           el("div", { class: "mmc-pill mmc-pill-group" }, [
             el("button", {
               class: "mmc-step mmc-seed-dice",
-              title: random ? "Fix the seed at a number" : "Roll a new seed now",
+              title: random ? t("Fix the seed at a number") : t("Roll a new seed now"),
               onclick: () => {
                 saveSettings({ seed: Math.floor(Math.random() * 0x7fffffff) });
                 changed();
@@ -338,10 +386,10 @@ export function openSettings(anchor, onChange) {
             }, [icon("dice", 15)]),
             el("button", {
               class: "mmc-ghost mmc-refine-seed",
-              text: random ? "new every time" : String(current.seed),
+              text: random ? t("new every time") : String(current.seed),
               title: random
-                ? "Every refine comes out differently. Click to fix it."
-                : "Refining the same prompt gives the same rewrite. Click to vary it again.",
+                ? t("Every refine comes out differently. Click to fix it.")
+                : t("Refining the same prompt gives the same rewrite. Click to vary it again."),
               onclick: () => {
                 saveSettings({ seed: random ? Math.floor(Math.random() * 0x7fffffff) : -1 });
                 changed();
@@ -354,15 +402,15 @@ export function openSettings(anchor, onChange) {
   }
 
   pop.append(
-    el("div", { class: "mmc-pop-title", text: "Refiner" }),
+    el("div", { class: "mmc-pop-title", text: t("Refiner") }),
     modelHost,
     el("div", { class: "mmc-refine-hint mmc-refine-note",
-                text: "A Qwen3-VL text encoder, loaded and evicted like any other model. "
-                    + "It also reads your attached images." }),
+                text: t("A Qwen3-VL text encoder, loaded and evicted like any other model. "
+                    + "It also reads your attached images.") }),
     skillHost,
     templateHost,
     el("details", { class: "mmc-refine-fold" }, [
-      el("summary", { text: "Language and sampling" }),
+      el("summary", { text: t("Language and sampling") }),
       moreHost,
     ]),
   );
@@ -435,6 +483,10 @@ export class RefinePanel {
 
     state.refined = {
       body: shot.body,
+      // Present on a timeline segment's rewrite: the body is the shot alone,
+      // and compile joins the global prompt in front of it as it does for
+      // typed text. The Creator node has no global prompt and gets none.
+      ...(result.scope ? { scope: result.scope } : {}),
       ...(result.sections ? { sections: result.sections } : {}),
       // Which skill package wrote this, when one did — the answer to "why does
       // this rewrite look nothing like yesterday's" once the setting has moved.
@@ -524,44 +576,44 @@ export class RefinePanel {
         el("button", {
           class: `mmc-refined-toggle${on ? " on" : ""}`,
           title: on
-            ? "This rewrite is what the model will read. Click to queue your own prompt instead — "
-              + "the rewrite is kept."
-            : "Your own prompt is what the model will read. Click to use the rewrite again.",
+            ? t("This rewrite is what the model will read. Click to queue your own prompt instead — "
+              + "the rewrite is kept.")
+            : t("Your own prompt is what the model will read. Click to use the rewrite again."),
           onclick: () => {
             refined.enabled = !on;
             this.onCommit?.();
             this.render();
           },
-        }, [el("span", { class: "mmc-dot" }), el("span", { text: on ? "refined" : "refined (off)" })]),
+        }, [el("span", { class: "mmc-dot" }), el("span", { text: on ? t("refined") : t("refined (off)") })]),
         ...(refined.model ? [el("span", { class: "mmc-refined-model", text: refined.model })] : []),
         // Which template this prose is in — the same answer the weights pill
         // gives about the checkpoint. A pin is marked, because a rewrite in a
         // style the attachments do not imply should say it was asked for.
         ...(refined.template ? [el("span", {
           class: "mmc-refined-model",
-          text: refined.forced ? `${refined.template.toLowerCase()} (pinned)`
+          text: refined.forced ? t("{template} (pinned)", { template: refined.template.toLowerCase() })
                                : refined.template.toLowerCase(),
           title: refined.forced
-            ? `Written with the ${refined.template} template you pinned in the refiner's `
-              + "settings, not the one the attachments imply."
-            : `Written with the ${refined.template} template, picked automatically from `
-              + "what is attached.",
+            ? t("Written with the {template} template you pinned in the refiner's "
+              + "settings, not the one the attachments imply.", { template: refined.template })
+            : t("Written with the {template} template, picked automatically from "
+              + "what is attached.", { template: refined.template }),
         })] : []),
         ...(refined.skill ? [el("span", { class: "mmc-refined-model",
-                                          text: `skill: ${refined.skill}`,
-                                          title: "Written by this skill package rather than the "
-                                               + "built-in prompts — the whole document, format included." })] : []),
+                                          text: t("skill: {skill}", { skill: refined.skill }),
+                                          title: t("Written by this skill package rather than the "
+                                               + "built-in prompts — the whole document, format included.") })] : []),
         ...(this.stale ? [el("span", {
           class: "mmc-refined-stale",
-          text: "prompt edited since",
-          title: "Your prompt has changed since this was written. It still queues as it stands — "
-               + "refine again to fold the change in.",
+          text: t("prompt edited since"),
+          title: t("Your prompt has changed since this was written. It still queues as it stands — "
+               + "refine again to fold the change in."),
         })] : []),
         el("span", { style: { flex: "1" } }),
         el("button", {
-          class: "mmc-ghost", text: "Revert",
-          title: "Throw the rewrite away and go back to your own prompt. The soundscape "
-               + "and score it wrote go with it.",
+          class: "mmc-ghost", text: t("Revert"),
+          title: t("Throw the rewrite away and go back to your own prompt. The soundscape "
+               + "and score it wrote go with it."),
           onclick: () => this.clear(),
         }),
       ]));
@@ -571,8 +623,8 @@ export class RefinePanel {
       parts.push(el("div", {
         class: "mmc-refined-lede",
         text: on
-          ? "Queued instead of the prompt above, not alongside it."
-          : "Off — the prompt above is queued as you wrote it.",
+          ? t("Queued instead of the prompt above, not alongside it.")
+          : t("Off — the prompt above is queued as you wrote it."),
       }));
 
       // What the model said was in the pictures, written before the rewrite so
@@ -582,7 +634,7 @@ export class RefinePanel {
       // "it did not look" from "it looked and wrote badly".
       if (this.seen) {
         parts.push(el("details", { class: "mmc-refined-fold" }, [
-          el("summary", { text: "what the model saw in your images" }),
+          el("summary", { text: t("what the model saw in your images") }),
           el("div", { class: "mmc-refine-hint mmc-refined-seen", text: this.seen }),
         ]));
       }
@@ -590,7 +642,7 @@ export class RefinePanel {
       this.bodyBox = this.textarea(
         () => refined.body,
         (value) => { refined.body = value; },
-        { rows: 8, placeholder: "The rewritten description." });
+        { rows: 8, placeholder: t("The rewritten description.") });
       parts.push(this.bodyBox);
 
       // Only the reference form has these, and only a refiner ever writes them —
@@ -611,7 +663,7 @@ export class RefinePanel {
           ]));
         }
         const fold = el("details", { class: "mmc-refined-fold" }, [
-          el("summary", { text: "reference analysis — where your @references are defined" }),
+          el("summary", { text: t("reference analysis — where your @references are defined") }),
           sections,
         ]);
         fold.open = true;
@@ -628,7 +680,7 @@ export class RefinePanel {
             () => state.soundscape,
             (value) => { state.soundscape = value; },
             { rows: 3, className: "mmc-refined-box mmc-tl-small",
-              placeholder: "Everything heard in the room. Empty leaves it to the model; N/A is silence." }),
+              placeholder: t("Everything heard in the room. Empty leaves it to the model; N/A is silence.") }),
         ]),
         el("label", { class: "mmc-tl-field" }, [
           el("span", { class: "mmc-tl-field-name", text: "non_diegetic_music" }),
@@ -636,7 +688,7 @@ export class RefinePanel {
             () => state.music,
             (value) => { state.music = value; },
             { rows: 3, className: "mmc-refined-box mmc-tl-small",
-              placeholder: "The score only the audience hears. Empty leaves it to the model." }),
+              placeholder: t("The score only the audience hears. Empty leaves it to the model.") }),
         ]),
       ]));
     }
@@ -661,22 +713,32 @@ export class RefinePanel {
  */
 export function refineButton({ run, label = "Refine", title, className = "mmc-tool" }) {
   let busy = false;
-  const text = el("span", { text: label });
+  const text = el("span", { text: t(label) });
+  // The generation ticks ComfyUI's own progress channel once per token, under
+  // the refiner's id — `refine_local.PROGRESS_ID` — so the button can count
+  // tokens instead of promising vaguely. Best effort: with no event the label
+  // just stays "Refining…".
+  const onProgress = ({ detail }) => {
+    if (detail?.prompt_id !== "minimax-creator-refine") return;
+    text.textContent = `${t("Refining…")} ${detail.value}/${detail.max}`;
+  };
   const button = el("button", {
     class: className,
-    title: title || "Rewrite this prompt into the expanded description H3 was trained to read, "
-                  + "keeping everything you wrote and expanding it.",
+    title: title || t("Rewrite this prompt into the expanded description H3 was trained to read, "
+                  + "keeping everything you wrote and expanding it."),
     onclick: async () => {
       if (busy) return;
       busy = true;
       button.classList.add("busy");
-      text.textContent = "Refining…";
+      text.textContent = t("Refining…");
+      api.addEventListener("progress", onProgress);
       try {
         await run();
       } finally {
         busy = false;
         button.classList.remove("busy");
-        text.textContent = label;
+        api.removeEventListener("progress", onProgress);
+        text.textContent = t(label);
       }
     },
   }, [el("span", { class: "mmc-tool-icon" }, [icon("brain")]), text]);
@@ -686,14 +748,14 @@ export function refineButton({ run, label = "Refine", title, className = "mmc-to
     // The chosen model is what this opens onto, so it is what the tooltip
     // leads with — "Settings" would say less than the answer itself.
     title: chosenModel()
-      ? `${chosenModel()} — click to change the model, template, language or sampling`
-      : "Choose a model",
+      ? t("{model} — click to change the model, template, language or sampling", { model: chosenModel() })
+      : t("Choose a model"),
     onclick: (event) => {
       event.stopPropagation();
       openSettings(event.currentTarget, () => {
         more.title = chosenModel()
-          ? `${chosenModel()} — click to change the model, template, language or sampling`
-          : "Choose a model";
+          ? t("{model} — click to change the model, template, language or sampling", { model: chosenModel() })
+          : t("Choose a model");
       });
     },
   }, [icon("chevron", 12)]);
