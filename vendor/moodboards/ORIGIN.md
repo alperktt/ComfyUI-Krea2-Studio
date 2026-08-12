@@ -1,9 +1,17 @@
 # ComfyUI-Krea-Moodboards
 
 - **Source:** https://github.com/Andro-Meta/ComfyUI-Krea-Moodboards
-- **Commit:** `7d11ec31cb700d881fdf2d73731ecde0093b9540` (`master`)
+- **Commit:** `ce9b2fd7f0a5a296fb02492ad8e0e6c8b44923ba` (`master` tip, 2026-08-07)
 - **License:** MIT — see `LICENSE`. Catalog provenance: `DATA_NOTICE.md`.
-- **Copied:** 2026-08-11
+- **Copied:** 2026-08-11, from the local install, then verified against upstream
+
+**How the commit was established, because the obvious way is wrong here.** The
+installed copy is not a git checkout — this pack ships as a plain directory — so
+`git -C <dir> rev-parse HEAD` inside it silently answers with the *enclosing*
+repository's HEAD, which is ComfyUI's own. The SHA above is upstream's tip at
+copy time, confirmed by fetching `moodboard_catalog.py` at that commit and
+hashing it against the vendored file: identical. Do the same on the next update
+rather than trusting `git -C`.
 
 ## Changes made here
 

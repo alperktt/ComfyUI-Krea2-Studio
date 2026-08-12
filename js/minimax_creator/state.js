@@ -954,6 +954,18 @@ export const PRESTAGE_EDIT_TWO_REF_MAX = 1536 * 1024;
  *  krea2edit was trained against. A suggestion, never a requirement. */
 export const PRESTAGE_EDIT_LORA_HINTS = ["identity_edit", "krea2_edit", "krea2edit"];
 
+/** RF-inversion style transfer. Two references is the pack's ceiling, not a
+ *  preference — past two it has no route. Mirrors compile_image. */
+export const PRESTAGE_MAX_STYLE_TRANSFER_REFS = 2;
+export const PRESTAGE_STYLE_FITS = ["crop", "contain", "stretch"];
+export const PRESTAGE_STYLE_FIT_HINT = {
+  crop: "Centre-crop the reference to the render's aspect. The pack's default.",
+  contain: "Fit the whole reference inside the frame, letterboxed.",
+  stretch: "Distort the reference to the frame. Rarely what you want.",
+};
+export const PRESTAGE_STYLE_STRENGTH = 1.0;
+export const PRESTAGE_MAX_STYLE_STRENGTH = 2.0;
+
 export const PRESTAGE_ADAPTER_MODES = ["bypass", "bake"];
 export const PRESTAGE_ADAPTER_LABEL = { bypass: "bypass", bake: "bake" };
 export const PRESTAGE_ADAPTER_HINT = {
@@ -1053,6 +1065,9 @@ export function emptyPreStage() {
       ref_boost: 4.0, ref_boost_a: 1.0,
       fit_mode: "fit", grounding_px: 768,
     },
+    // RF-inversion style transfer. Off, and off adds nothing to the graph.
+    // One or two references; with two, `primary` says which one leads.
+    style: { on: false, refs: [], fit: "crop", strength: 1.0, primary: 1 },
     // Ideogram's speed axis: which official preset shapes the schedule.
     quality: "default",
     // The H3 branch: its own settings, and its generation in the Creator's
@@ -1141,6 +1156,23 @@ export function parsePreStage(raw) {
       // happen, but a hand-edited blob reaches here — the edit wins, because it
       // is the one that named a file.
       if (state.edit.on && state.refs.length) state.refs = [];
+
+      const style = state.style && typeof state.style === "object" ? state.style : {};
+      const styleRefs = (Array.isArray(style.refs) ? style.refs : [])
+        .filter((ref) => ref && typeof ref.filename === "string" && ref.filename)
+        .slice(0, PRESTAGE_MAX_STYLE_TRANSFER_REFS)
+        .map((ref) => ({ filename: ref.filename }));
+      state.style = {
+        on: style.on === true && styleRefs.length > 0,
+        refs: styleRefs,
+        fit: PRESTAGE_STYLE_FITS.includes(style.fit) ? style.fit : "crop",
+        strength: clamp(style.strength, 0, PRESTAGE_MAX_STYLE_STRENGTH, PRESTAGE_STYLE_STRENGTH),
+        primary: style.primary === 2 ? 2 : 1,
+      };
+      // Style transfer and the Qwen-edit references are two different reference
+      // paths; the compile refuses the pair. A hand-edited blob reaches here, and
+      // the one that named files under its own key wins.
+      if (state.style.on && state.refs.length) state.refs = [];
 
       const board = state.moodboard && typeof state.moodboard === "object" ? state.moodboard : {};
       state.moodboard = {

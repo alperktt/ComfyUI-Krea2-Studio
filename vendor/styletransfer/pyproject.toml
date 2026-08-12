@@ -1,0 +1,22 @@
+[project]
+name = "ComfyUI-Krea2-StyleTransfer"
+description = "Training-free Krea2 style reference nodes for ComfyUI, with LoRA-like single-image transfer, experimental two-reference blending, low content leakage, and preserved image quality."
+version = "1.0.3"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = []
+classifiers = [
+    "Operating System :: OS Independent",
+    "Environment :: GPU :: NVIDIA CUDA",
+]
+
+[project.urls]
+Repository = "https://github.com/jieg9341-lab/ComfyUI-Krea2-StyleTransfer"
+Documentation = "https://github.com/jieg9341-lab/ComfyUI-Krea2-StyleTransfer#readme"
+"Bug Tracker" = "https://github.com/jieg9341-lab/ComfyUI-Krea2-StyleTransfer/issues"
+
+[tool.comfy]
+PublisherId = "nkxx188"
+DisplayName = "ComfyUI Krea2 Style Transfer"
+Icon = ""
+includes = []

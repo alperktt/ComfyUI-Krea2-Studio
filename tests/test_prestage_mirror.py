@@ -69,6 +69,12 @@ out.edit = { fit_modes: [...s.PRESTAGE_EDIT_FIT_MODES],
              default_scene_boost: s.emptyPreStage().edit.ref_boost_a,
              on: s.emptyPreStage().edit.on };
 out.moodboard_collections = [...s.PRESTAGE_MOODBOARD_COLLECTIONS];
+out.style = { max_refs: s.PRESTAGE_MAX_STYLE_TRANSFER_REFS,
+              fits: [...s.PRESTAGE_STYLE_FITS],
+              strength: s.PRESTAGE_STYLE_STRENGTH,
+              max_strength: s.PRESTAGE_MAX_STYLE_STRENGTH,
+              on: s.emptyPreStage().style.on,
+              default_fit: s.emptyPreStage().style.fit };
 out.image_arches = [...s.PRESTAGE_IMAGE_ARCHES];
 out.presets = s.PRESTAGE_ASPECTS.map(([label]) => label).sort();
 for (const [label] of s.PRESTAGE_ASPECTS) {
@@ -168,6 +174,13 @@ check("the two-reference ceiling", mirror["edit"]["two_ref_max"], ci.EDIT_TWO_RE
 check("a fresh edit block is pre-boosted", mirror["edit"]["default_boost"], ci.DEFAULT_REF_BOOST)
 check("and its scene dial is not", mirror["edit"]["default_scene_boost"], 1.0)
 check("the edit pill starts off", mirror["edit"]["on"], False)
+
+check("style-transfer reference cap", mirror["style"]["max_refs"], ci.MAX_STYLE_TRANSFER_REFS)
+check("style fits", mirror["style"]["fits"], list(ci.STYLE_FITS))
+check("style strength default", mirror["style"]["strength"], ci.DEFAULT_STYLE_STRENGTH)
+check("style strength ceiling", mirror["style"]["max_strength"], ci.MAX_STYLE_STRENGTH)
+check("the default fit", mirror["style"]["default_fit"], ci.DEFAULT_STYLE_FIT)
+check("the style pill starts off", mirror["style"]["on"], False)
 
 # The weight fields the popover offers have to be the ones the emitter reads, or
 # a file picked in the UI lands in a key nothing loads. `render_image` imports

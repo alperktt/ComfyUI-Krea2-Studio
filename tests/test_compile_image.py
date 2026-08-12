@@ -308,6 +308,54 @@ expect_error("and a boost past the node's ceiling is refused",
              "ref_boost")
 
 
+# ---- style transfer ------------------------------------------------------------
+
+check("a default blob carries no style transfer", base.style, None)
+
+one_ref = compile(style={"on": True, "refs": [{"filename": "look.png"}]})
+check("the reference reaches the payload", one_ref.style["refs"], ["look.png"])
+check("with the pack's own default fit and strength",
+      (one_ref.style["fit"], one_ref.style["strength"]),
+      (ci.DEFAULT_STYLE_FIT, ci.DEFAULT_STYLE_STRENGTH))
+
+pair_refs = compile(style={"on": True, "refs": ["a.png", "b.png"], "primary": 2,
+                           "fit": "contain", "strength": 1.25})
+check("two references and which one leads",
+      (pair_refs.style["refs"], pair_refs.style["primary"]), (["a.png", "b.png"], 2))
+check("and the fit and strength are carried",
+      (pair_refs.style["fit"], pair_refs.style["strength"]), ("contain", 1.25))
+
+# Composes with everything that is not the other reference path.
+check("style transfer and an edit compose",
+      bool(compile(style={"on": True, "refs": ["a.png"]},
+                   edit={"on": True, "source": {"filename": "p.png"}}).style), True)
+check("and it runs on the quantized loader",
+      compile(loader="svdquant", style={"on": True, "refs": ["a.png"]}
+              ).checkpoint_field, "svdq_model")
+check("and alongside a moodboard",
+      bool(compile(style={"on": True, "refs": ["a.png"]},
+                   moodboard={"on": True, "board": "noir-1"}).style), True)
+
+expect_error("the style pill with no reference is refused",
+             lambda: compile(style={"on": True, "refs": []}), "no reference is chosen")
+expect_error("a third reference is refused, naming the pack's limit",
+             lambda: compile(style={"on": True, "refs": ["a.png", "b.png", "c.png"]}),
+             "no route for a third")
+expect_error("style transfer and style references together are refused",
+             lambda: compile(style={"on": True, "refs": ["a.png"]},
+                             refs=[{"filename": "style.png"}]),
+             "two different reference paths")
+expect_error("style transfer is refused on Ideogram",
+             lambda: compile(arch="ideogram4", style={"on": True, "refs": ["a.png"]}),
+             "Krea 2")
+expect_error("an unknown fit is refused",
+             lambda: compile(style={"on": True, "refs": ["a.png"], "fit": "tile"}),
+             "unknown style fit")
+expect_error("a primary reference that is not 1 or 2 is refused",
+             lambda: compile(style={"on": True, "refs": ["a.png"], "primary": 3}),
+             "must be 1 or 2")
+
+
 if FAILURES:
     print(f"{len(FAILURES)} failure(s):")
     for failure in FAILURES:

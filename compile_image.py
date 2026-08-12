@@ -142,6 +142,23 @@ MAX_REF_BOOST = 1000.0
 EDIT_SWEET_SPOT_PIXELS = 1024 * 1024
 EDIT_TWO_REF_MAX_PIXELS = 1536 * 1024
 
+# Krea2-StyleTransfer: RF-inversion style transfer. One reference patches the
+# model through `Krea2StyleTransfer`; two go through a `STYLE_REFS` bundle and
+# `Krea2TwoStyleTransfer`. Past two the pack has no route, so the cap is its
+# shape rather than a preference.
+MAX_STYLE_TRANSFER_REFS = 2
+
+# How a reference whose aspect differs from the render's is made to fit. The
+# pack's own options and default.
+STYLE_FITS = ("crop", "contain", "stretch")
+DEFAULT_STYLE_FIT = "crop"
+
+# Overall style mix. The transfer nodes ignore this in `recommended` mode — their
+# tooltip says so — so moving it is what switches them to `custom`, with every
+# other dial still coming from the installed class's own defaults.
+DEFAULT_STYLE_STRENGTH = 1.0
+MAX_STYLE_STRENGTH = 2.0
+
 # Ideogram's official preset table, verbatim from the shipped ComfyUI template
 # (V4_QUALITY_48 / V4_DEFAULT_20 / V4_TURBO_12). mu and std shape the
 # resolution-shifted schedule, so they belong to the preset, not to the user.
@@ -189,6 +206,9 @@ class ImagePayload:
     # krea2edit, or None. `{source, source_b, lora, ref_boost, ref_boost_a,
     # fit_mode, grounding_px}` — see `_parse_edit`.
     edit: dict = None
+    # RF-inversion style transfer, or None. `{refs, fit, strength, primary}` —
+    # see `_parse_style`.
+    style: dict = None
     # Set when an edit's canvas is past the size its weights work best at. Not a
     # refusal and not a clamp — the render is fine, just slower and looser than
     # the same edit at 1 MP, and the UI says so.
@@ -405,6 +425,43 @@ def _parse_edit(raw):
     }
 
 
+def _parse_style(raw):
+    """The style-transfer block, validated. `None` when the pill is off."""
+    if not isinstance(raw, dict) or not raw.get("on"):
+        return None
+    refs = []
+    for item in raw.get("refs") or []:
+        filename = item.get("filename") if isinstance(item, dict) else item
+        if not filename or not isinstance(filename, str):
+            raise CompileError("every style-transfer reference must carry a filename")
+        refs.append(filename)
+    if not refs:
+        raise CompileError("the style-transfer pill is on but no reference is chosen")
+    if len(refs) > MAX_STYLE_TRANSFER_REFS:
+        raise CompileError(
+            f"at most {MAX_STYLE_TRANSFER_REFS} style-transfer references — the pack "
+            f"has no route for a third")
+
+    fit = raw.get("fit", DEFAULT_STYLE_FIT)
+    if fit not in STYLE_FITS:
+        raise CompileError(f"unknown style fit {fit!r}")
+
+    strength = _number(raw.get("strength"), "the style strength", 0.0, MAX_STYLE_STRENGTH,
+                       DEFAULT_STYLE_STRENGTH)
+
+    # Which of the two references leads. Only meaningful with two, and the pack
+    # takes it as the string "1" or "2".
+    primary = raw.get("primary", 1)
+    try:
+        primary = int(primary)
+    except (TypeError, ValueError):
+        raise CompileError("the primary style reference must be 1 or 2")
+    if primary not in (1, 2):
+        raise CompileError("the primary style reference must be 1 or 2")
+
+    return {"refs": refs, "fit": fit, "strength": strength, "primary": primary}
+
+
 def compile_prestage(data, image_size_lookup=None, moodboard_lookup=None):
     """`prestage_data` dict -> `ImagePayload`.
 
@@ -493,6 +550,22 @@ def compile_prestage(data, image_size_lookup=None, moodboard_lookup=None):
                 "positive conditioning. Clear the style references, or switch the "
                 "edit pill off")
 
+    style = _parse_style(data.get("style"))
+    if style is not None:
+        if arch != "krea2":
+            raise CompileError(
+                "style transfer is Krea 2's — switch the model pill to Krea 2, "
+                "or the style pill off")
+        if refs:
+            # Two different reference mechanisms, both claiming to be how this
+            # render carries a look: the Qwen-edit encoder builds conditioning
+            # from its images, RF-inversion patches the model from its own. Run
+            # together, neither is doing what its own docs describe.
+            raise CompileError(
+                "style transfer and style references cannot run together — they are "
+                "two different reference paths. Clear the style references, or switch "
+                "the style-transfer pill off")
+
     short_edge = data.get("short_edge", DEFAULT_SHORT_EDGE)
     ratio_clamped = False
     # An edit's canvas follows its source for the same reason an img2img render's
@@ -542,6 +615,6 @@ def compile_prestage(data, image_size_lookup=None, moodboard_lookup=None):
         arch=arch, prompt=prompt, width=width, height=height,
         checkpoint_field=checkpoint_field, loader=loader,
         loras=loras, refs=refs, init=init, negative_prompt=negative_prompt,
-        edit=edit, edit_oversize=edit_oversize,
+        edit=edit, edit_oversize=edit_oversize, style=style,
         mu=mu, std=std, ratio_clamped=ratio_clamped,
     )

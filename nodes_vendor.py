@@ -62,6 +62,10 @@ VENDORED: list[tuple[str, str, str]] = [
     ("K2S_SVDQuantLoraLoader", "svdquant.svdquant_lora", "Krea2SVDQuantLoraLoader"),
     ("K2S_Krea2EditModelPatch", "krea2edit", "Krea2EditModelPatch"),
     ("K2S_Krea2EditGroundedEncode", "krea2edit", "Krea2EditGroundedEncode"),
+    ("K2S_Krea2StyleReference", "styletransfer.nodes", "Krea2StyleReference"),
+    ("K2S_Krea2StyleTransfer", "styletransfer.nodes", "Krea2StyleTransfer"),
+    ("K2S_Krea2TwoStyleReferences", "styletransfer.nodes", "Krea2TwoStyleReferences"),
+    ("K2S_Krea2TwoStyleTransfer", "styletransfer.nodes", "Krea2TwoStyleTransfer"),
 ]
 
 

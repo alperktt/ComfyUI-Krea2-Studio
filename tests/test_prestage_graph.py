@@ -724,6 +724,60 @@ check("the edit LoRA is patched on, and before the patch node",
 for absent in (ri.EDIT_PATCH, ri.EDIT_ENCODE):
     check(f"no {absent} without the edit pill", absent in by_class(build().expand), False)
 
+# ---- style transfer -------------------------------------------------------------
+#
+# A model patch, not a latent path: the pack's own workflow feeds the sampler the
+# same empty latent it feeds the reference builder, and takes the model out of the
+# transfer node. `ref_conditioning` is the render's own positive, not a second
+# prompt — both settled by reading that workflow rather than the signatures.
+
+styled_one = emitted(ci.compile_prestage(
+    {"arch": "krea2", "prompt": "a red room", "aspect": "1:1", "short_edge": 1024,
+     "style": {"on": True, "refs": ["look.png"], "fit": "contain"}}))
+
+check("one reference builds one reference latent", len(styled_one[ri.STYLE_REFERENCE]), 1)
+check("fitted to the sampler's own latent",
+      styled_one[ri.STYLE_REFERENCE][0][1]["target_latent"],
+      styled_one["KSampler"][0][1]["latent_image"])
+check("with the chosen fit", styled_one[ri.STYLE_REFERENCE][0][1]["fit"], "contain")
+check("the single-reference transfer patches the model",
+      len(styled_one[ri.STYLE_TRANSFER]), 1)
+check("and the sampler runs the patched model",
+      list(styled_one["KSampler"][0][1]["model"]),
+      [styled_one[ri.STYLE_TRANSFER][0][0], 0])
+check("ref_conditioning is the render's own positive, not a second prompt",
+      styled_one[ri.STYLE_TRANSFER][0][1]["ref_conditioning"],
+      styled_one["KSampler"][0][1]["positive"])
+# At strength 1 the pack's recommended table runs as shipped; the advanced dials
+# are ignored in that mode, so sending them would be noise.
+check("strength 1 leaves the node in recommended mode",
+      styled_one[ri.STYLE_TRANSFER][0][1]["mode"], "recommended")
+check("no two-reference machinery for one reference",
+      ri.STYLE_TWO_REFERENCES in styled_one, False)
+
+styled_two = emitted(ci.compile_prestage(
+    {"arch": "krea2", "prompt": "a red room", "aspect": "1:1", "short_edge": 1024,
+     "style": {"on": True, "refs": ["a.png", "b.png"], "primary": 2, "strength": 1.25}}))
+check("two references build two latents and a bundle",
+      (len(styled_two[ri.STYLE_REFERENCE]), len(styled_two[ri.STYLE_TWO_REFERENCES])), (2, 1))
+check("through the two-reference transfer node",
+      (ri.STYLE_TWO_TRANSFER in styled_two, ri.STYLE_TRANSFER in styled_two), (True, False))
+check("which one leads, as the pack's string",
+      styled_two[ri.STYLE_TWO_TRANSFER][0][1]["primary_reference"], "2")
+# Moving the strength is what switches the node to custom, because recommended
+# mode ignores it — its own tooltip says so.
+check("a moved strength switches to custom mode and is passed through",
+      (styled_two[ri.STYLE_TWO_TRANSFER][0][1]["mode"],
+       styled_two[ri.STYLE_TWO_TRANSFER][0][1]["style_strength"]),
+      ("custom", 1.25))
+# The rest of the fourteen dials come from the installed class rather than from a
+# copy here, so a retune upstream is followed instead of frozen.
+check("and the other dials arrive from the pack's own defaults",
+      styled_two[ri.STYLE_TWO_TRANSFER][0][1]["rf_mode"], "flowturbo_pc")
+
+for absent in (ri.STYLE_REFERENCE, ri.STYLE_TRANSFER, ri.STYLE_TWO_TRANSFER):
+    check(f"no {absent} without the style pill", absent in by_class(build().expand), False)
+
 if FAILURES:
     print(f"{len(FAILURES)} failure(s):")
     for failure in FAILURES:

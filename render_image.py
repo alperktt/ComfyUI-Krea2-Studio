@@ -77,6 +77,10 @@ SVDQUANT_LOADER = "K2S_SVDQuantW4A4Loader"
 SVDQUANT_LORA = "K2S_SVDQuantLoraLoader"
 EDIT_PATCH = "K2S_Krea2EditModelPatch"
 EDIT_ENCODE = "K2S_Krea2EditGroundedEncode"
+STYLE_REFERENCE = "K2S_Krea2StyleReference"
+STYLE_TRANSFER = "K2S_Krea2StyleTransfer"
+STYLE_TWO_REFERENCES = "K2S_Krea2TwoStyleReferences"
+STYLE_TWO_TRANSFER = "K2S_Krea2TwoStyleTransfer"
 
 # The reference template's shift, applied only on the style-reference branch —
 # plain t2i leaves the shift the checkpoint detection already set (1.15).
@@ -358,6 +362,59 @@ def _emit_edit_encode(graph, payload, clip, images, text):
                       grounding_px=payload.edit["grounding_px"], **grounded).out(0)
 
 
+def _emit_style(graph, payload, model, vae, latent, positive):
+    """RF-inversion style transfer, patched onto the model. Returns the new link.
+
+    Wired from the pack's own shipped workflow, which settles two things that are
+    not obvious from the signatures: `ref_conditioning` is the render's *own*
+    positive conditioning rather than a second prompt, and `target_latent` is the
+    sampler's latent — the sampler still starts from it, so this is a model patch
+    and the latent path is untouched.
+
+    **`mode` decides whether the fourteen advanced dials are read at all.** In
+    `recommended` the nodes apply their own table and ignore the widgets,
+    `style_strength` included — its tooltip says so. So the strength being moved
+    is what switches them to `custom`, and everything else then comes from
+    `accel.node_defaults`, which reads the installed class's declared defaults
+    and therefore follows a retune instead of freezing a copy of it.
+    """
+    from . import accel, nodes_vendor
+
+    two = len(payload.style["refs"]) > 1
+    transfer_node = STYLE_TWO_TRANSFER if two else STYLE_TRANSFER
+    for node_id in (STYLE_REFERENCE, transfer_node,
+                    *([STYLE_TWO_REFERENCES] if two else ())):
+        _require_vendored(node_id, "Style transfer",
+                          "Switch the style pill off to render without it.")
+
+    references = [
+        graph.node(STYLE_REFERENCE, vae=vae, target_latent=latent,
+                   reference_image=graph.node("LoadImage", image=name).out(0),
+                   fit=payload.style["fit"], upscale_method="lanczos").out(0)
+        for name in payload.style["refs"]
+    ]
+
+    import nodes
+
+    kwargs = accel.node_defaults(nodes.NODE_CLASS_MAPPINGS[transfer_node],
+                                 skip=("model", "reference_latent", "ref_conditioning",
+                                       "style_refs"))
+    custom = payload.style["strength"] != 1.0
+    kwargs["mode"] = "custom" if custom else "recommended"
+    if custom:
+        kwargs["style_strength"] = payload.style["strength"]
+
+    if two:
+        bundle = graph.node(STYLE_TWO_REFERENCES,
+                            reference_latent_1=references[0],
+                            reference_latent_2=references[1]).out(0)
+        kwargs["primary_reference"] = str(payload.style["primary"])
+        return graph.node(transfer_node, model=model, style_refs=bundle,
+                          ref_conditioning=positive, **kwargs).out(0)
+    return graph.node(transfer_node, model=model, reference_latent=references[0],
+                      ref_conditioning=positive, **kwargs).out(0)
+
+
 def _negative(graph, payload, clip, positive):
     """The unconditional branch: zeroed conditioning, or a real negative prompt.
 
@@ -426,6 +483,11 @@ def _emit_krea2(graph, payload, sampling, clip, vae, model, unique_id, filename_
             # On the first edit rendered here that was most of the render.
             # `ConditioningZeroOut` satisfies the socket for free.
             negative = graph.node("ConditioningZeroOut", conditioning=positive).out(0)
+        # An edit and a style transfer compose: one is conditioning built from the
+        # source, the other a patch on the attention path. The style patch goes
+        # last so it wraps the edit's, matching the plain branch's order.
+        if payload.style:
+            model = _emit_style(graph, payload, model, vae, latent, positive)
         sampled = graph.node(
             "KSampler", model=model, positive=positive, negative=negative,
             latent_image=latent, seed=sampling.seed, steps=sampling.steps,
@@ -454,6 +516,11 @@ def _emit_krea2(graph, payload, sampling, clip, vae, model, unique_id, filename_
         positive = graph.node("CLIPTextEncode", clip=clip, text=payload.prompt).out(0)
 
     negative = _negative(graph, payload, clip, positive)
+
+    # Exclusive with the reference branch above — the compile refuses the pair —
+    # so this only ever wraps a plain t2i or img2img model.
+    if payload.style:
+        model = _emit_style(graph, payload, model, vae, latent, positive)
 
     sampled = graph.node(
         "KSampler", model=model, positive=positive, negative=negative,

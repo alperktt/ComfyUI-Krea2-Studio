@@ -584,6 +584,159 @@ export class PreStageEditor {
     loadLoraNames(() => pop.isConnected && render());
   }
 
+  // ---- style transfer ---------------------------------------------------------
+
+  /** RF-inversion style transfer: a reference whose *look* this render takes.
+   *
+   *  Distinct from the style-reference rail tool, which goes through the
+   *  Qwen-edit encoder and builds conditioning. This patches the attention path
+   *  instead, and the two are mutually exclusive — the compile refuses the pair,
+   *  so the pill that would create it is disabled rather than left to fail. */
+  stylePill() {
+    const style = this.state.style;
+    const blocked = this.state.refs.length > 0 && !style.on;
+    return el("button", {
+      class: `mmc-pill${style.on ? " accel-on" : ""}`,
+      disabled: blocked || undefined,
+      title: blocked
+        ? "Style transfer and style references are two different reference paths, so "
+          + "only one can run. Clear the style references to use it."
+        : style.on
+          ? `Style transfer from ${style.refs.length} reference`
+            + `${style.refs.length > 1 ? "s" : ""}. Click to change.`
+          : "Take a reference image's look by RF-inversion — a patch on the attention "
+            + "path rather than conditioning. Off.",
+      onclick: (event) => this.openStyle(event.currentTarget),
+    }, [
+      icon("image", 16),
+      el("span", { text: style.on ? "style" : "style off" }),
+      ...(style.on && style.strength !== 1
+        ? [el("span", { class: "mmc-pill-sub", text: style.strength.toFixed(2) })] : []),
+    ]);
+  }
+
+  async addStyleRef() {
+    const room = S.PRESTAGE_MAX_STYLE_TRANSFER_REFS - this.state.style.refs.length;
+    if (room <= 0) {
+      return this.flash(`At most ${S.PRESTAGE_MAX_STYLE_TRANSFER_REFS} style-transfer `
+                      + `references — the pack has no route for a third.`);
+    }
+    const chosen = await openPicker({
+      kinds: ["image", "renders"], kind: "image",
+      capacity: () => ({ used: this.state.style.refs.length,
+                         max: S.PRESTAGE_MAX_STYLE_TRANSFER_REFS, filesLeft: room }),
+    });
+    if (!chosen) return false;
+    for (const asset of chosen.slice(0, room)) {
+      this.state.style.refs.push({ filename: asset.path });
+    }
+    this.state.style.on = true;
+    this.state.refs = [];
+    this.commit();
+    return true;
+  }
+
+  openStyle(anchor) {
+    const style = this.state.style;
+    const pop = el("div", { class: "mmc-pop mmc-weights-pop" });
+    const body = el("div");
+
+    const render = () => {
+      const rows = style.refs.map((ref, index) => el("div", { class: "mmc-weight-row" }, [
+        el("span", {
+          class: "mmc-weight-name",
+          text: style.refs.length > 1 ? `Reference ${index + 1}` : "Reference",
+        }),
+        el("button", {
+          class: "mmc-weight-file",
+          title: ref.filename,
+          text: ref.filename.split("/").pop(),
+          onclick: () => this.addStyleRef().then((added) => added && render()),
+        }),
+        el("button", {
+          class: "mmc-asset-x", text: "✕", title: `Drop ${ref.filename}`,
+          onclick: () => {
+            style.refs.splice(index, 1);
+            if (!style.refs.length) style.on = false;
+            this.commit();
+            render();
+          },
+        }),
+      ]));
+
+      if (style.refs.length < S.PRESTAGE_MAX_STYLE_TRANSFER_REFS) {
+        rows.push(el("button", {
+          class: "mmc-opt",
+          onclick: () => this.addStyleRef().then((added) => added && render()),
+        }, [el("span", { class: "mmc-opt-label" }, [
+          el("span", { text: style.refs.length ? "Add a second reference" : "Choose a reference" }),
+        ])]));
+      }
+
+      if (style.on) {
+        rows.push(el("div", { class: "mmc-weight-row" }, [
+          el("span", { class: "mmc-weight-name", text: "Fit" }),
+          el("div", { class: "mmc-pill mmc-turbo-seg" }, S.PRESTAGE_STYLE_FITS.map((fit) =>
+            el("button", {
+              class: "mmc-turbo-opt",
+              "aria-pressed": style.fit === fit,
+              title: S.PRESTAGE_STYLE_FIT_HINT[fit],
+              onclick: () => { style.fit = fit; this.commit(); render(); },
+            }, [el("span", { text: fit })]))),
+        ]));
+
+        // One dial rather than fourteen. The transfer nodes ignore their advanced
+        // widgets in "recommended" mode — so moving this is what switches them to
+        // "custom", and the rest still come from the pack's own defaults.
+        rows.push(el("div", { class: "mmc-weight-row" }, [
+          el("span", { class: "mmc-weight-name", text: "Strength" }),
+          stepperPill({
+            value: style.strength, min: 0, max: S.PRESTAGE_MAX_STYLE_STRENGTH,
+            step: 0.05, width: "56px",
+            format: (n) => n.toFixed(2),
+            title: "Overall style mix. At exactly 1.00 the pack's recommended preset runs "
+                 + "as shipped; moving it switches the node to custom mode, where this "
+                 + "dial is read and every other one keeps the recommended value.",
+            onChange: (value) => { style.strength = value; this.commit(); render(); },
+          }),
+        ]));
+
+        if (style.refs.length > 1) {
+          rows.push(el("div", { class: "mmc-weight-row" }, [
+            el("span", { class: "mmc-weight-name", text: "Leads" }),
+            el("div", { class: "mmc-pill mmc-turbo-seg" }, [1, 2].map((n) =>
+              el("button", {
+                class: "mmc-turbo-opt",
+                "aria-pressed": style.primary === n,
+                title: `Reference ${n} carries the primary look; the other supports it.`,
+                onclick: () => { style.primary = n; this.commit(); render(); },
+              }, [el("span", { text: `ref ${n}` })]))),
+          ]));
+        }
+
+        rows.push(el("button", {
+          class: "mmc-opt",
+          onclick: () => {
+            style.on = false;
+            style.refs = [];
+            this.commit();
+            render();
+          },
+        }, [el("span", { class: "mmc-opt-label" }, [
+          el("span", { text: "Switch style transfer off" }),
+        ])]));
+      }
+
+      body.replaceChildren(...rows);
+    };
+
+    pop.append(el("div", { class: "mmc-pop-title", text: "Style transfer" }), body);
+    render();
+    document.body.appendChild(pop);
+    placeNear(pop, anchor);
+    dismissable(pop);
+  }
+
   // ---- moodboard --------------------------------------------------------------
 
   /** A Krea moodboard folded into the prompt. Off by default.
@@ -748,7 +901,7 @@ export class PreStageEditor {
     ]);
 
     const pills = [archPill, aspectPill, resPill, this.moodboardPill()];
-    if (state.arch === "krea2") pills.push(this.editPill());
+    if (state.arch === "krea2") pills.push(this.editPill(), this.stylePill());
 
     if (state.arch === "ideogram4") {
       // Ideogram's speed axis. The preset owns the schedule shape as well as
