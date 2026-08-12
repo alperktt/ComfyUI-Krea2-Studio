@@ -76,6 +76,10 @@ class Timeline {
         this.timeline[key] = event.target.value;
         this.onCommit?.();
         this.renderBar();
+        // The pool shelf reads these fields — a citation typed into the global
+        // prompt flips a chip from idle to "everywhere" as it is written. The
+        // shelf holds no caret, so rebuilding it here loses nothing.
+        this.renderPool();
       },
     });
     box.value = this.timeline[key] ?? "";
@@ -177,8 +181,8 @@ class Timeline {
         el("span", { class: "mmc-tl-field-name", text: t("Piece references") }),
         el("span", {
           class: "mmc-tl-pool-hint",
-          text: t("Attached once, used wherever a segment writes the @handle — "
-                + "type it, or pick it from the prompt's @ menu."),
+          text: t("Attached once. Cite the @handle in the global prompt to use it in every "
+                + "segment, or in a segment's own prompt to use it just there."),
         }),
         el("button", {
           class: "mmc-ghost mmc-tl-pool-add",
@@ -192,22 +196,31 @@ class Timeline {
   }
 
   poolChip(asset) {
+    const everywhere = S.poolCitedGlobally(this.timeline, asset);
     const cited = S.poolCitations(this.timeline, asset);
-    const where = cited.length
-      ? t(cited.length === 1 ? "in segment {list}" : "in segments {list}", { list: cited.join(", ") })
-      : t("cited nowhere yet");
+    const where = everywhere
+      ? t("everywhere — cited in the global prompt")
+      : cited.length
+        ? t(cited.length === 1 ? "in segment {list}" : "in segments {list}", { list: cited.join(", ") })
+        : t("cited nowhere yet");
     const thumb = asset.kind === "image"
       ? el("img", { class: "mmc-asset-thumb", src: viewUrl(asset.filename, { preview: true }), alt: "" })
       : el("span", { class: "mmc-asset-thumb", text: asset.kind === "video" ? "▶" : "♪" });
     return el("div", {
-      class: `mmc-asset${cited.length ? "" : " idle"}`,
-      title: cited.length
+      class: `mmc-asset${everywhere || cited.length ? "" : " idle"}`,
+      title: everywhere || cited.length
         ? t("{file} — {where}", { file: asset.filename, where })
         : t("{file} — no segment cites @{handle} yet, so it rides into none of them.",
             { file: asset.filename, handle: asset.handle }),
     }, [
       thumb,
-      el("span", { class: `mmc-asset-handle mmc-tag-${S.tagIndex(asset.handle)}`, text: `@${asset.handle}` }),
+      el("button", {
+        class: `mmc-asset-handle mmc-tl-pool-cite mmc-tag-${S.tagIndex(asset.handle)}`,
+        text: `@${asset.handle}`,
+        title: t("Write @{handle} into the global prompt, so it applies to every segment.",
+                 { handle: asset.handle }),
+        onclick: () => this.citeInGlobal(asset),
+      }),
       el("span", { class: "mmc-tl-pool-where", text: where }),
       // What of the picture is the reference — a character sheet is usually the
       // person, not the sheet's background. Images only, like the editor's own.
@@ -231,6 +244,18 @@ class Timeline {
         },
       }),
     ]);
+  }
+
+  /** Write a pool handle into the global prompt — the one-click way to say
+   *  "this reference applies to the whole piece". The join then carries the
+   *  citation into every segment, which is what attaches the file there. */
+  citeInGlobal(asset) {
+    if (S.poolCitedGlobally(this.timeline, asset)) return;
+    const current = this.timeline.prompt ?? "";
+    const joiner = current && !/\s$/.test(current) ? " " : "";
+    this.timeline.prompt = `${current}${joiner}@${asset.handle} `;
+    this.promptBox.value = this.timeline.prompt;
+    this.commit();
   }
 
   pickPoolTakes(anchor, asset) {

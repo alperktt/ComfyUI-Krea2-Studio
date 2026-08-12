@@ -626,10 +626,12 @@ def _run(body):
         sections = {name: normalized(text, name) for name, text in sections.items()}
         parsed["sections"] = sections
 
-    # The rewritten global prompt. Never normalized: nothing may point at an
-    # asset from it — it is joined in front of *every* segment at compile time,
-    # and handles are allocated per segment, so an `@img-1` here would bind to
-    # a different file in each. Anything reference-shaped is reported instead.
+    # The rewritten global prompt. Never normalized: it is joined in front of
+    # *every* segment at compile time, and segment handles are allocated per
+    # segment, so an `@img-1` here would bind to a different file in each. The
+    # pool's handles are the exception — they are stable across the strip and
+    # a citation here applies the reference to every segment, which is the
+    # attach-once gesture. Everything else reference-shaped is reported.
     piece_out = None
     if ask_piece:
         piece_out = parsed.get("piece") or ""
@@ -639,14 +641,17 @@ def _run(body):
                 "stays in front of every segment as it is"
             )
         else:
-            pointed = ["@" + h for h in sorted(set(refine.HANDLE_RE.findall(piece_out)))]
+            shared_pool = pool["handles"] if pool else set()
+            pointed = ["@" + h for h in sorted(set(refine.HANDLE_RE.findall(piece_out))
+                                               - shared_pool)]
             pointed += sorted({f"<{kind_} {int(n)}>" for kind_, n in
                                (m.groups() for m in refine.LABEL_RE.finditer(piece_out))})
             if pointed:
                 problems.append(
                     "the rewritten global prompt mentions " + ", ".join(pointed)
-                    + " — it stands in front of every segment, and references "
-                    "belong to a segment's own text. Edit it out before queueing."
+                    + " — it stands in front of every segment, and only a piece "
+                    "reference's @handle means the same thing in all of them. "
+                    "Edit it out before queueing."
                 )
 
     # A reference the whole rewrite never points at conditions nothing, and

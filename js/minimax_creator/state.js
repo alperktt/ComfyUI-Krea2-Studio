@@ -668,8 +668,16 @@ function syncCanvas(timeline) {
     // The piece's reference pool, mirrored like the canvas so a segment state
     // answers `mode()`, `checkpoint()` and the prompt box's chips on its own:
     // a segment citing @ref-1 is a reference generation and every accessor has
-    // to say so. Never serialized — the pool is the timeline's.
+    // to say so. The global texts ride along because a citation in them is a
+    // citation here too — the join and the audio inheritance are compile's,
+    // and `citedPool` mirrors both. Never serialized — all of it is the
+    // timeline's.
     segment.pool = timeline.assets ?? [];
+    segment.globalTexts = {
+      prompt: timeline.prompt ?? "",
+      soundscape: timeline.soundscape ?? "",
+      music: timeline.music ?? "",
+    };
   }
   // Segment 1 has nothing in front of it. Kept in step here rather than guarded
   // at every read, so reordering cannot leave a stale flag behind.
@@ -1433,26 +1441,61 @@ export function removeLora(state, name) {
  *  compile.HANDLE_RE — the one shape a handle may take. */
 export const HANDLE_RE = /@([A-Za-z]+-\d+)/g;
 
-/** The pool assets a segment's own text cites, in pool order. Mirrors
- *  `compile.cited_pool`: the prompt (and the rewrite standing in for it, with
- *  its sections) and the segment's own two audio fields — a citation anywhere
- *  in them is what injects the asset into this segment's generation at queue
- *  time. The pool rides on the segment as `state.pool`, mirrored by
- *  `syncTimeline` the way the canvas is; a lone Creator state has none. */
-export function citedPool(state) {
-  const pool = state.pool ?? [];
-  if (!pool.length) return [];
-  const texts = [state.prompt ?? "", state.soundscape ?? "", state.music ?? ""];
+/** The handles the given texts cite, as a Set. */
+function citedHandles(texts) {
+  const found = new Set();
+  for (const text of texts) {
+    for (const match of String(text ?? "").matchAll(HANDLE_RE)) found.add(match[1]);
+  }
+  return found;
+}
+
+/** The texts of `state` that compile will substitute, global joins included:
+ *  the global prompt rides in front of every segment, and the global audio
+ *  fields are inherited by a segment that writes none of its own. `own: true`
+ *  drops the global parts — for telling a segment's own citation from one the
+ *  global prompt put there. */
+function poolTexts(state, { own = false } = {}) {
+  const global_ = (own ? null : state.globalTexts) ?? {};
+  const texts = [state.prompt ?? "", global_.prompt ?? "",
+                 state.soundscape || global_.soundscape || "",
+                 state.music || global_.music || ""];
   if (state.refined && state.refined.enabled !== false) {
     texts.push(state.refined.body ?? "");
     for (const text of Object.values(state.refined.sections ?? {})) texts.push(text ?? "");
   }
-  const found = new Set();
-  for (const text of texts) {
-    for (const match of String(text).matchAll(HANDLE_RE)) found.add(match[1]);
-  }
+  return texts;
+}
+
+/** The pool assets a segment's text cites, in pool order. Mirrors
+ *  `compile.cited_pool`: the prompt with the global one joined in front (a
+ *  citation there is a citation everywhere), the rewrite standing in for it
+ *  with its sections, and the two audio fields with their inheritance — a
+ *  citation anywhere in them is what injects the asset into this segment's
+ *  generation at queue time. The pool rides on the segment as `state.pool`,
+ *  mirrored by `syncTimeline` the way the canvas is; a lone Creator state has
+ *  none. */
+export function citedPool(state) {
+  const pool = state.pool ?? [];
+  if (!pool.length) return [];
+  const found = citedHandles(poolTexts(state));
   const own = new Set(state.assets.map((a) => a.handle));
   return pool.filter((asset) => found.has(asset.handle) && !own.has(asset.handle));
+}
+
+/** The subset of `citedPool` this segment cites in its own text — what remains
+ *  when the global prompt's citations are set aside. For messages that tell
+ *  the user *where* to edit a mention out. */
+export function citedPoolOwn(state) {
+  const found = citedHandles(poolTexts(state, { own: true }));
+  return citedPool(state).filter((asset) => found.has(asset.handle));
+}
+
+/** Whether the timeline's own texts cite a pool asset — the "applies to every
+ *  segment" state the shelf reports as such. */
+export function poolCitedGlobally(timeline, asset) {
+  return citedHandles([timeline.prompt, timeline.soundscape, timeline.music])
+    .has(asset.handle);
 }
 
 /** Which segments cite a pool asset, as 1-based card numbers — the shelf's
@@ -1616,12 +1659,20 @@ export function blockedReason(state, action) {
   }
   if ((action === "first_frame" || action === "last_frame") && hasReferences(state)) {
     // The reference may be a cited pool asset rather than an attached file, in
-    // which case "remove" means editing the mention out of the text.
-    return references(state).length
-      ? t("Remove the references first — start/end frames use the FL2VA checkpoint, references use Ref2VA.")
-      : t("This segment cites a piece reference ({handles}) — edit the mention out first: "
+    // which case "remove" means editing the mention out — of this segment's
+    // text, or of the global prompt whose join put the citation everywhere.
+    if (references(state).length) {
+      return t("Remove the references first — start/end frames use the FL2VA checkpoint, references use Ref2VA.");
+    }
+    const own = citedPoolOwn(state);
+    if (own.length) {
+      return t("This segment cites a piece reference ({handles}) — edit the mention out first: "
         + "start/end frames use the FL2VA checkpoint, references use Ref2VA.",
-          { handles: citedPool(state).map((a) => `@${a.handle}`).join(", ") });
+          { handles: own.map((a) => `@${a.handle}`).join(", ") });
+    }
+    return t("The global prompt cites {handles}, which rides into every segment — edit the "
+      + "mention out of the global prompt to use start/end frames here.",
+        { handles: citedPool(state).map((a) => `@${a.handle}`).join(", ") });
   }
   if (action === "continue" && frameAsset(state, "first_frame")) {
     return t("Remove this segment's start frame first — continuing would replace it with the source "

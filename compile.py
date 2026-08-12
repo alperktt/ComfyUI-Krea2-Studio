@@ -890,9 +890,11 @@ def _join_prompt(global_prompt, segment_prompt):
     Two lines rather than a comma splice: the global prompt is a standing
     description of the piece and the segment's is what happens in this shot, and
     running them together as one sentence reads as one clause qualifying the
-    other. No usable `@handle` can appear in the global prompt — segment assets
-    are per-segment, and a pool citation there is refused by
-    `_check_pool_texts` — so `_substitute` sees the join as ordinary prose.
+    other. The only `@handles` with meaning in the global prompt are the
+    reference pool's: citing one there injects the asset into every segment
+    (see `cited_pool`), so `_substitute` finds it attached wherever the join
+    lands. A segment-asset handle stays what it always was — a name that means
+    a different file in every card, and prose to this pass.
     """
     parts = [p for p in (global_prompt.strip(), str(segment_prompt or "").strip()) if p]
     return "\n".join(parts)
@@ -920,13 +922,15 @@ def merge_loras(global_entries, segment_entries):
 def timeline_pool(data):
     """The timeline's own reference pool, validated: assets any segment may cite.
 
-    Attached once, on the timeline, and injected into exactly the segments whose
-    own text writes the asset's handle — a character sheet cited in shots 2 and
-    5 rides into those two generations and no other. Injection is cite-gated
-    rather than unconditional because an uncited reference is not free: it
-    forces the segment onto the Ref2VA checkpoint (refusing any keyframe
-    segment outright), costs packed-sequence rows through every sampling step,
-    and would put the whole pool into every segment's cache key.
+    Attached once, on the timeline, and injected into exactly the segments
+    whose text cites the asset's handle. Cited per segment, a character sheet
+    rides into shots 2 and 5 and no other; cited in the *global prompt*, the
+    join carries the citation into every segment, which is the attach-once,
+    applies-everywhere gesture. Injection stays cite-gated rather than
+    unconditional because an uncited reference is not free: it forces the
+    segment onto the Ref2VA checkpoint (refusing any keyframe segment
+    outright), costs packed-sequence rows through every sampling step, and
+    would put the whole pool into every segment's cache key.
 
     Only references: a keyframe is a fact about one segment's opening or
     closing frame, so a pool entry claiming a frame role is a mistake, not a
@@ -946,47 +950,25 @@ def timeline_pool(data):
     return pool
 
 
-def _check_pool_texts(data, pool):
-    """Refuse a pool handle written into the timeline's own text fields.
-
-    The global prompt is joined in front of every segment and the global
-    soundscape and score are inherited by every segment that writes none of its
-    own — so a pool citation in any of them would inject the reference into
-    every segment at once, forcing the whole strip onto Ref2VA and breaking any
-    keyframe segment in it. Cited where the subject appears, the injection
-    stays per-segment; refused here, the failure names the field instead of
-    surfacing as a checkpoint error on a segment nobody edited.
-    """
-    handles = {asset.handle for asset in pool}
-    for key, label in (("prompt", "global prompt"),
-                       ("soundscape", "overall_soundscape"),
-                       ("music", "non_diegetic_music")):
-        cited = sorted(h for h in HANDLE_RE.findall(str(data.get(key) or ""))
-                       if h in handles)
-        if cited:
-            raise CompileError(
-                f"the timeline's {label} cites "
-                + ", ".join("@" + h for h in cited)
-                + " — it stands in front of every segment, so cite a piece "
-                "reference in the segments where it appears instead"
-            )
-
-
-def cited_pool(pool, request):
-    """Which pool assets this segment's own text cites, in pool order.
+def cited_pool(pool, request, extra_texts=()):
+    """Which pool assets this segment's text cites, in pool order.
 
     The texts scanned are exactly the ones `compile_request` will substitute:
     the prompt (or the refined body standing in for it — both, since the
     toggle can flip after queueing was planned), the refined reference
-    sections, and the two audio fields. A citation anywhere in them is the
-    segment saying "this reference appears here", and is what carries the
-    asset into this segment's generation.
+    sections, and the two audio fields. A citation anywhere in them is what
+    carries the asset into this segment's generation — and since the chained
+    prompt already holds the global prompt joined in front, a citation *there*
+    is a citation in every segment, which is the whole "attach once, applies
+    everywhere" gesture. `extra_texts` is for callers whose request does not
+    carry those global fields yet (one pass joins them later).
     """
     if not pool:
         return []
     texts = [str(request.get("prompt") or ""),
              str(request.get("soundscape") or ""),
              str(request.get("music") or "")]
+    texts.extend(str(text or "") for text in extra_texts)
     refined = request.get("refined")
     if isinstance(refined, dict) and refined.get("enabled") is not False:
         texts.append(str(refined.get("body") or ""))
@@ -999,7 +981,7 @@ def cited_pool(pool, request):
     return [asset for asset in pool if asset.handle in found]
 
 
-def _inject_pool(pool, request):
+def _inject_pool(pool, request, extra_texts=()):
     """The cited pool assets, merged in front of the segment's own list.
 
     In front, so a reference shared by several segments keeps the low ordinals
@@ -1008,7 +990,7 @@ def _inject_pool(pool, request):
     entry is the one the user was editing, the same rule `merge_loras` applies
     to a shadowed name.
     """
-    cited = cited_pool(pool, request)
+    cited = cited_pool(pool, request, extra_texts)
     if not cited:
         return request.get("assets")
     own = list(request.get("assets") or [])
@@ -1068,7 +1050,14 @@ def timeline_payloads(data, image_size_lookup=None):
     segments = timeline_segments(data)
     global_prompt = str(data.get("prompt") or "")
     pool = timeline_pool(data)
-    _check_pool_texts(data, pool)
+    # A pool handle written in the global prompt is a citation in *every*
+    # segment — the join puts it in front of each one, and the scan below reads
+    # the joined prompt. That is the attach-once gesture: a character sheet
+    # cited globally rides into the whole strip without a per-segment mention.
+    # The one thing it cannot ride into is a keyframe segment, and that clash
+    # is named against the global prompt below rather than left to surface as
+    # a checkpoint error on a segment nobody edited.
+    global_cited = {asset.handle for asset in pool} & set(HANDLE_RE.findall(global_prompt))
     payloads = []
 
     for index, segment in enumerate(segments):
@@ -1106,13 +1095,28 @@ def timeline_payloads(data, image_size_lookup=None):
         # The tail length is the timeline's — one seam sounding different from
         # the next is not a thing anyone tunes per cut.
         request["audio_tail_s"] = data.get("audio_tail_s", DEFAULT_AUDIO_TAIL_S)
-        # The piece's own references, where this segment cites them. After every
-        # text field above is final, so the scan reads exactly what will be
+        # The piece's own references, where this segment cites them — its own
+        # text, or the global prompt riding in front of it. After every text
+        # field above is final, so the scan reads exactly what will be
         # substituted; a segment citing none is byte-identical to one compiled
         # before the pool existed, which is what keeps its cache key still.
         merged_assets = _inject_pool(pool, request)
         if merged_assets is not request.get("assets"):
             request["assets"] = merged_assets
+            if global_cited:
+                frame = next((a for a in (segment.get("assets") or [])
+                              if isinstance(a, dict)
+                              and a.get("role") in ("first_frame", "last_frame")), None)
+                if frame is not None:
+                    raise CompileError(
+                        f"segment {index + 1} has a {frame['role'].replace('_', ' ')}, and "
+                        f"the global prompt cites "
+                        + ", ".join("@" + h for h in sorted(global_cited))
+                        + " — a reference cited there rides into every segment, and "
+                        "references cannot share a generation with start/end frames "
+                        "(FL2VA vs Ref2VA). Cite it only in the segments where it "
+                        "appears, or remove the frame."
+                    )
         payloads.append({
             "request": request,
             # Segment 1 has nothing in front of it, so the flags are ignored there
@@ -1226,7 +1230,13 @@ def single_payload(data):
     last_index = len(segments)
     global_prompt = str(data.get("prompt") or "").strip()
     pool = timeline_pool(data)
-    _check_pool_texts(data, pool)
+    pool_handles = {asset.handle for asset in pool}
+    # The global prompt opens shot 1's description and the global audio fields
+    # are merged into the one request, so a pool citation in any of them is
+    # shot 1's to carry — the merge below then owns it for the whole clip.
+    global_texts = (global_prompt,
+                    str(data.get("soundscape") or ""),
+                    str(data.get("music") or ""))
 
     assets = []          # the merged reference list, in first-appearance order
     position_of = {}     # dedup key -> index into `assets`
@@ -1239,10 +1249,12 @@ def single_payload(data):
     for number, segment in enumerate(segments, start=1):
         try:
             # A cited pool reference joins this shot exactly as it joins a
-            # chained segment. The merge below dedups on the file, so a sheet
-            # cited in shots 1 and 4 lands in the pool once and takes one
-            # <Picture N> — which is the point of citing it twice.
-            parsed = _parse_assets(_inject_pool(pool, segment))
+            # chained segment — the global texts count as shot 1's, since that
+            # is the shot the join lands on. The merge below dedups on the
+            # handle, so a sheet cited in shots 1 and 4 lands in the pool once
+            # and takes one <Picture N> — which is the point of citing it twice.
+            parsed = _parse_assets(_inject_pool(
+                pool, segment, extra_texts=global_texts if number == 1 else ()))
         except CompileError as exc:
             raise CompileError(f"shot {number}: {exc}") from exc
 
@@ -1264,14 +1276,24 @@ def single_payload(data):
             else:
                 with_frames.append(number)
 
-            key = (asset.kind, asset.role, asset.filename, asset.track,
+            # A pool asset keys — and keeps — its own handle: the global prompt
+            # is prepended to shot 1's text *without* the shot's rename pass,
+            # so a citation there only resolves if the merged list still calls
+            # the asset what the pool does. Its handle is globally unique
+            # already, which is the ref- prefix's whole job.
+            pooled = asset.handle in pool_handles
+            key = (asset.handle if pooled else None,
+                   asset.kind, asset.role, asset.filename, asset.track,
                    asset.ref_size, asset.trim, asset.takes)
             position = position_of.get(key)
             if position is None:
-                counters[asset.kind] = counters.get(asset.kind, 0) + 1
                 position = position_of[key] = len(assets)
-                assets.append(replace(
-                    asset, handle=f"{_HANDLE_PREFIX[asset.kind]}-{counters[asset.kind]}"))
+                if pooled:
+                    assets.append(asset)
+                else:
+                    counters[asset.kind] = counters.get(asset.kind, 0) + 1
+                    assets.append(replace(
+                        asset, handle=f"{_HANDLE_PREFIX[asset.kind]}-{counters[asset.kind]}"))
             rename[asset.handle] = assets[position].handle
 
         # A refined shot replaces the typed one here rather than downstream,

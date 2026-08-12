@@ -627,9 +627,14 @@ def user_message(shots, seconds=None, images=0, mode=None, piece=None, pool=None
                  "the world, who is in it — into it." % PIECE_FIELD)
             )
             lines.append(
-                "Write no @handle and no <Picture N> label in it — it stands in "
-                "front of every shot, and references belong to single shots. "
-                "Then write each shot's body to be read after it: keep its look "
+                ("Write no <Picture N> label in it, and no @handle except the "
+                 "piece's own references under ATTACHED TO THE PIECE — cited "
+                 "here, one of those applies to every shot, and a citation "
+                 "already here must survive the rewrite. "
+                 if pool else
+                 "Write no @handle and no <Picture N> label in it — it stands in "
+                 "front of every shot, and references belong to single shots. ")
+                + "Then write each shot's body to be read after it: keep its look "
                 "and its subjects without restating them."
             )
         else:
@@ -646,8 +651,9 @@ def user_message(shots, seconds=None, images=0, mode=None, piece=None, pool=None
             "These references belong to the whole piece, not to one shot. "
             "Writing one's handle in a shot's prose is what attaches it to that "
             "shot's generation; a shot that never writes it does not carry it. "
-            "Cite each one in every shot where its subject appears — and never "
-            "in the global description, which stands in front of all of them."
+            "A handle cited in the piece's global description applies to every "
+            "shot at once. Cite each one where its subject appears — per shot, "
+            "or globally when it runs through the whole piece."
         )
         lines.extend("  " + line for line in describe_slots(pool))
     lines.append("")

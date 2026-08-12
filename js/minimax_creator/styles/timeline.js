@@ -55,6 +55,12 @@ export const css = `
 }
 .mmc-tl-pool-add { display: inline-flex; gap: 5px; align-items: center; }
 .mmc-tl-pool-where { font-size: 11px; color: var(--mmc-dim); white-space: nowrap; }
+/* The handle is a button: clicking it writes the citation into the global
+   prompt. Reset to read exactly like the editor's handle span. */
+.mmc-tl-pool-cite {
+  background: none; border: 0; padding: 0; font: inherit; cursor: pointer;
+}
+.mmc-tl-pool-cite:hover { text-decoration: underline; }
 
 .mmc-tl-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .mmc-pill.on { border-color: rgba(255,255,255,.22); }

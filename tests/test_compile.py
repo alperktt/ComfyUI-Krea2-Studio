@@ -825,14 +825,35 @@ check("an uncited pool leaves every payload byte-identical",
       compiler.timeline_payloads({"segments": plain_segments}),
       compiler.timeline_payloads({"segments": plain_segments, "assets": [sheet]}))
 
-expect_error("the global prompt cannot cite the pool",
-             lambda: timeline([segment("x")], prompt="a piece around @ref-1",
-                              assets=[sheet]),
-             "global prompt cites @ref-1")
-expect_error("the global soundscape cannot either",
-             lambda: timeline([segment("x")], soundscape="hums like @ref-1",
-                              assets=[sheet]),
-             "overall_soundscape cites @ref-1")
+# A citation in the global prompt is a citation in every segment — the join
+# carries it in front of each one, so a sheet cited there rides everywhere
+# without a per-segment mention. The attach-once gesture.
+everywhere = timeline([segment("wide"), segment("close")],
+                      prompt="the piece follows @ref-1", assets=[sheet])
+check("a global citation reaches every segment",
+      [c.mode for c in everywhere], ["REF2VA", "REF2VA"])
+check("...carrying the file into each",
+      [[a.filename for a in c.ref_images] for c in everywhere],
+      [["sheet.png"], ["sheet.png"]])
+check("...with the label substituted in the join",
+      everywhere[0].body, "the piece follows <Picture 1>\nwide")
+
+check("the global soundscape's citation inherits the same way",
+      timeline([segment("x")], soundscape="hums like @ref-1",
+               assets=[sheet])[0].ref_images[0].filename,
+      "sheet.png")
+check("...but not into a segment that writes its own soundscape",
+      timeline([segment("x", soundscape="underwater")],
+               soundscape="hums like @ref-1", assets=[sheet])[0].ref_images,
+      [])
+
+expect_error("a global citation against a keyframe segment names both",
+             lambda: timeline([segment("open", assets=[
+                 {"handle": "img-1", "kind": "image", "role": "first_frame",
+                  "filename": "a.png"}])],
+                 prompt="the piece follows @ref-1", assets=[sheet]),
+             "the global prompt cites @ref-1")
+
 expect_error("a pool keyframe is refused",
              lambda: timeline([segment("x")], assets=[
                  {"handle": "ref-1", "kind": "image", "role": "first_frame",
@@ -1195,5 +1216,19 @@ check("a one-pass shot that cites nothing stays plain",
              assets=[{"handle": "ref-1", "kind": "image",
                       "role": "reference", "filename": "sheet.png"}]).mode,
       "T2VA")
+
+# A global citation in one pass: the global prompt opens shot 1's description
+# un-renamed, so the merged pool has to keep calling the asset @ref-1 — and the
+# one merged generation then carries it for the whole clip.
+pool_global = single([segment("she waits", duration_s=5),
+                      segment("her hands", duration_s=5)],
+                     prompt="the piece follows @ref-1.",
+                     assets=[{"handle": "ref-1", "kind": "image",
+                              "role": "reference", "filename": "sheet.png"}])
+check("a global citation reaches the one-pass request",
+      [a.filename for a in pool_global.ref_images], ["sheet.png"])
+check("...under its own pool handle, so the join's citation resolves",
+      pool_global.body.startswith("the piece follows <Picture 1>."), True)
+check("...as a reference generation", pool_global.mode, "REF2VA")
 
 print("all contract tests passed")

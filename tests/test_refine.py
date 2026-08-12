@@ -523,6 +523,18 @@ check("...and the citing rule beside it",
 check("no pool, no block",
       "ATTACHED TO THE PIECE" in refine.user_message([{"text": "x"}]), False)
 
+# With a pool beside the piece, the global rewrite may cite the pool — a
+# citation there applies the reference to every shot — and only the pool.
+piece_pool_msg = refine.user_message(
+    [{"text": "she waits", "seconds": 6}], seconds=6, mode="T2VA",
+    piece={"text": "The piece follows @ref-1.", "rewrite": True},
+    pool=[{"handle": "ref-1", "what": "a person reference (sheet.png)"}])
+check("with a pool, the piece may cite it",
+      "no @handle except the piece's own references" in piece_pool_msg, True)
+check("...and without one, the old rule stands",
+      "Write no @handle and no <Picture N> label" in refine.user_message(
+          [{"text": "x"}], piece={"text": "y", "rewrite": True}), True)
+
 
 if FAILURES:
     print(f"{len(FAILURES)} failure(s):")
