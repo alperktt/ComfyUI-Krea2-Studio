@@ -21,6 +21,7 @@
 
 import { el, mountOverlay } from "./dom.js";
 import { loadSettings, saveSettings } from "./api.js";
+import { t } from "./i18n.js";
 import { TOKENS, cleanPrefix, folderOf, stemOf, examplePath } from "./outputs.js";
 
 // libx264's own quality scale: lower is better and bigger, and six points is
@@ -67,17 +68,17 @@ class SettingsPage {
     this.tabs = TABS.map((tab) => el("button", {
       class: "mmc-tab",
       "aria-selected": tab.key === this.tab,
-      text: tab.label,
+      text: t(tab.label),
       onclick: () => this.show(tab.key),
     }));
     this.modal = el("div", { class: "mmc-modal mmc-settings" }, [
       el("div", { class: "mmc-modal-head" }, [
         ...this.tabs,
-        el("button", { class: "mmc-close", text: "✕", title: "Close", onclick: () => this.close() }),
+        el("button", { class: "mmc-close", text: "✕", title: t("Close"), onclick: () => this.close() }),
       ]),
       this.body,
       el("div", { class: "mmc-modal-foot" }, [
-        el("button", { class: "mmc-add", text: "Done", onclick: () => this.close() }),
+        el("button", { class: "mmc-add", text: t("Done"), onclick: () => this.close() }),
       ]),
     ]);
     this.modal.style.position = "relative";
@@ -96,7 +97,7 @@ class SettingsPage {
     try {
       this.settings = await loadSettings();
     } catch (error) {
-      this.problem = `Could not read the settings — ${error.message}`;
+      this.problem = t("Could not read the settings — {error}", { error: error.message });
     }
     this.render();
   }
@@ -117,7 +118,7 @@ class SettingsPage {
       this.settings = await saveSettings(patch);
     } catch (error) {
       this.settings = previous;
-      this.problem = `Not saved — ${error.message}`;
+      this.problem = t("Not saved — {error}", { error: error.message });
     }
     this.render();
   }
@@ -140,7 +141,7 @@ class SettingsPage {
 
   render() {
     if (!this.settings) {
-      this.body.replaceChildren(el("div", { class: "mmc-set-wait", text: this.problem ?? "Reading settings…" }));
+      this.body.replaceChildren(el("div", { class: "mmc-set-wait", text: this.problem ?? t("Reading settings…") }));
       return;
     }
     for (const [index, tab] of TABS.entries()) {
@@ -174,21 +175,21 @@ class SettingsPage {
         }, [
           el("span", { class: "mmc-radio" }),
           el("span", { class: "mmc-set-opt-text" }, [
-            el("span", { class: "mmc-set-opt-label", text: tier.label }),
-            el("span", { class: "mmc-set-opt-note", text: tier.note }),
+            el("span", { class: "mmc-set-opt-label", text: t(tier.label) }),
+            el("span", { class: "mmc-set-opt-note", text: t(tier.note) }),
           ]),
           // The real encoder value, on every row. The rest of this pack shows
           // the exact filename and the exact pixel size under the friendly
           // word; a quality control that said only "Fine" would be the one
           // place in it that asks you to take an adjective on trust.
-          el("span", { class: "mmc-set-value", text: `crf ${tier.crf}` }),
+          el("span", { class: "mmc-set-value", text: t("crf {crf}", { crf: tier.crf }) }),
         ]))),
         el("div", { class: "mmc-set-foot" }, [
           el("span", {
-            text: "MP4, H.264, 8-bit 4:2:0 — the file this pack has always written. "
+            text: t("MP4, H.264, 8-bit 4:2:0 — the file this pack has always written. "
                 + "CRF is libx264's quality target: lower is better and larger, and six "
                 + "points is roughly double the size. Needs ComfyUI 0.29 or newer; older "
-                + "builds can only write the default.",
+                + "builds can only write the default."),
           }),
         ]),
       ]);
@@ -221,10 +222,10 @@ class SettingsPage {
               "pre-stage stills", "png"),
           ]),
           el("div", { class: "mmc-set-foot" }, [
-            el("span", { text: "Relative to ComfyUI's output folder (" }),
+            el("span", { text: t("Relative to ComfyUI's output folder (") }),
             el("code", { text: "--output-directory" }),
-            el("span", { text: " moves that). The last part names the files, not a folder — "
-                             + "core's counter numbers them apart." }),
+            el("span", { text: t(" moves that). The last part names the files, not a folder — "
+                             + "core's counter numbers them apart.") }),
           ]),
         ]),
     ];
@@ -250,7 +251,7 @@ class SettingsPage {
       type: "text",
       value: stored,
       spellcheck: false,
-      "aria-label": `${title} — folder and filename prefix`,
+      "aria-label": t("{title} — folder and filename prefix", { title: t(title) }),
       onkeydown: (event) => {
         event.stopPropagation();
         if (event.key === "Enter") field.blur();
@@ -296,8 +297,8 @@ class SettingsPage {
 
     return el("div", { class: "mmc-set-dest" }, [
       el("div", { class: "mmc-set-dest-head" }, [
-        el("span", { class: "mmc-set-dest-name", text: title }),
-        el("span", { class: "mmc-set-dest-sub", text: description }),
+        el("span", { class: "mmc-set-dest-name", text: t(title) }),
+        el("span", { class: "mmc-set-dest-sub", text: t(description) }),
       ]),
       field,
       problem,
@@ -314,11 +315,11 @@ class SettingsPage {
       // out from under the second click. pointerdown is swallowed so the click
       // does not blur the field first.
       el("div", { class: "mmc-out-tokens" }, [
-        el("span", { class: "mmc-out-tokens-key", text: "insert" }),
+        el("span", { class: "mmc-out-tokens-key", text: t("insert") }),
         ...TOKENS.map((token) => el("button", {
         class: "mmc-out-token",
         text: token.replaceAll("%", ""),
-        title: `Inserts ${token} — filled in when the file is written`,
+        title: t("Inserts {token} — filled in when the file is written", { token }),
         onpointerdown: (event) => event.preventDefault(),
         onclick: () => {
           const at = field.selectionStart ?? field.value.length;
@@ -335,9 +336,9 @@ class SettingsPage {
    *  more of them arrive; grouping is what keeps this readable at ten. */
   section(group, title, description, controls) {
     return el("div", { class: "mmc-set-section" }, [
-      el("div", { class: "mmc-note-key", text: group }),
-      el("div", { class: "mmc-set-title", text: title }),
-      el("div", { class: "mmc-set-desc", text: description }),
+      el("div", { class: "mmc-note-key", text: t(group) }),
+      el("div", { class: "mmc-set-title", text: t(title) }),
+      el("div", { class: "mmc-set-desc", text: t(description) }),
       ...controls,
     ]);
   }

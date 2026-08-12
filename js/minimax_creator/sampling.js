@@ -10,6 +10,7 @@
 // through to them rather than holding state of their own.
 
 import { el, icon } from "./dom.js";
+import { t } from "./i18n.js";
 import { openChoicePopover, stepperPill } from "./pills.js";
 
 export const SEED_CONTROL = ["fixed", "increment", "decrement", "randomize"];
@@ -53,7 +54,7 @@ export function samplingBar({ widgets, value, set, perSegment = false, turbo = [
     pills.push(el("div", { class: "mmc-pill mmc-pill-group" }, [
       el("button", {
         class: "mmc-step mmc-seed-dice",
-        title: "Roll a new seed now",
+        title: t("Roll a new seed now"),
         onclick: () => set("seed", Math.floor(Math.random() * 0xffffffff)),
       }, [icon("dice", 15)]),
       el("input", {
@@ -61,8 +62,8 @@ export function samplingBar({ widgets, value, set, perSegment = false, turbo = [
         type: "text",
         value: String(value("seed", 0)),
         title: perSegment
-          ? "Segment k runs on seed + k, so consecutive shots are not the same noise twice."
-          : "The seed of the one generation.",
+          ? t("Segment k runs on seed + k, so consecutive shots are not the same noise twice.")
+          : t("The seed of the one generation."),
         onchange: (event) => {
           const parsed = Number(String(event.target.value).replace(/[^\d]/g, "")) || 0;
           set("seed", parsed);
@@ -71,10 +72,10 @@ export function samplingBar({ widgets, value, set, perSegment = false, turbo = [
       }),
       ...(widgets.control_after_generate ? [el("button", {
         class: "mmc-ghost mmc-seed-mode",
-        title: "What happens to the seed after each queue",
+        title: t("What happens to the seed after each queue"),
         text: control,
         onclick: (event) => openChoicePopover(event.currentTarget, {
-          title: "After generate",
+          title: t("After generate"),
           options: SEED_CONTROL,
           value: control,
           onPick: (picked) => set("control_after_generate", picked),
@@ -87,8 +88,8 @@ export function samplingBar({ widgets, value, set, perSegment = false, turbo = [
     pills.push(stepperPill({
       value: Number(value("steps", 20)), min: 1, max: 200, step: 1,
       iconName: "steps", width: "42px",
-      title: perSegment ? "Denoising steps, per segment" : "Denoising steps",
-      format: (n) => `${n} steps`,
+      title: perSegment ? t("Denoising steps, per segment") : t("Denoising steps"),
+      format: (n) => t("{n} steps", { n }),
       onChange: (next) => set("steps", next),
     }));
   }
@@ -96,9 +97,9 @@ export function samplingBar({ widgets, value, set, perSegment = false, turbo = [
   if (widgets.cfg) {
     pills.push(stepperPill({
       value: Number(value("cfg", 1)), min: 0, max: 30, step: 0.5, width: "52px",
-      title: "Classifier-free guidance. The distilled H3 checkpoints want 1.0, "
-           + "and at 1.0 the negative is skipped entirely.",
-      format: (n) => `cfg ${n.toFixed(1)}`,
+      title: t("Classifier-free guidance. The distilled H3 checkpoints want 1.0, "
+           + "and at 1.0 the negative is skipped entirely."),
+      format: (n) => t("cfg {n}", { n: n.toFixed(1) }),
       onChange: (next) => set("cfg", next),
     }));
   }
@@ -109,9 +110,9 @@ export function samplingBar({ widgets, value, set, perSegment = false, turbo = [
     const options = widget.options?.values || [];
     pills.push(el("button", {
       class: "mmc-pill",
-      title: label,
+      title: t(label),
       onclick: (event) => openChoicePopover(event.currentTarget, {
-        title: label,
+        title: t(label),
         options: typeof options === "function" ? options(widget) : options,
         value: widget.value,
         onPick: (picked) => set(name, picked),
@@ -130,14 +131,14 @@ export function samplingBar({ widgets, value, set, perSegment = false, turbo = [
     const current = String(value("block_cache", "off"));
     pills.push(el("button", {
       class: `mmc-pill${current === "off" ? "" : " accel-on"}`,
-      title: BLOCK_CACHE_TITLE[current] || "FirstBlockCache",
+      title: BLOCK_CACHE_TITLE[current] ? t(BLOCK_CACHE_TITLE[current]) : t("FirstBlockCache"),
       onclick: (event) => openChoicePopover(event.currentTarget, {
-        title: "Block cache",
+        title: t("Block cache"),
         options: typeof options === "function" ? options(widgets.block_cache) : options,
         value: current,
         onPick: (picked) => set("block_cache", picked),
       }),
-    }, [el("span", { text: current === "off" ? "cache off" : `cache ${current}` })]));
+    }, [el("span", { text: current === "off" ? t("cache off") : t("cache {preset}", { preset: current }) })]));
   }
 
   if (widgets.spectrum) {
@@ -145,18 +146,18 @@ export function samplingBar({ widgets, value, set, perSegment = false, turbo = [
     pills.push(el("button", {
       class: `mmc-pill${on ? " accel-on" : ""}`,
       title: on
-        ? "Spectrum on — forecasting features across steps."
-        : "Spectrum off. Needs ComfyUI-Spectrum-MiniMax-H3 when switched on.",
+        ? t("Spectrum on — forecasting features across steps.")
+        : t("Spectrum off. Needs ComfyUI-Spectrum-MiniMax-H3 when switched on."),
       onclick: () => set("spectrum", !on),
-    }, [el("span", { text: on ? "spectrum" : "spectrum off" })]));
+    }, [el("span", { text: on ? t("spectrum") : t("spectrum off") })]));
 
     // Only worth a control when it is doing something; the blend is ignored
     // outright while Spectrum is off.
     if (on && widgets.spectrum_blend) {
       pills.push(stepperPill({
         value: Number(value("spectrum_blend", 0.5)), min: 0, max: 1, step: 0.05, width: "52px",
-        title: "Spectrum's video spectral share — higher is faster and further from a native render",
-        format: (n) => `blend ${n.toFixed(2)}`,
+        title: t("Spectrum's video spectral share — higher is faster and further from a native render"),
+        format: (n) => t("blend {n}", { n: n.toFixed(2) }),
         onChange: (next) => set("spectrum_blend", next),
       }));
     }

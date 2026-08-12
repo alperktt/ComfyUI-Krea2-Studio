@@ -12,6 +12,7 @@
 // commits *while the user is typing in it*.
 
 import { el, icon, ICONS, svg } from "./dom.js";
+import { t } from "./i18n.js";
 import { openPicker } from "./picker.js";
 import { openLoras } from "./loras.js";
 import { openSettings } from "./settings.js";
@@ -257,7 +258,7 @@ export class CreatorEditor {
     try {
       const result = await refine(this.refineTarget());
       const shot = result.shots?.[0];
-      if (!shot?.body) throw new Error("the refiner returned nothing for this prompt");
+      if (!shot?.body) throw new Error(t("the refiner returned nothing for this prompt"));
       this.refinePanel.apply(result, shot);
       this.onRefined?.(result);
       this.commit();
@@ -276,7 +277,8 @@ export class CreatorEditor {
     if (blocked) { this.flash(blocked); return null; }
     const { used, max, filesLeft } = S.capacity(this.state, row.kind);
     if (used >= max || filesLeft <= 0) {
-      this.flash(`No ${row.kind} slots left (${used}/${max} used, ${filesLeft} files free of ${S.MAX_REF_FILES}).`);
+      this.flash(t("No {kind} slots left ({used}/{max} used, {filesLeft} files free of {maxFiles}).",
+        { kind: t(row.kind), used, max, filesLeft, maxFiles: S.MAX_REF_FILES }));
       return null;
     }
     const handle = S.nextHandle(this.state, row.kind);
@@ -303,7 +305,8 @@ export class CreatorEditor {
     if (blocked) return this.flash(blocked);
     const { used, max, filesLeft } = S.capacity(this.state, kind);
     if (used >= max || filesLeft <= 0) {
-      return this.flash(`No ${kind} slots left (${used}/${max} used, ${filesLeft} files free of ${S.MAX_REF_FILES}).`);
+      return this.flash(t("No {kind} slots left ({used}/{max} used, {filesLeft} files free of {maxFiles}).",
+        { kind: t(kind), used, max, filesLeft, maxFiles: S.MAX_REF_FILES }));
     }
     const chosen = await openPicker({
       kinds: ["image", "video", "audio", "renders"],
@@ -386,7 +389,11 @@ export class CreatorEditor {
     const problem = S.overflow(this.state);
     if (problem) {
       asset.track = previous;
-      this.flash(`@${asset.handle} stays ${TRACK_CHIP[previous]?.text || previous} — ${problem}`);
+      this.flash(t("@{handle} stays {track} — {problem}", {
+        handle: asset.handle,
+        track: t(TRACK_CHIP[previous]?.text || previous),
+        problem,
+      }));
       return false;
     }
     if (!defer) this.commit();
@@ -531,9 +538,9 @@ export class CreatorEditor {
       el("button", {
         class: "mmc-tool",
         disabled: disabled || undefined,
-        title: disabled ? S.blockedReason(this.state, "reference") : `Attach a reference ${kind}`,
+        title: disabled ? S.blockedReason(this.state, "reference") : t("Attach a reference {kind}", { kind: t(kind) }),
         onclick: () => this.addReferences(kind),
-      }, [el("span", { class: "mmc-tool-icon" }, [icon(iconName)]), el("span", { text: label })]);
+      }, [el("span", { class: "mmc-tool-icon" }, [icon(iconName)]), el("span", { text: t(label) })]);
 
     // Two clusters, split by the whole width of the node: everything on the
     // left acts on this generation, and the pair on the right belongs to the
@@ -549,9 +556,9 @@ export class CreatorEditor {
         // reference slots, so they are the one thing frames and references share.
         el("button", {
           class: "mmc-tool",
-          title: "Manage the LoRAs patched onto the routed checkpoint",
+          title: t("Manage the LoRAs patched onto the routed checkpoint"),
           onclick: () => this.manageLoras(),
-        }, [el("span", { class: "mmc-tool-icon" }, [icon("effect")]), el("span", { text: "Add LoRA" })]),
+        }, [el("span", { class: "mmc-tool-icon" }, [icon("effect")]), el("span", { text: t("Add LoRA") })]),
         // With the adds because they are one: the PreStage's frame grab puts an
         // init image on this generation, whatever tool the host lends the rail.
         ...(this.extraTools?.() ?? []),
@@ -568,15 +575,15 @@ export class CreatorEditor {
         // there is not something you should have to queue a render to reach.
         el("button", {
           class: "mmc-tool",
-          title: "Browse, organize and attach finished renders and pre-stage stills",
+          title: t("Browse, organize and attach finished renders and pre-stage stills"),
           onclick: () => this.openGallery(),
-        }, [el("span", { class: "mmc-tool-icon" }, [icon("gallery")]), el("span", { text: "Gallery" })]),
+        }, [el("span", { class: "mmc-tool-icon" }, [icon("gallery")]), el("span", { text: t("Gallery") })]),
         // Absent where it would be a control over nothing — see `settingsTool`.
         ...(this.settingsTool ? [el("button", {
           class: "mmc-tool",
-          title: "Preferences for this ComfyUI — output quality. Not saved into the workflow.",
+          title: t("Preferences for this ComfyUI — output quality. Not saved into the workflow."),
           onclick: () => openSettings(),
-        }, [el("span", { class: "mmc-tool-icon" }, [icon("gear")]), el("span", { text: "Settings" })])] : []),
+        }, [el("span", { class: "mmc-tool-icon" }, [icon("gear")]), el("span", { text: t("Settings") })])] : []),
       ]),
     ]);
   }
@@ -594,7 +601,11 @@ export class CreatorEditor {
       return el("div", {
         class: `mmc-asset${idle ? " idle" : ""}`,
         title: idle
-          ? `${entry.name} — set to ${modes.map((m) => S.CHECKPOINT_LABEL[m]).join(" + ")}, but this graph routes to ${S.CHECKPOINT_LABEL[target]}.`
+          ? t("{name} — set to {modes}, but this graph routes to {target}.", {
+              name: entry.name,
+              modes: modes.map((m) => S.CHECKPOINT_LABEL[m]).join(" + "),
+              target: S.CHECKPOINT_LABEL[target],
+            })
           : entry.name,
       }, [
         el("span", { class: "mmc-asset-thumb" }, [svg(ICONS.effect, 15)]),
@@ -602,12 +613,12 @@ export class CreatorEditor {
         el("button", {
           class: "mmc-ghost",
           style: { fontSize: "11px" },
-          title: "Strength, and which checkpoint this LoRA belongs to",
-          text: `${Number(entry.strength ?? 1).toFixed(2)} · ${S.claimsBoth(entry) ? "both" : S.CHECKPOINT_LABEL[modes[0]]}`,
+          title: t("Strength, and which checkpoint this LoRA belongs to"),
+          text: `${Number(entry.strength ?? 1).toFixed(2)} · ${S.claimsBoth(entry) ? t("both") : S.CHECKPOINT_LABEL[modes[0]]}`,
           onclick: () => this.manageLoras(),
         }),
         el("button", {
-          class: "mmc-asset-x", text: "✕", title: `Remove ${entry.name}`,
+          class: "mmc-asset-x", text: "✕", title: t("Remove {name}", { name: entry.name }),
           onclick: () => { S.removeLora(this.state, entry.name); this.commit(); },
         }),
       ]);
@@ -621,9 +632,9 @@ export class CreatorEditor {
     if (triggers.length) {
       parts.push(el("div", {
         class: "mmc-note",
-        title: "Prefixed to the prompt when this queues. Edit the list on the LoRA cards.",
+        title: t("Prefixed to the prompt when this queues. Edit the list on the LoRA cards."),
       }, [
-        el("span", { class: "mmc-note-key", text: "triggers" }),
+        el("span", { class: "mmc-note-key", text: t("triggers") }),
         el("span", { text: triggers.join(", ") }),
       ]));
     }
@@ -639,13 +650,13 @@ export class CreatorEditor {
       const parts = [thumb, el("span", { class: "mmc-asset-handle", text: `@${asset.handle}` })];
 
       if (asset.role !== "reference") {
-        parts.push(el("span", { class: "mmc-asset-role", text: asset.role === "first_frame" ? "start" : "end" }));
+        parts.push(el("span", { class: "mmc-asset-role", text: asset.role === "first_frame" ? t("start") : t("end") }));
       }
       if (asset.kind !== "image") {
         parts.push(el("button", {
           class: "mmc-ghost",
           style: { fontSize: "11px" },
-          title: "Use the whole clip, or only a segment of it",
+          title: t("Use the whole clip, or only a segment of it"),
           text: trimLabel(asset),
           onclick: () => this.editSegment(asset),
         }));
@@ -655,11 +666,11 @@ export class CreatorEditor {
         parts.push(el("button", {
           class: "mmc-ghost",
           style: { fontSize: "11px" },
-          title: "On by default: this clip's soundtrack is bound as a reference audio, taking an "
+          title: t("On by default: this clip's soundtrack is bound as a reference audio, taking an "
                + "<Audio> slot before the video's own label, and needing the audio VAE connected. "
                + "Off references the picture silently. Pick 'sound only' in the segment editor to "
-               + "reference the soundtrack without the picture.",
-          text: chip.text,
+               + "reference the soundtrack without the picture."),
+          text: t(chip.text),
           onclick: () => this.setTrack(asset, chip.next),
         }));
       }
@@ -668,12 +679,12 @@ export class CreatorEditor {
         parts.push(el("button", {
           class: "mmc-ghost",
           style: { fontSize: "11px" },
-          title: "What of this picture is the reference. full: the whole image. "
+          title: t("What of this picture is the reference. full: the whole image. "
                + "person / object / scene / style: only that — a person reference "
                + "keeps the likeness and drops the picture's background, palette, "
                + "pose and action. Read by Refine, and worth saying in the prompt "
-               + "too if you skip refining.",
-          text: take,
+               + "too if you skip refining."),
+          text: t(take),
           onclick: () => {
             asset.takes = S.TAKES[(S.TAKES.indexOf(take) + 1) % S.TAKES.length];
             this.commit();
@@ -686,18 +697,18 @@ export class CreatorEditor {
           class: "mmc-ghost",
           style: { fontSize: "11px" },
           title: asset.kind === "video"
-            ? "match: scale to the generation's pixel area. max: core's 768 reference canvas — "
+            ? t("match: scale to the generation's pixel area. max: core's 768 reference canvas — "
               + "more detail, and much the slower of the two. A video's reference tokens are its "
               + "whole grid once per latent frame, so at full length one clip is about as long as "
-              + "the target video itself, and all of it rides through every sampling step."
-            : "match: scale to the generation's pixel area. max: 2048 short edge — better identity, "
-              + "several times slower, because reference tokens ride through every sampling step.",
-          text: size,
+              + "the target video itself, and all of it rides through every sampling step.")
+            : t("match: scale to the generation's pixel area. max: 2048 short edge — better identity, "
+              + "several times slower, because reference tokens ride through every sampling step."),
+          text: t(size),
           onclick: () => { asset.ref_size = size === "max" ? "match" : "max"; this.commit(); },
         }));
       }
       parts.push(el("button", {
-        class: "mmc-asset-x", text: "✕", title: `Remove @${asset.handle}`,
+        class: "mmc-asset-x", text: "✕", title: t("Remove @{handle}", { handle: asset.handle }),
         onclick: () => this.remove(asset.handle),
       }));
       return el("div", {
@@ -714,7 +725,7 @@ export class CreatorEditor {
     const refs = S.hasReferences(state);
     const frameLabel = (role, fallback) => {
       const asset = S.frameAsset(state, role);
-      return asset ? `@${asset.handle}` : fallback;
+      return asset ? `@${asset.handle}` : t(fallback);
     };
 
     const framePill = (role, label, iconName) => {
@@ -722,13 +733,13 @@ export class CreatorEditor {
       return el("button", {
         class: "mmc-pill",
         disabled: blocked ? true : undefined,
-        title: blocked || `Choose the ${label.toLowerCase()}`,
+        title: blocked || t("Choose the {label}", { label: t(label).toLowerCase() }),
         onclick: blocked ? undefined : () => this.setFrame(role),
       }, [
         icon(iconName, 16),
         el("span", {
           text: role === "first_frame" && S.continues(state)
-            ? "from last frame" : frameLabel(role, label),
+            ? t("from last frame") : frameLabel(role, label),
         }),
       ]);
     };
@@ -740,10 +751,10 @@ export class CreatorEditor {
     const trained = isTrainedLength(geometry.frames);
     const duration = el("div", {
       class: `mmc-pill mmc-pill-group${trained ? "" : " off-distribution"}`,
-      title: `${geometry.frames} frames · ${geometry.seconds.toFixed(2)} s at 24 fps`
-           + (trained ? "" : "\nOutside the ~5–15 s the open weights were trained on. It will "
+      title: t("{frames} frames · {seconds} s at 24 fps", { frames: geometry.frames, seconds: geometry.seconds.toFixed(2) })
+           + (trained ? "" : "\n" + t("Outside the ~5–15 s the open weights were trained on. It will "
                            + "generate, but coherence and motion are on their own past here — "
-                           + "and cost rises with the square of the length."),
+                           + "and cost rises with the square of the length.")),
     }, [
       el("button", {
         class: "mmc-step", text: "−", disabled: state.duration_s <= MIN_SECONDS || undefined,
@@ -754,7 +765,7 @@ export class CreatorEditor {
         },
       }),
       icon("clock", 16),
-      el("span", { text: `${state.duration_s} s`, style: { minWidth: "38px", textAlign: "center" } }),
+      el("span", { text: t("{seconds} s", { seconds: state.duration_s }), style: { minWidth: "38px", textAlign: "center" } }),
       el("button", {
         class: "mmc-step", text: "+", disabled: state.duration_s >= MAX_SECONDS || undefined,
         onclick: () => {
@@ -768,15 +779,15 @@ export class CreatorEditor {
       class: "mmc-pill",
       disabled: geometry.fromImage || undefined,
       title: geometry.fromImage
-        ? "The aspect ratio comes from the keyframe in the image modes — the resolution slider still sets the scale."
-        : "Aspect Ratio",
+        ? t("The aspect ratio comes from the keyframe in the image modes — the resolution slider still sets the scale.")
+        : t("Aspect Ratio"),
       onclick: (event) => this.openAspect(event.currentTarget),
     }, geometry.fromImage
       // The ratio the keyframe brought with it, which is the one case where the
       // pill is showing a shape no entry in the list would have drawn.
       ? [aspectGlyph(geometry.ratio, PILL_GLYPH),
          el("span", { text: describeRatio(geometry.ratio) }),
-         el("span", { class: "mmc-pill-sub", text: "from image" })]
+         el("span", { class: "mmc-pill-sub", text: t("from image") })]
       : [aspectGlyph(geometry.ratio, PILL_GLYPH), el("span", { text: state.aspect })]);
 
     // With two passes on, the sub says so in one glance: sampled at the
@@ -785,9 +796,9 @@ export class CreatorEditor {
     const resPill = el("button", {
       class: "mmc-pill",
       title: refined
-        ? `Sampled at a ${S.sampleEdge(state)} px short edge, refined up to `
-          + `${geometry.width} × ${geometry.height} by a second pass.`
-        : "Short edge. Lower is faster; 768 is what the open weights were trained at.",
+        ? t("Sampled at a {edge} px short edge, refined up to {width} × {height} by a second pass.",
+            { edge: S.sampleEdge(state), width: geometry.width, height: geometry.height })
+        : t("Short edge. Lower is faster; 768 is what the open weights were trained at."),
       onclick: (event) => this.openResolution(event.currentTarget),
     }, [
       icon("res", 16),
@@ -822,12 +833,12 @@ export class CreatorEditor {
     return el("button", {
       class: `mmc-pill mmc-prestage-toggle${on ? " on" : ""}`,
       title: on
-        ? "The pre-stage node on the left generates stills for this render — start and end "
-          + "frames, references, style sheets. Click to remove it."
-        : "Add a pre-stage: an image node (Krea 2 / Ideogram 4) at this node's left edge whose "
-          + "stills land here as start/end frames or references with one click.",
+        ? t("The pre-stage node on the left generates stills for this render — start and end "
+          + "frames, references, style sheets. Click to remove it.")
+        : t("Add a pre-stage: an image node (Krea 2 / Ideogram 4) at this node's left edge whose "
+          + "stills land here as start/end frames or references with one click."),
       onclick: () => { this.preStage.toggle(); this.render(); },
-    }, [icon("image", 16), el("span", { text: "pre-stage" })]);
+    }, [icon("image", 16), el("span", { text: t("pre-stage") })]);
   }
 
   /**
@@ -842,7 +853,8 @@ export class CreatorEditor {
       if (blocked) return blocked;
       const { used, max, filesLeft } = S.capacity(this.state, "image");
       if (used >= max || filesLeft <= 0) {
-        return `No image slots left (${used}/${max} used, ${filesLeft} files free of ${S.MAX_REF_FILES}).`;
+        return t("No {kind} slots left ({used}/{max} used, {filesLeft} files free of {maxFiles}).",
+          { kind: t("image"), used, max, filesLeft, maxFiles: S.MAX_REF_FILES });
       }
       this.state.assets.push({
         handle: S.nextHandle(this.state, "image"),
@@ -878,13 +890,13 @@ export class CreatorEditor {
       class: `mmc-pill mmc-continue${on ? " on" : ""}`,
       disabled: blocked ? true : undefined,
       title: blocked || (on
-        ? "Starts from the previous segment's last frame. Click for a hard cut instead."
-        : "Hard cut from the previous segment. Click to start from its last frame."),
+        ? t("Starts from the previous segment's last frame. Click for a hard cut instead.")
+        : t("Hard cut from the previous segment. Click to start from its last frame.")),
       onclick: blocked ? undefined : () => {
         this.state.continue = !on;
         this.commit();
       },
-    }, [icon("frameIn", 16), el("span", { text: on ? "continues" : "hard cut" })]);
+    }, [icon("frameIn", 16), el("span", { text: on ? t("continues") : t("hard cut") })]);
   }
 
   /**
@@ -913,21 +925,21 @@ export class CreatorEditor {
     const badge = el(canCycle ? "button" : "span", {
       class: `mmc-mode${forced || pinned ? " pinned" : ""}${impossible ? " bad" : ""}`,
       title: impossible
-        ? "This generation has references, which are encoded for Ref2VA and cannot be "
-          + "read by FL2VA. It will be refused — change the route to auto or Ref2VA."
+        ? t("This generation has references, which are encoded for Ref2VA and cannot be "
+          + "read by FL2VA. It will be refused — change the route to auto or Ref2VA.")
         : forced
-          ? `Every generation on this node runs on ${S.CHECKPOINT_LABEL[route]}, whatever `
-            + "the mode derives. Click to change it."
+          ? t("Every generation on this node runs on {label}, whatever the mode derives. Click to change it.",
+              { label: S.CHECKPOINT_LABEL[route] })
           : canCycle
-            ? "Following the mode. Click to run everything on one checkpoint instead — "
-              + "Ref2VA takes the text-only and keyframe payloads too."
-            : "Following the timeline's route.",
+            ? t("Following the mode. Click to run everything on one checkpoint instead — "
+              + "Ref2VA takes the text-only and keyframe payloads too.")
+            : t("Following the timeline's route."),
       onclick: canCycle ? () => this.setRoute(S.nextRoute(route)) : undefined,
     });
     badge.appendChild(el("b", { text: currentMode }));
     badge.appendChild(document.createTextNode(` → ${S.CHECKPOINT_LABEL[routed]}`));
-    if (forced) badge.appendChild(el("span", { class: "mmc-pin", text: "always" }));
-    else if (pinned) badge.appendChild(el("span", { class: "mmc-pin", text: "pinned" }));
+    if (forced) badge.appendChild(el("span", { class: "mmc-pin", text: t("always") }));
+    else if (pinned) badge.appendChild(el("span", { class: "mmc-pin", text: t("pinned") }));
     return badge;
   }
 
@@ -940,7 +952,9 @@ export class CreatorEditor {
     if (!missing.length) return null;
     return [el("div", {
       class: "mmc-warn",
-      text: `${missing.map((h) => "@" + h).join(", ")} ${missing.length > 1 ? "are" : "is"} in the prompt but not attached.`,
+      text: missing.length > 1
+        ? t("{handles} are in the prompt but not attached.", { handles: missing.map((h) => "@" + h).join(", ") })
+        : t("{handles} is in the prompt but not attached.", { handles: missing.map((h) => "@" + h).join(", ") }),
     })];
   }
 

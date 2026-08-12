@@ -340,6 +340,26 @@ Two things worth knowing:
   check is what stops a crafted filename reaching the rest of your disk — so it is
   not something this pack works around. Use `--input-directory` instead.
 
+## Language
+
+The UI speaks English, 日本語, 한국어 and 简体中文. There is no language picker in
+the pack: it follows ComfyUI's own — **Settings → Comfy → Locale** — so the nodes
+and the app around them always agree. Traditional Chinese falls back to
+Simplified until someone contributes it.
+
+Every string the UI shows goes through one gate (`js/minimax_creator/i18n.js`),
+keyed by the English sentence itself. A key with no translation shows the
+English, so a half-finished dictionary degrades to the UI this pack always had
+rather than to bare token names. The dictionaries live in
+`js/minimax_creator/locales/` as plain English → translation pairs a native
+speaker can review without the source open — corrections are one-line edits, and
+pull requests for them (or for new languages) are welcome. Node names and
+descriptions in ComfyUI's own library and search are translated separately, in
+`locales/<lang>/nodeDefs.json` at the pack root, which core merges by itself.
+
+The translations are machine-drafted against a fixed glossary. The short labels
+are safe; the long tooltips would profit from a native speaker's pass.
+
 ## Thanks
 
 This pack is glue. The work underneath it belongs to other people:

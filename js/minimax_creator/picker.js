@@ -5,6 +5,7 @@ import { el, ICONS, svg, icon, mountOverlay, dismissable } from "./dom.js";
 import { listAssets, listingTruncated, viewUrl, thumbUrl, upload, moveAsset,
          deleteAsset, loadPickerPrefs, savePickerPrefs } from "./api.js";
 import { openTrim, trimLabel } from "./trim.js";
+import { t } from "./i18n.js";
 
 // "renders" is a tab, not a kind: it browses the output folder instead of a
 // slice of the input one, and the files under it keep their own kinds — a
@@ -82,7 +83,7 @@ class Picker {
     this.search = el("input", {
       class: "mmc-search",
       type: "search",
-      placeholder: "Search...",
+      placeholder: t("Search..."),
       oninput: (event) => {
         this.query = event.target.value.toLowerCase();
         this.page = 0;
@@ -96,13 +97,13 @@ class Picker {
     // Same static head the timeline modal has. selectTab still walks this
     // list, and setAttribute works the same on a span.
     this.tabs = this.options.kinds.length === 1
-      ? [el("span", { class: "mmc-tab", "aria-selected": "true", text: KIND_LABEL[this.kind] })]
+      ? [el("span", { class: "mmc-tab", "aria-selected": "true", text: t(KIND_LABEL[this.kind]) })]
       : this.options.kinds.map((kind) =>
           el("button", {
             class: "mmc-tab",
             "aria-selected": kind === this.kind,
             onclick: () => this.selectTab(kind),
-            text: KIND_LABEL[kind],
+            text: t(KIND_LABEL[kind]),
           }));
 
     this.slots = el("span", { class: "mmc-slots" });
@@ -123,10 +124,10 @@ class Picker {
         el("button", {
           class: "mmc-organize",
           "aria-pressed": false,
-          title: "Select files to move between folders or delete",
+          title: t("Select files to move between folders or delete"),
           onclick: () => this.setOrganize(!this.organize),
-        }, [icon("folder", 14), el("span", { text: "Organize" })]),
-        el("button", { class: "mmc-upload", text: `+  Upload ${KIND_LABEL[this.kind].toLowerCase()}`, onclick: () => this.pickFile() }),
+        }, [icon("folder", 14), el("span", { text: t("Organize") })]),
+        el("button", { class: "mmc-upload", text: t("+  Upload {kind}", { kind: t(KIND_LABEL[this.kind].toLowerCase()) }), onclick: () => this.pickFile() }),
       ]),
       this.shelfRow,
       this.grid,
@@ -176,11 +177,11 @@ class Picker {
     this.kind = kind;
     // Selections do not survive a tab change: they go into different slots.
     this.selected = [];
-    for (const tab of this.tabs) tab.setAttribute("aria-selected", String(tab.textContent === KIND_LABEL[kind]));
+    for (const tab of this.tabs) tab.setAttribute("aria-selected", String(tab.textContent === t(KIND_LABEL[kind])));
     // Nothing uploads into the output folder: renders arrive by being rendered.
     // Organizing them is another matter — see the note at the top of the file.
     this.uploadButton.style.display = kind === "renders" ? "none" : "";
-    if (kind !== "renders") this.uploadButton.textContent = `+  Upload ${KIND_LABEL[kind].toLowerCase()}`;
+    if (kind !== "renders") this.uploadButton.textContent = t("+  Upload {kind}", { kind: t(KIND_LABEL[kind].toLowerCase()) });
     // Shelves are shared between the input tabs — a folder is a place, not a
     // kind — but the output folder is a different place, so crossing that line
     // drops back to "all" rather than selecting a shelf that is not there.
@@ -288,7 +289,7 @@ class Picker {
     };
 
     this.shelfRow.replaceChildren(
-      chip({ key: "all", label: "All", n: count(() => true), droppable: true }),
+      chip({ key: "all", label: t("All"), n: count(() => true), droppable: true }),
       chip({ key: "fav", label: "", iconName: "star", n: count((a) => this.isFav(a.path)) }),
       ...this.folders().map((folder) => chip({
         key: folder, label: folder, iconName: "folder",
@@ -302,16 +303,16 @@ class Picker {
    *  remembered name until a file lands on it — the directory itself is
    *  created by the first upload or move. */
   newShelfChip() {
-    const add = el("button", { class: "mmc-shelf mmc-shelf-new", text: "+", title: "New shelf" });
+    const add = el("button", { class: "mmc-shelf mmc-shelf-new", text: "+", title: t("New shelf") });
     add.addEventListener("click", () => {
       const field = el("input", {
-        class: "mmc-shelf-input", type: "text", placeholder: "shelf name",
+        class: "mmc-shelf-input", type: "text", placeholder: t("shelf name"),
         onkeydown: (event) => {
           event.stopPropagation();
           if (event.key === "Escape") this.renderShelves();
           if (event.key !== "Enter") return;
           const name = field.value.trim().replace(/^\/+|\/+$/g, "");
-          if (!name || /(^|\/)\.|\\/.test(name)) { this.warn("Shelf names cannot start with a dot."); return; }
+          if (!name || /(^|\/)\.|\\/.test(name)) { this.warn(t("Shelf names cannot start with a dot.")); return; }
           const key = this.folderKey();
           if (!this.prefs[key].includes(name)) {
             this.prefs = { ...this.prefs, [key]: [...this.prefs[key], name] };
@@ -361,7 +362,7 @@ class Picker {
           if (chosen.path === asset.path) { chosen.path = path; chosen.subfolder = target; }
         }
       } catch (error) {
-        failures.push(`${asset.name}: ${error.message}`);
+        failures.push(t("{name}: {error}", { name: asset.name, error: error.message }));
       }
     }
     savePickerPrefs(this.prefs);
@@ -369,7 +370,7 @@ class Picker {
     this.renderFoot();
     if (failures.length) {
       this.warn(failures.length === 1 ? failures[0]
-        : `${failures.length} files stayed put — ${failures[0]}`);
+        : t("{count} files stayed put — {first}", { count: failures.length, first: failures[0] }));
     }
   }
 
@@ -403,20 +404,20 @@ class Picker {
     const go = (target) => { close(); this.moveMany(this.markedAssets(), target); };
     menu.appendChild(el("button", { class: "mmc-move-opt", onclick: () => go("") },
       [icon("image", 13), el("span", {
-        text: this.kind === "renders" ? "Output folder (root)" : "Input folder (root)" })]));
+        text: this.kind === "renders" ? t("Output folder (root)") : t("Input folder (root)") })]));
     for (const folder of this.folders()) {
       menu.appendChild(el("button", { class: "mmc-move-opt", onclick: () => go(folder) },
         [icon("folder", 13), el("span", { text: folder })]));
     }
     // The same rules as newShelfChip: a name that needs rewriting is refused.
     const field = el("input", {
-      class: "mmc-shelf-input", type: "text", placeholder: "New folder…",
+      class: "mmc-shelf-input", type: "text", placeholder: t("New folder…"),
       onkeydown: (event) => {
         event.stopPropagation();
         if (event.key === "Escape") { close(); return; }
         if (event.key !== "Enter") return;
         const name = field.value.trim().replace(/^\/+|\/+$/g, "");
-        if (!name || /(^|\/)\.|\\/.test(name)) { this.warn("Folder names cannot start with a dot."); return; }
+        if (!name || /(^|\/)\.|\\/.test(name)) { this.warn(t("Folder names cannot start with a dot.")); return; }
         go(name);
       },
     });
@@ -431,7 +432,7 @@ class Picker {
     if (!this.deleteButton || !this.marked.length) return;
     if (!this.deleteArmed) {
       this.deleteArmed = true;
-      this.deleteButton.textContent = `Really delete ${this.marked.length}?`;
+      this.deleteButton.textContent = t("Really delete {count}?", { count: this.marked.length });
       this.deleteButton.classList.add("armed");
       this.armTimer = setTimeout(() => this.renderFoot(), 5000);
       return;
@@ -441,7 +442,7 @@ class Picker {
 
   async deleteMarked() {
     this.deleteButton.disabled = true;
-    this.deleteButton.textContent = "Deleting…";
+    this.deleteButton.textContent = t("Deleting…");
     const failures = [];
     for (const asset of this.markedAssets()) {
       try {
@@ -451,7 +452,7 @@ class Picker {
         this.selected = this.selected.filter((chosen) => chosen.path !== asset.path);
         this.marked = this.marked.filter((p) => p !== asset.path);
       } catch (error) {
-        failures.push(`${asset.name}: ${error.message}`);
+        failures.push(t("{name}: {error}", { name: asset.name, error: error.message }));
       }
     }
     savePickerPrefs(this.prefs);
@@ -459,7 +460,7 @@ class Picker {
     this.renderFoot();
     if (failures.length) {
       this.warn(failures.length === 1 ? failures[0]
-        : `${failures.length} files not deleted — ${failures[0]}`);
+        : t("{count} files not deleted — {first}", { count: failures.length, first: failures[0] }));
     }
   }
 
@@ -511,11 +512,11 @@ class Picker {
     this.pages = 1;
     this.renderPager();
     if (!this.loaded) {
-      this.grid.appendChild(el("div", { class: "mmc-empty", text: "Loading…" }));
+      this.grid.appendChild(el("div", { class: "mmc-empty", text: t("Loading…") }));
       return;
     }
     if (this.loadError) {
-      this.grid.appendChild(el("div", { class: "mmc-empty", text: `Could not read the input folder: ${this.loadError}` }));
+      this.grid.appendChild(el("div", { class: "mmc-empty", text: t("Could not read the input folder: {error}", { error: this.loadError }) }));
       return;
     }
     const rows = this.visible();
@@ -523,16 +524,18 @@ class Picker {
       this.grid.appendChild(el("div", {
         class: "mmc-empty",
         text: this.query
-          ? `No ${this.kind === "renders" ? "renders" : `${this.kind} files`} matching “${this.query}”.`
+          ? (this.kind === "renders"
+              ? t("No renders matching “{query}”.", { query: this.query })
+              : t("No {kind} files matching “{query}”.", { kind: t(this.kind), query: this.query }))
           : this.shelf === "fav"
-            ? "No favorites yet — hover a file and hit the star."
+            ? t("No favorites yet — hover a file and hit the star.")
             : this.shelf !== "all"
               ? this.kind === "renders"
-                ? "Nothing on this shelf yet — drag renders here, or point a node's output folder at it."
-                : "Nothing on this shelf yet — drag files here, or upload while it is open."
+                ? t("Nothing on this shelf yet — drag renders here, or point a node's output folder at it.")
+                : t("Nothing on this shelf yet — drag files here, or upload while it is open.")
               : this.kind === "renders"
-                ? "Nothing in the output folder yet — queue a render."
-                : `No ${this.kind} files in the input folder yet — upload one.`,
+                ? t("Nothing in the output folder yet — queue a render.")
+                : t("No {kind} files in the input folder yet — upload one.", { kind: t(this.kind) }),
       }));
       return;
     }
@@ -605,7 +608,7 @@ class Picker {
       if (this.page === this.pages - 1 && listingTruncated(root)) {
         this.grid.appendChild(el("div", {
           class: "mmc-grid-note",
-          text: `The folder holds more — only the newest ${this.activeAssets().length} files are listed.`,
+          text: t("The folder holds more — only the newest {count} files are listed.", { count: this.activeAssets().length }),
         }));
       }
       return;
@@ -656,7 +659,7 @@ class Picker {
       role: "button",
       tabindex: "0",
       "aria-selected": chosen,
-      title: `${asset.path} — double-click to view`,
+      title: t("{path} — double-click to view", { path: asset.path }),
       // Double-clicks are detected by hand rather than with dblclick: the
       // second click re-toggles first, so viewing leaves the selection exactly
       // where it stood, and viewOnly grids get a single-click view.
@@ -712,7 +715,7 @@ class Picker {
     const starred = this.isFav(asset.path);
     cell.appendChild(el("button", {
       class: `mmc-cell-star${starred ? " on" : ""}`,
-      title: starred ? "Remove from favorites" : "Add to favorites",
+      title: starred ? t("Remove from favorites") : t("Add to favorites"),
       onclick: (event) => { event.stopPropagation(); this.toggleFav(asset); },
     }, [icon("star", 13)]));
 
@@ -753,14 +756,14 @@ class Picker {
     if (setting?.trim) parts.push(trimLabel(setting));
     // Only once the editor has been used: until then the track is still the
     // default, and the badge would be claiming a decision nobody made.
-    if (setting?.track && asset.kind === "video") parts.push(TRACK_BADGE[setting.track]);
+    if (setting?.track && asset.kind === "video") parts.push(t(TRACK_BADGE[setting.track]));
     return el("button", {
       class: `mmc-cell-trim${parts.length ? " set" : ""}`,
       title: asset.kind === "video"
-        ? "Use only part of this clip, bring its soundtrack along, or take the sound on its own"
-        : "Use only part of this file",
+        ? t("Use only part of this clip, bring its soundtrack along, or take the sound on its own")
+        : t("Use only part of this file"),
       onclick: (event) => { event.stopPropagation(); this.editSegment(asset); },
-    }, [icon("scissors", 12), el("span", { text: parts.join(" · ") || "Segment" })]);
+    }, [icon("scissors", 12), el("span", { text: parts.join(" · ") || t("Segment") })]);
   }
 
   async editSegment(asset) {
@@ -785,7 +788,7 @@ class Picker {
     if (selected && !this.fits(this.targetKind(asset))) {
       this.settings.set(asset.path, { ...result, track: setting.track });
       this.refreshCell(asset);   // the segment still changed, even if the track did not
-      this.warn(`No ${this.targetKind(asset)} slot left for ${asset.name}.`);
+      this.warn(t("No {kind} slot left for {name}.", { kind: t(this.targetKind(asset)), name: asset.name }));
       return;
     }
     this.refreshCell(asset);
@@ -843,33 +846,33 @@ class Picker {
     if (this.organize) {
       this.slots.classList.remove("full");
       this.slots.textContent = this.marked.length
-        ? `${this.marked.length} marked`
-        : "Click files to mark them";
+        ? t("{count} marked", { count: this.marked.length })
+        : t("Click files to mark them");
       this.deleteButton = el("button", {
-        class: "mmc-del", text: "Delete", disabled: !this.marked.length,
+        class: "mmc-del", text: t("Delete"), disabled: !this.marked.length,
         onclick: () => this.confirmDelete(),
       });
       this.foot.replaceChildren(
         this.slots,
         el("button", {
-          class: "mmc-ghost", text: "Move to…", disabled: !this.marked.length,
+          class: "mmc-ghost", text: t("Move to…"), disabled: !this.marked.length,
           onclick: () => this.moveMenu(),
         }),
         this.deleteButton,
-        el("button", { class: "mmc-add", text: "Done", onclick: () => this.setOrganize(false) }),
+        el("button", { class: "mmc-add", text: t("Done"), onclick: () => this.setOrganize(false) }),
       );
       return;
     }
 
     this.deleteButton = null;
-    this.addButton = el("button", { class: "mmc-add", text: "Add", onclick: () => this.commit() });
+    this.addButton = el("button", { class: "mmc-add", text: t("Add"), onclick: () => this.commit() });
     this.foot.replaceChildren(
       this.slots,
-      el("button", { class: "mmc-ghost", text: "Cancel", onclick: () => this.close(null) }),
+      el("button", { class: "mmc-ghost", text: t("Cancel"), onclick: () => this.close(null) }),
       this.addButton,
     );
     if (this.options.single) {
-      this.slots.textContent = this.selected.length ? "1 selected" : "Pick one";
+      this.slots.textContent = this.selected.length ? t("1 selected") : t("Pick one");
       this.slots.classList.remove("full");
     } else {
       // The renders tab has no bucket of its own — a picked render is a video
@@ -881,8 +884,8 @@ class Picker {
       // reported against the one it does land in rather than silently omitted.
       const elsewhere = this.selected.length - this.claimed(bucket);
       const audio = this.options.capacity("audio");
-      this.slots.textContent = `${filled} / ${max} slots filled`
-        + (elsewhere ? ` · ${audio.used + this.claimed("audio")} / ${audio.max} audio` : "");
+      this.slots.textContent = t("{filled} / {max} slots filled", { filled, max })
+        + (elsewhere ? t(" · {used} / {max} audio", { used: audio.used + this.claimed("audio"), max: audio.max }) : "");
       this.slots.classList.toggle("full", filled >= max);
     }
     this.addButton.disabled = this.selected.length === 0;
@@ -896,7 +899,7 @@ class Picker {
       input.remove();
       if (!files.length) return;
       this.uploadButton.disabled = true;
-      this.uploadButton.textContent = "Uploading…";
+      this.uploadButton.textContent = t("Uploading…");
       // An upload lands on the shelf being looked at — that is what makes a
       // shelf a place rather than a filter.
       const into = this.shelf === "all" || this.shelf === "fav" ? "" : this.shelf;
@@ -904,10 +907,10 @@ class Picker {
         for (const file of files) await upload(file, into);
         await this.load({ force: true });
       } catch (error) {
-        this.grid.replaceChildren(el("div", { class: "mmc-empty", text: `Upload failed: ${error.message}` }));
+        this.grid.replaceChildren(el("div", { class: "mmc-empty", text: t("Upload failed: {error}", { error: error.message }) }));
       } finally {
         this.uploadButton.disabled = false;
-        this.uploadButton.textContent = `+  Upload ${KIND_LABEL[this.kind].toLowerCase()}`;
+        this.uploadButton.textContent = t("+  Upload {kind}", { kind: t(KIND_LABEL[this.kind].toLowerCase()) });
       }
     });
     document.body.appendChild(input);

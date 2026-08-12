@@ -16,6 +16,7 @@ import { el, icon } from "./dom.js";
 import { openChoicePopover } from "./pills.js";
 import { listLoras } from "./api.js";
 import * as S from "./state.js";
+import { t } from "./i18n.js";
 
 // The LoRA names, for the two pickers here. The manager's listing carries
 // cards and sidecars; a choice popover only needs the names.
@@ -52,17 +53,17 @@ function openTurboChoice(anchor, { value, onPick, includeNone = false, all = fal
   const showAll = all || !matched.length;
   const listed = showAll ? loraNames() : matched;
   openChoicePopover(anchor, {
-    title: showAll ? "Turbo LoRA — all files" : "Turbo LoRA",
+    title: showAll ? t("Turbo LoRA — all files") : t("Turbo LoRA"),
     options: [
-      ...(includeNone ? [typeof includeNone === "string" ? includeNone : "— none —"] : []),
+      ...(includeNone ? [typeof includeNone === "string" ? t(includeNone) : t("— none —")] : []),
       ...listed,
       // Only when it would add something: a filter that matched everything has
       // nothing more to show.
-      ...(showAll || matched.length === loraNames().length ? [] : [SHOW_ALL]),
+      ...(showAll || matched.length === loraNames().length ? [] : [t(SHOW_ALL)]),
     ],
     value,
     onPick: (picked) => {
-      if (picked === SHOW_ALL) {
+      if (picked === t(SHOW_ALL)) {
         openTurboChoice(anchor, { value, onPick, includeNone, all: true });
         return;
       }
@@ -194,16 +195,18 @@ export function turboPills({ container, value, set, onCommit }) {
       class: "mmc-turbo-main",
       title: on
         ? turbo.lora
-          ? `Turbo — running on ${turbo.lora} at ${value("steps", "?")} steps, euler + beta. `
-            + "Switching off removes the LoRA and puts the sampler row back."
-          : `Turbo — ${value("steps", "?")} steps, euler + beta, no LoRA: the checkpoint is `
-            + "taken to be a merged distill. Switching off puts the sampler row back."
+          ? t("Turbo — running on {lora} at {steps} steps, euler + beta. "
+            + "Switching off removes the LoRA and puts the sampler row back.",
+            { lora: turbo.lora, steps: value("steps", "?") })
+          : t("Turbo — {steps} steps, euler + beta, no LoRA: the checkpoint is "
+            + "taken to be a merged distill. Switching off puts the sampler row back.",
+            { steps: value("steps", "?") })
         : turbo.lora
-          ? `Turbo off. On, it adds ${turbo.lora}, drops the steps to the picked quality and `
+          ? t("Turbo off. On, it adds {lora}, drops the steps to the picked quality and "
             + "switches the sampler to euler + beta — H3's soundtrack warbles on "
-            + "res_multistep at turbo step counts."
-          : "Turbo off. The first press picks which distillation LoRA it engages — or none, "
-            + "for a checkpoint with the distillation already merged in.",
+            + "res_multistep at turbo step counts.", { lora: turbo.lora })
+          : t("Turbo off. The first press picks which distillation LoRA it engages — or none, "
+            + "for a checkpoint with the distillation already merged in."),
       onclick: (event) => {
         if (turbo.on) {
           throwOff(container, { value, set });
@@ -221,7 +224,7 @@ export function turboPills({ container, value, set, onCommit }) {
             includeNone: NO_LORA,
             value: "",
             onPick: (picked) => {
-              if (picked === NO_LORA) turbo.merged = true;
+              if (picked === t(NO_LORA)) turbo.merged = true;
               else turbo.lora = picked;
               throwOn(container, { value, set });
               onCommit();
@@ -230,20 +233,20 @@ export function turboPills({ container, value, set, onCommit }) {
         }
       },
     }, [icon("bolt", 16), el("span", {
-      text: on ? `turbo · ${turbo.lora ? short(turbo.lora) : "merged"}` : "turbo off",
+      text: on ? t("turbo · {name}", { name: turbo.lora ? short(turbo.lora) : t("merged") }) : t("turbo off"),
     })]),
     // Which file, as its own control — the seed pill's shape: the big half
     // throws the switch, the small half changes what it throws. Only once
     // there is something to change; before that the big half is the picker.
     ...(turbo.lora ? [el("button", {
       class: "mmc-step mmc-turbo-pick",
-      title: `Pick a different turbo LoRA — now ${turbo.lora}.`
-           + (on ? " Swapped in place: the run never carries both distills at once." : ""),
+      title: t("Pick a different turbo LoRA — now {lora}.", { lora: turbo.lora })
+           + (on ? " " + t("Swapped in place: the run never carries both distills at once.") : ""),
       onclick: (event) => openTurboChoice(event.currentTarget, {
         includeNone: true,
         value: turbo.lora,
         onPick: (picked) => {
-          setTurboLora(container, picked === "— none —" ? "" : picked, { value, set });
+          setTurboLora(container, picked === t("— none —") ? "" : picked, { value, set });
           onCommit();
         },
       }),
@@ -259,14 +262,14 @@ export function turboPills({ container, value, set, onCommit }) {
       // Pressed is derived from the real steps widget, so a hand-edited step
       // count un-presses all three rather than one of them lying about it.
       "aria-pressed": steps === S.TURBO_STEPS[quality],
-      title: QUALITY_TITLE[quality],
+      title: t(QUALITY_TITLE[quality]),
       onclick: () => {
         turbo.quality = quality;
         set("steps", S.TURBO_STEPS[quality]);
         onCommit();
       },
     }, [
-      el("span", { text: quality === "medium" ? "med" : quality }),
+      el("span", { text: t(quality === "medium" ? "med" : quality) }),
       el("span", { class: "mmc-pill-sub", text: String(S.TURBO_STEPS[quality]) }),
     ]))));
   }
@@ -283,22 +286,22 @@ export function turboRow({ container, widgetIO, onChange }) {
   const NONE = "— none —";
   const turbo = container.turbo;
   return el("div", { class: "mmc-weight-row" }, [
-    el("span", { class: "mmc-weight-name", text: "Turbo LoRA" }),
+    el("span", { class: "mmc-weight-name", text: t("Turbo LoRA") }),
     el("button", {
       class: `mmc-weight-file${turbo.lora ? "" : " empty"}`,
-      title: "The distillation LoRA the turbo pill engages, from models/loras.\n\n"
+      title: t("The distillation LoRA the turbo pill engages, from models/loras.\n\n"
            + "larryvrh's v4 EMA runs at strength 1.0; the lightx2v distill at about 0.6 — "
            + "the switch sets that from the filename, and the LoRA manager's slider "
            + "overrides it. Steps and sampler are the pill's business, not this row's.\n\n"
            + "'none' also fits a checkpoint with the distillation merged into the weights: "
-           + "the pill then only drops the steps and swaps the sampler.",
-      text: turbo.lora || (turbo.merged ? "no LoRA · merged checkpoint" : "not set"),
+           + "the pill then only drops the steps and swaps the sampler."),
+      text: turbo.lora || (turbo.merged ? t("no LoRA · merged checkpoint") : t("not set")),
       onclick: (event) => openTurboChoice(event.currentTarget, {
         includeNone: true,
-        value: turbo.lora || NONE,
+        value: turbo.lora || t(NONE),
         onPick: (picked) => {
-          if (picked === NONE) turbo.merged = false;
-          setTurboLora(container, picked === NONE ? "" : picked, widgetIO);
+          if (picked === t(NONE)) turbo.merged = false;
+          setTurboLora(container, picked === t(NONE) ? "" : picked, widgetIO);
           onChange();
         },
       }),

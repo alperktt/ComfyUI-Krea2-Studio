@@ -1,6 +1,7 @@
 // Talking to the server: list the input folder, upload into it, build view URLs.
 
 import { api } from "../../../scripts/api.js";
+import { t } from "./i18n.js";
 
 const cache = new Map();   // root -> {at, assets}
 const CACHE_MS = 4000;
@@ -11,7 +12,7 @@ export async function listAssets({ force = false, root = "input" } = {}) {
   const hit = cache.get(root);
   if (!force && hit && Date.now() - hit.at < CACHE_MS) return hit.assets;
   const response = await api.fetchApi(`/minimax_creator/assets?root=${encodeURIComponent(root)}`);
-  if (!response.ok) throw new Error(`asset listing failed (${response.status})`);
+  if (!response.ok) throw new Error(t("asset listing failed ({status})", { status: response.status }));
   const body = await response.json();
   const assets = body.assets ?? [];
   cache.set(root, { at: Date.now(), assets, truncated: body.truncated === true });
@@ -42,7 +43,7 @@ export async function moveAsset(filename, subfolder) {
     body: JSON.stringify({ filename, subfolder }),
   });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || `move failed (${response.status})`);
+  if (!response.ok) throw new Error(body.error || t("move failed ({status})", { status: response.status }));
   invalidate();
   return body.path;
 }
@@ -56,7 +57,7 @@ export async function deleteAsset(filename) {
     body: JSON.stringify({ filename }),
   });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || `delete failed (${response.status})`);
+  if (!response.ok) throw new Error(body.error || t("delete failed ({status})", { status: response.status }));
   invalidate();
 }
 
@@ -118,7 +119,7 @@ export function savePickerPrefs(prefs) {
 /** Every setting, with the keys this build does not know about dropped. */
 export async function loadSettings() {
   const response = await api.fetchApi("/minimax_creator/settings");
-  if (!response.ok) throw new Error(`settings failed (${response.status})`);
+  if (!response.ok) throw new Error(t("settings failed ({status})", { status: response.status }));
   return (await response.json()).settings ?? {};
 }
 
@@ -131,7 +132,7 @@ export async function saveSettings(patch) {
     body: JSON.stringify(patch),
   });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || `settings failed (${response.status})`);
+  if (!response.ok) throw new Error(body.error || t("settings failed ({status})", { status: response.status }));
   return body.settings ?? {};
 }
 
@@ -155,7 +156,7 @@ export async function listModels({ force = false } = {}) {
   modelsInFlight = (async () => {
     try {
       const response = await api.fetchApi("/minimax_creator/models");
-      if (!response.ok) throw new Error(`model listing failed (${response.status})`);
+      if (!response.ok) throw new Error(t("model listing failed ({status})", { status: response.status }));
       modelsCache = await response.json();
       modelsAt = Date.now();
       return modelsCache;
@@ -197,7 +198,7 @@ export async function listLoras({ folder = "", force = false } = {}) {
   const query = new URLSearchParams({ folder });
   if (force) query.set("refresh", "1");
   const response = await api.fetchApi(`/minimax_creator/loras?${query}`);
-  if (!response.ok) throw new Error(`LoRA listing failed (${response.status})`);
+  if (!response.ok) throw new Error(t("LoRA listing failed ({status})", { status: response.status }));
   const body = await response.json();
   if (force) loraCache.clear();
   loraCache.set(folder, { at: Date.now(), body });
@@ -223,7 +224,7 @@ export async function loraDetail(name) {
   const hit = detailCache.get(name);
   if (hit && Date.now() - hit.at < 60000) return hit.detail;
   const response = await api.fetchApi(`/minimax_creator/lora_detail?name=${encodeURIComponent(name)}`);
-  if (!response.ok) throw new Error(`detail failed (${response.status})`);
+  if (!response.ok) throw new Error(t("detail failed ({status})", { status: response.status }));
   const detail = await response.json();
   detailCache.set(name, { at: Date.now(), detail });
   return detail;
@@ -339,7 +340,7 @@ export async function upload(file, subfolder = "") {
   form.append("image", file);
   if (subfolder) form.append("subfolder", subfolder);
   const response = await api.fetchApi("/upload/image", { method: "POST", body: form });
-  if (!response.ok) throw new Error(`upload failed (${response.status})`);
+  if (!response.ok) throw new Error(t("upload failed ({status})", { status: response.status }));
   const body = await response.json();
   invalidate();
   return {

@@ -6,6 +6,7 @@
 // output one too, over its own default.
 
 import { el, icon, dismissable, placeNear } from "./dom.js";
+import { t } from "./i18n.js";
 import { ASPECT_PRESETS, MIN_SHORT_EDGE, MAX_SHORT_EDGE, NATIVE_SHORT_EDGE, CANVAS_MULTIPLE } from "./canvas.js";
 import { UPSCALE_MODES, DEFAULT_REFINE_DENOISE, MIN_REFINE_DENOISE, MAX_REFINE_DENOISE,
          twoPass, sampleEdge } from "./state.js";
@@ -84,7 +85,7 @@ export const PILL_GLYPH = 16;
  * @param {() => void} commit   called once, after a choice
  */
 export function openAspectPopover(anchor, target, commit) {
-  const pop = el("div", { class: "mmc-pop" }, [el("div", { class: "mmc-pop-title", text: "Aspect Ratio" })]);
+  const pop = el("div", { class: "mmc-pop" }, [el("div", { class: "mmc-pop-title", text: t("Aspect Ratio") })]);
   for (const [label, ratio] of ASPECT_PRESETS) {
     pop.appendChild(el("button", {
       class: "mmc-opt",
@@ -133,7 +134,7 @@ export function edgeSlider({ min, max, step, value, mark, markLabel, apply, desc
   ]);
   const slider = el("input", {
     type: "range", min, max, step, value,
-    "aria-label": "Short edge in pixels",
+    "aria-label": t("Short edge in pixels"),
     // The graph canvas reads a pointerdown anywhere on the node as the start of
     // a node drag, and would carry the whole node off under the thumb.
     onpointerdown: (event) => event.stopPropagation(),
@@ -163,8 +164,8 @@ export function edgeSlider({ min, max, step, value, mark, markLabel, apply, desc
 
   const stepper = (label, delta) => el("button", {
     class: "mmc-step", text: label,
-    title: `${delta < 0 ? "Down" : "Up"} ${step} px`,
-    "aria-label": `${delta < 0 ? "Smaller" : "Larger"} by ${step} pixels`,
+    title: t(delta < 0 ? "Down {step} px" : "Up {step} px", { step }),
+    "aria-label": t(delta < 0 ? "Smaller by {step} pixels" : "Larger by {step} pixels", { step }),
     onclick: () => set(Number(slider.value) + delta * step),
   });
   const down = stepper("−", -1);
@@ -173,9 +174,9 @@ export function edgeSlider({ min, max, step, value, mark, markLabel, apply, desc
   const marker = mark > min && mark < max
     ? el("button", {
         class: "mmc-slider-mark",
-        title: `${markLabel} — ${mark} px`,
+        title: t("{label} — {mark} px", { label: t(markLabel), mark }),
         onclick: () => set(mark),
-      }, [el("span", { text: markLabel })])
+      }, [el("span", { text: t(markLabel) })])
     : null;
   // A custom property has to go through setProperty; Object.assign drops it.
   marker?.style.setProperty("--p", String((mark - min) / (max - min)));
@@ -241,21 +242,22 @@ export function openResolutionPopover(anchor, target, geometry, commit) {
     const rows = [];
     if (over) {
       rows.push(
-        option(UPSCALE_MODES[0], "two passes",
-               `${sampleEdge(target)} px first, refined up to ${width} × ${height}`),
-        option("direct", "direct",
-               `one pass at ${width} × ${height} — off-distribution`));
+        option(UPSCALE_MODES[0], t("two passes"),
+               t("{edge} px first, refined up to {width} × {height}",
+                 { edge: sampleEdge(target), width, height })),
+        option("direct", t("direct"),
+               t("one pass at {width} × {height} — off-distribution", { width, height })));
     }
     // The first-pass edge, whenever there is room under the slider for one and
     // the mode is not pinned to a single pass.
     if (cap > MIN_SHORT_EDGE && (!over || target.upscale !== "direct")) {
       rows.push(el("div", { class: "mmc-refine-row" }, [
-        el("span", { class: "mmc-refine-label", text: "sampled at" }),
+        el("span", { class: "mmc-refine-label", text: t("sampled at") }),
         stepperPill({
           value: sampleEdge(target),
           min: MIN_SHORT_EDGE, max: cap, step: CANVAS_MULTIPLE, width: "56px",
-          title: "The short edge the first pass samples at. At the slider's size it is "
-               + "the only pass; under it, a second pass refines up to the slider.",
+          title: t("The short edge the first pass samples at. At the slider's size it is "
+               + "the only pass; under it, a second pass refines up to the slider."),
           format: (n) => `${n} px`,
           onChange: (next) => {
             target.sample_edge = next;
@@ -268,12 +270,12 @@ export function openResolutionPopover(anchor, target, geometry, commit) {
     }
     if (twoPass(target)) {
       rows.push(el("div", { class: "mmc-refine-row" }, [
-        el("span", { class: "mmc-refine-label", text: "refine" }),
+        el("span", { class: "mmc-refine-label", text: t("refine") }),
         stepperPill({
           value: Number(target.refine_denoise ?? DEFAULT_REFINE_DENOISE),
           min: MIN_REFINE_DENOISE, max: MAX_REFINE_DENOISE, step: 0.05, width: "40px",
-          title: "How much of the schedule the second pass re-runs. Lower keeps more "
-               + "of the first pass; higher resolves more detail and drifts further from it.",
+          title: t("How much of the schedule the second pass re-runs. Lower keeps more "
+               + "of the first pass; higher resolves more detail and drifts further from it."),
           format: (n) => n.toFixed(2),
           onChange: (next) => { target.refine_denoise = next; body.repaint(); commit(); },
         }),
@@ -295,17 +297,20 @@ export function openResolutionPopover(anchor, target, geometry, commit) {
         return {
           size: `${width} × ${height}`,
           warn: false,
-          note: `Sampled at ${sampleEdge(target)} px, then a second pass refines up to this size.`,
+          note: t("Sampled at {edge} px, then a second pass refines up to this size.",
+                  { edge: sampleEdge(target) }),
         };
       }
       return {
         size: `${width} × ${height}`,
         warn: over,
         note: over
-          ? `Above the trained ${NATIVE_SHORT_EDGE} px short edge — off-distribution, not just slower.`
+          ? t("Above the trained {edge} px short edge — off-distribution, not just slower.",
+              { edge: NATIVE_SHORT_EDGE })
           : target.short_edge === NATIVE_SHORT_EDGE
-            ? "Native. What the open weights were trained at."
-            : `${(NATIVE_SHORT_EDGE / target.short_edge).toFixed(1)}× smaller short edge than native — faster, softer.`,
+            ? t("Native. What the open weights were trained at.")
+            : t("{ratio}× smaller short edge than native — faster, softer.",
+                { ratio: (NATIVE_SHORT_EDGE / target.short_edge).toFixed(1) }),
       };
     },
     commit,

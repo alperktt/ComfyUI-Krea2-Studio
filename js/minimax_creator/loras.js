@@ -19,6 +19,7 @@
 import { el, ICONS, svg, drawFrame, mountOverlay } from "./dom.js";
 import { listLoras, loraPreviewUrl } from "./api.js";
 import { openLoraDetail } from "./loradetail.js";
+import { t } from "./i18n.js";
 import * as S from "./state.js";
 
 // Cards added per pass, and how far below the fold to keep filling. One card is
@@ -84,29 +85,29 @@ class LoraManager {
     });
     this.picker = el("select", {
       class: "mmc-folder",
-      title: "Which folder under models/loras to browse.",
+      title: t("Which folder under models/loras to browse."),
       onchange: (event) => this.setFolder(event.target.value),
     });
     this.search = el("input", {
       class: "mmc-search",
       type: "search",
-      placeholder: "Search LoRAs...",
+      placeholder: t("Search LoRAs..."),
       oninput: (event) => { this.query = event.target.value.toLowerCase(); this.renderGrid(); },
     });
     this.foot = el("div", { class: "mmc-modal-foot" }, [
       this.slots = el("span", { class: "mmc-slots" }),
-      el("button", { class: "mmc-add", text: "Done", onclick: () => this.close() }),
+      el("button", { class: "mmc-add", text: t("Done"), onclick: () => this.close() }),
     ]);
 
     this.modal = el("div", { class: "mmc-modal" }, [
       el("div", { class: "mmc-modal-head" }, [
-        el("button", { class: "mmc-tab", "aria-selected": true, text: "LoRAs" }),
+        el("button", { class: "mmc-tab", "aria-selected": true, text: t("LoRAs") }),
         el("button", { class: "mmc-close", text: "✕", onclick: () => this.close() }),
       ]),
       el("div", { class: "mmc-modal-bar" }, [
         this.picker,
         this.search,
-        el("button", { class: "mmc-ghost", text: "Rescan", onclick: () => this.load({ force: true }) }),
+        el("button", { class: "mmc-ghost", text: t("Rescan"), onclick: () => this.load({ force: true }) }),
       ]),
       this.grid,
       this.foot,
@@ -164,7 +165,7 @@ class LoraManager {
     const entries = known ? this.folders : [...this.folders, { path: this.folder, count: 0 }];
     this.picker.replaceChildren(...entries.map((entry) => el("option", {
       value: entry.path,
-      text: `${entry.path || "All folders"} (${entry.count})`,
+      text: `${entry.path || t("All folders")} (${entry.count})`,
     })));
     this.picker.value = this.folder;
   }
@@ -246,18 +247,19 @@ class LoraManager {
   }
 
   renderGrid() {
-    if (!this.loaded) return this.message("Loading…");
-    if (this.loadError) return this.message(`Could not read models/loras: ${this.loadError}`);
+    if (!this.loaded) return this.message(t("Loading…"));
+    if (this.loadError) return this.message(t("Could not read models/loras: {error}", { error: this.loadError }));
 
     const rows = this.visible();
     if (!rows.length) {
       const where = this.folder ? `“${this.folder}”` : "models/loras";
       const capped = this.truncated
-        ? ` Only the ${this.rows.length} most recent of ${this.matched} here were listed — try a narrower folder.`
+        ? " " + t("Only the {shown} most recent of {matched} here were listed — try a narrower folder.",
+                  { shown: this.rows.length, matched: this.matched })
         : "";
       return this.message((this.query
-        ? `No LoRA matching “${this.query}” in ${where}.`
-        : `No LoRAs in ${where} yet.`) + capped);
+        ? t("No LoRA matching “{query}” in {where}.", { query: this.query, where })
+        : t("No LoRAs in {where} yet.", { where })) + capped);
     }
 
     this.pending = rows;
@@ -295,14 +297,15 @@ class LoraManager {
   renderNote() {
     const left = this.pending.length - this.shown;
     if (left > 0) {
-      this.note.textContent = `${left} more below…`;
+      this.note.textContent = t("{left} more below…", { left });
     } else if (this.truncated) {
       // The server described only the newest of what it found, and the search
       // box only filters what it sent — so say so rather than let a LoRA that
       // was never listed read as one that is not on disk.
-      this.note.textContent =
-        `Only the ${this.rows.length} most recent of ${this.matched} LoRAs in this scope were `
-        + `listed. Choose a narrower folder to reach the older ones.`;
+      this.note.textContent = t(
+        "Only the {shown} most recent of {matched} LoRAs in this scope were "
+        + "listed. Choose a narrower folder to reach the older ones.",
+        { shown: this.rows.length, matched: this.matched });
     } else {
       this.note.textContent = "";
     }
@@ -413,7 +416,7 @@ class LoraManager {
       class: "mmc-lora-art",
       role: "button",
       tabindex: "0",
-      title: `${row.name} — double-click for details`,
+      title: t("{name} — double-click for details", { name: row.name }),
       // Double-clicks are detected by hand, same as the picker's cells: the
       // first click's toggle rebuilds the card, so the second click lands on a
       // replacement element and no browser synthesises a dblclick across two
@@ -462,7 +465,7 @@ class LoraManager {
     if (!entry && row.trained_words?.length) {
       body.appendChild(el("div", {
         class: "mmc-lora-words",
-        title: "Trigger words from the sidecar. Adding this LoRA takes them on, and you can then drop or extend them.",
+        title: t("Trigger words from the sidecar. Adding this LoRA takes them on, and you can then drop or extend them."),
         text: row.trained_words.join(", "),
       }));
     }
@@ -472,8 +475,8 @@ class LoraManager {
     if (!entry && !row.sources?.length) {
       body.appendChild(el("div", {
         class: "mmc-lora-words",
-        title: "No sidecar and nothing in the file's own header. Double-click for what the safetensors header does say.",
-        text: "no metadata",
+        title: t("No sidecar and nothing in the file's own header. Double-click for what the safetensors header does say."),
+        text: t("no metadata"),
       }));
     }
     if (entry) body.appendChild(this.controls(entry, row));
@@ -502,13 +505,13 @@ class LoraManager {
       chips.replaceChildren(...[
         ...suggested.map((word) => el("button", {
           class: "mmc-trig", "aria-pressed": chosen(word),
-          title: chosen(word) ? "In the prompt — click to drop" : "From the sidecar — click to use",
+          title: chosen(word) ? t("In the prompt — click to drop") : t("From the sidecar — click to use"),
           text: word,
           onclick: () => { this.toggleTrigger(entry, word); renderChips(); },
         })),
         ...own.map((word) => el("button", {
           class: "mmc-trig own", "aria-pressed": true,
-          title: "Yours — click to remove",
+          title: t("Yours — click to remove"),
           text: word,
           onclick: () => { this.toggleTrigger(entry, word); renderChips(); },
         })),
@@ -519,7 +522,7 @@ class LoraManager {
     const input = el("input", {
       class: "mmc-trig-add",
       type: "text",
-      placeholder: suggested.length ? "add a word" : "no sidecar words — add your own",
+      placeholder: suggested.length ? t("add a word") : t("no sidecar words — add your own"),
       onkeydown: (event) => {
         if (event.key !== "Enter") return;
         event.preventDefault();
@@ -531,7 +534,7 @@ class LoraManager {
     });
 
     return el("div", { class: "mmc-trig-box" }, [
-      el("div", { class: "mmc-lora-row" }, [el("span", { class: "mmc-lora-label", text: "Triggers" })]),
+      el("div", { class: "mmc-lora-row" }, [el("span", { class: "mmc-lora-label", text: t("Triggers") })]),
       chips,
       input,
     ]);
@@ -558,13 +561,13 @@ class LoraManager {
       el("button", {
         class: "mmc-seg-btn",
         "aria-pressed": value === current,
-        title: hint,
-        text: label,
+        title: t(hint),
+        text: t(label),
         onclick: () => this.setModes(entry, row, value),
       })));
 
     const rows = [
-      el("div", { class: "mmc-lora-row" }, [el("span", { class: "mmc-lora-label", text: "Strength" }), readout]),
+      el("div", { class: "mmc-lora-row" }, [el("span", { class: "mmc-lora-label", text: t("Strength") }), readout]),
       slider,
       ...(this.checkpointModes ? [modes] : []),
       this.triggerBox(entry, row),
@@ -573,7 +576,9 @@ class LoraManager {
     if (this.checkpointModes && !this.applies(entry)) {
       rows.push(el("div", {
         class: "mmc-lora-idle",
-        text: `Idle — ${this.routesTo()} ${this.targets.length > 1 ? "are" : "is"} routed here.`,
+        text: this.targets.length > 1
+          ? t("Idle — {targets} are routed here.", { targets: this.routesTo() })
+          : t("Idle — {targets} is routed here.", { targets: this.routesTo() }),
       }));
     }
     return el("div", { class: "mmc-lora-ctl" }, rows);
@@ -585,14 +590,16 @@ class LoraManager {
   }
 
   routesTo() {
-    return this.targets.map((name) => S.CHECKPOINT_LABEL[name]).join(" + ") || "nothing";
+    return this.targets.map((name) => S.CHECKPOINT_LABEL[name]).join(" + ") || t("nothing");
   }
 
   renderFoot() {
     const entries = this.state.loras;
     const active = entries.filter((entry) => this.applies(entry)).length;
-    const extra = entries.length > active ? ` (${entries.length - active} idle)` : "";
-    this.slots.textContent = `${active} on ${this.routesTo()}${extra}`;
+    const extra = entries.length > active
+      ? " " + t("({count} idle)", { count: entries.length - active })
+      : "";
+    this.slots.textContent = t("{active} on {targets}", { active, targets: this.routesTo() }) + extra;
     this.slots.classList.toggle("full", false);
   }
 

@@ -10,6 +10,7 @@ import { PreStageBody } from "./minimax_creator/prestage.js";
 import { Satellite } from "./minimax_creator/satellite.js";
 import { SAMPLING_WIDGETS } from "./minimax_creator/sampling.js";
 import * as S from "./minimax_creator/state.js";
+import { t } from "./minimax_creator/i18n.js";
 
 const CREATOR = "MiniMaxH3Creator";
 const TIMELINE = "MiniMaxH3Timeline";
@@ -368,7 +369,7 @@ app.registerExtension({
     nodeType.prototype.getExtraMenuOptions = function (canvas, options) {
       original?.apply(this, arguments);
       options.push({
-        content: `Copy ${name} JSON`,
+        content: t("Copy {name} JSON", { name }),
         callback: () => {
           const widget = this.widgets?.find((w) => w.name === name);
           if (widget) navigator.clipboard?.writeText(widget.value);

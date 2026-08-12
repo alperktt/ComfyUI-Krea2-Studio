@@ -29,6 +29,7 @@ import { samplingBar } from "./sampling.js";
 import { Stage } from "./stage.js";
 import { loadCatalog, catalogByFolder } from "./models.js";
 import { viewUrl } from "./api.js";
+import { t } from "./i18n.js";
 import * as S from "./state.js";
 
 const QUALITY_TITLE = {
@@ -69,7 +70,7 @@ export class PreStageEditor {
 
     this.promptBox = el("textarea", {
       class: "mmc-prestage-prompt",
-      placeholder: "Describe the image. Both models were trained on long, detailed natural-language prompts.",
+      placeholder: t("Describe the image. Both models were trained on long, detailed natural-language prompts."),
       oninput: () => {
         this.state.prompt = this.promptBox.value;
         this.onCommit?.();
@@ -165,13 +166,14 @@ export class PreStageEditor {
 
   async addRefs(fromVideo = false) {
     if (this.state.arch === "ideogram4") {
-      return this.flash("Ideogram 4.0 has no local reference conditioning — switch the model "
-                      + "pill to Krea 2 to use style references.");
+      return this.flash(t("Ideogram 4.0 has no local reference conditioning — switch the model "
+                        + "pill to Krea 2 to use style references."));
     }
     const room = S.PRESTAGE_MAX_REFS - this.state.refs.length;
     if (room <= 0) {
-      return this.flash(`At most ${S.PRESTAGE_MAX_REFS} style references — the Qwen edit encoder `
-                      + `the model reads them through has exactly three image slots.`);
+      return this.flash(t("At most {max} style references — the Qwen edit encoder "
+                        + "the model reads them through has exactly three image slots.",
+                        { max: S.PRESTAGE_MAX_REFS }));
     }
     if (fromVideo) {
       const clip = await openPicker({
@@ -248,20 +250,20 @@ export class PreStageEditor {
     }, [el("span", { class: "mmc-tool-icon" }, [icon(iconName)]), el("span", { text: label })]);
 
     return el("div", { class: "mmc-rail" }, [
-      tool("Init image", "frameIn",
-           "Start from an image instead of noise — img2img. The strength pill says how much of it survives.",
+      tool(t("Init image"), "frameIn",
+           t("Start from an image instead of noise — img2img. The strength pill says how much of it survives."),
            () => this.setInit(false)),
-      tool("Style refs", "image",
+      tool(t("Style refs"), "image",
            this.state.arch === "ideogram4"
-             ? "Ideogram 4.0 has no local reference conditioning — style references are a Krea 2 feature."
-             : "Up to three images whose look this render should carry. Encoded through the Qwen edit "
-             + "path Krea 2 was post-trained against; the krea2_style_reference LoRA strengthens it.",
+             ? t("Ideogram 4.0 has no local reference conditioning — style references are a Krea 2 feature.")
+             : t("Up to three images whose look this render should carry. Encoded through the Qwen edit "
+               + "path Krea 2 was post-trained against; the krea2_style_reference LoRA strengthens it."),
            () => this.addRefs(false)),
-      tool("From video", "video",
-           "Pull a single frame off a video's playhead — as the init image, saved as a PNG in the input folder.",
+      tool(t("From video"), "video",
+           t("Pull a single frame off a video's playhead — as the init image, saved as a PNG in the input folder."),
            () => this.setInit(true)),
-      tool("Add LoRA", "effect",
-           "Manage the LoRAs patched onto the image model. Krea LoRAs train on RAW and apply on Turbo too.",
+      tool(t("Add LoRA"), "effect",
+           t("Manage the LoRAs patched onto the image model. Krea LoRAs train on RAW and apply on Turbo too."),
            () => this.manageLoras()),
     ]);
   }
@@ -270,12 +272,12 @@ export class PreStageEditor {
     const init = this.state.init;
     return el("div", { class: "mmc-asset mmc-tag-0", title: init.filename }, [
       el("img", { class: "mmc-asset-thumb", src: viewUrl(init.filename, { preview: true }), alt: init.filename }),
-      el("span", { class: "mmc-asset-handle", text: "init" }),
+      el("span", { class: "mmc-asset-handle", text: t("init") }),
       el("button", {
         class: "mmc-ghost",
         style: { fontSize: "11px" },
-        title: "How much of the render is new. 1.00 ignores the init entirely; low values keep its "
-             + "composition and only restyle. Click to step down, right-click to step up.",
+        title: t("How much of the render is new. 1.00 ignores the init entirely; low values keep its "
+               + "composition and only restyle. Click to step down, right-click to step up."),
         text: init.denoise.toFixed(2),
         onclick: () => {
           init.denoise = Math.max(S.PRESTAGE_MIN_DENOISE, Math.round((init.denoise - 0.05) * 100) / 100);
@@ -288,7 +290,7 @@ export class PreStageEditor {
         },
       }),
       el("button", {
-        class: "mmc-asset-x", text: "✕", title: "Remove the init image",
+        class: "mmc-asset-x", text: "✕", title: t("Remove the init image"),
         onclick: () => { this.state.init = null; this.commit(); },
       }),
     ]);
@@ -301,9 +303,9 @@ export class PreStageEditor {
     }, [
       el("img", { class: "mmc-asset-thumb", src: viewUrl(ref.filename, { preview: true }), alt: ref.filename }),
       el("span", { class: "mmc-asset-handle", text: `@${ref.handle}` }),
-      el("span", { class: "mmc-asset-role", text: "style" }),
+      el("span", { class: "mmc-asset-role", text: t("style") }),
       el("button", {
-        class: "mmc-asset-x", text: "✕", title: `Remove @${ref.handle}`,
+        class: "mmc-asset-x", text: "✕", title: t("Remove @{handle}", { handle: ref.handle }),
         onclick: () => {
           this.state.refs = this.state.refs.filter((r) => r.handle !== ref.handle);
           this.commit();
@@ -319,12 +321,12 @@ export class PreStageEditor {
       el("button", {
         class: "mmc-ghost",
         style: { fontSize: "11px" },
-        title: "Strength — edit on the LoRA card",
+        title: t("Strength — edit on the LoRA card"),
         text: Number(entry.strength ?? 1).toFixed(2),
         onclick: () => this.manageLoras(),
       }),
       el("button", {
-        class: "mmc-asset-x", text: "✕", title: `Remove ${entry.name}`,
+        class: "mmc-asset-x", text: "✕", title: t("Remove {name}", { name: entry.name }),
         onclick: () => { S.removeLora(this.state, entry.name); this.commit(); },
       }),
     ]);
@@ -334,9 +336,9 @@ export class PreStageEditor {
     if (triggers.length) {
       parts.push(el("div", {
         class: "mmc-note",
-        title: "Prefixed to the prompt when this queues. Edit the list on the LoRA cards.",
+        title: t("Prefixed to the prompt when this queues. Edit the list on the LoRA cards."),
       }, [
-        el("span", { class: "mmc-note-key", text: "triggers" }),
+        el("span", { class: "mmc-note-key", text: t("triggers") }),
         el("span", { text: triggers.join(", ") }),
       ]));
     }
@@ -353,16 +355,16 @@ export class PreStageEditor {
       class: "mmc-pill",
       disabled: geometry.fromImage || undefined,
       title: geometry.fromImage
-        ? "The aspect follows the init image — the resolution pill still sets the scale."
-        : "Aspect Ratio",
+        ? t("The aspect follows the init image — the resolution pill still sets the scale.")
+        : t("Aspect Ratio"),
       onclick: (event) => this.openAspect(event.currentTarget),
     }, geometry.fromImage
-      ? [aspectGlyph(geometry.ratio, PILL_GLYPH), el("span", { class: "mmc-pill-sub", text: "from image" })]
+      ? [aspectGlyph(geometry.ratio, PILL_GLYPH), el("span", { class: "mmc-pill-sub", text: t("from image") })]
       : [aspectGlyph(geometry.ratio, PILL_GLYPH), el("span", { text: state.aspect })]);
 
     const resPill = el("button", {
       class: "mmc-pill",
-      title: "Short edge. Both models are comfortable up to a 2048×2048 area.",
+      title: t("Short edge. Both models are comfortable up to a 2048×2048 area."),
       onclick: (event) => this.openResolution(event.currentTarget),
     }, [
       icon("res", 16),
@@ -377,9 +379,9 @@ export class PreStageEditor {
       // the step count, which is why this is a preset pill and not a slider.
       pills.push(el("button", {
         class: "mmc-pill",
-        title: QUALITY_TITLE[state.quality],
+        title: t(QUALITY_TITLE[state.quality]),
         onclick: (event) => openChoicePopover(event.currentTarget, {
-          title: "Ideogram preset",
+          title: t("Ideogram preset"),
           options: [...S.PRESTAGE_IDEOGRAM_QUALITIES],
           value: state.quality,
           onPick: (picked) => {
@@ -394,9 +396,9 @@ export class PreStageEditor {
     if (state.init) {
       pills.push(stepperPill({
         value: state.init.denoise, min: S.PRESTAGE_MIN_DENOISE, max: 1, step: 0.05, width: "52px",
-        title: "img2img strength — how much of the render is new. 1.00 ignores the init entirely; "
-             + "low values keep its composition and only restyle.",
-        format: (n) => `img ${n.toFixed(2)}`,
+        title: t("img2img strength — how much of the render is new. 1.00 ignores the init entirely; "
+               + "low values keep its composition and only restyle."),
+        format: (n) => t("img {value}", { value: n.toFixed(2) }),
         onChange: (next) => { state.init.denoise = next; this.commit(); },
       }));
     }
@@ -420,10 +422,11 @@ export class PreStageEditor {
       el("button", {
         class: "mmc-turbo-main",
         title: turbo.on
-          ? `Turbo — running the Turbo checkpoint at ${io.value("steps", "?")} steps, cfg 1. `
-            + "Switching off loads RAW again and puts the sampler row back."
-          : "Turbo off — running RAW. On, the Turbo checkpoint (an 8-step distillation) is loaded "
-            + "instead and the row drops to the picked quality at cfg 1.",
+          ? t("Turbo — running the Turbo checkpoint at {steps} steps, cfg 1. "
+            + "Switching off loads RAW again and puts the sampler row back.",
+            { steps: io.value("steps", "?") })
+          : t("Turbo off — running RAW. On, the Turbo checkpoint (an 8-step distillation) is loaded "
+            + "instead and the row drops to the picked quality at cfg 1."),
         onclick: () => {
           if (turbo.on) {
             const saved = turbo.saved ?? S.PRESTAGE_KREA_RAW;
@@ -448,7 +451,7 @@ export class PreStageEditor {
           }
           this.commit();
         },
-      }, [icon("bolt", 16), el("span", { text: turbo.on ? "turbo" : "turbo off" })]),
+      }, [icon("bolt", 16), el("span", { text: t(turbo.on ? "turbo" : "turbo off") })]),
     ]));
 
     if (turbo.on) {
@@ -457,14 +460,14 @@ export class PreStageEditor {
         el("button", {
           class: "mmc-turbo-opt",
           "aria-pressed": steps === S.PRESTAGE_TURBO_STEPS[quality],
-          title: TURBO_TITLE[quality],
+          title: t(TURBO_TITLE[quality]),
           onclick: () => {
             turbo.quality = quality;
             io.set("steps", S.PRESTAGE_TURBO_STEPS[quality]);
             this.commit();
           },
         }, [
-          el("span", { text: quality === "medium" ? "med" : quality }),
+          el("span", { text: t(quality === "medium" ? "med" : quality) }),
           el("span", { class: "mmc-pill-sub", text: String(S.PRESTAGE_TURBO_STEPS[quality]) }),
         ]))));
     }
@@ -478,22 +481,22 @@ export class PreStageEditor {
     const missing = S.missingPreStageModels(this.state);
     const label = missing.length
       ? (missing.length === 1
-          ? `no ${S.PRESTAGE_FIELD_LABEL[missing[0]].toLowerCase()}`
-          : `${missing.length} weights missing`)
+          ? t("no {field}", { field: t(S.PRESTAGE_FIELD_LABEL[missing[0]]).toLowerCase() })
+          : t("{count} weights missing", { count: missing.length }))
       : this.state.models.dtype === "default"
-        ? "weights" : `weights · ${this.state.models.dtype.replace("fp8_", "fp8 ")}`;
+        ? t("weights") : t("weights · {dtype}", { dtype: this.state.models.dtype.replace("fp8_", "fp8 ") });
     return el("button", {
       class: `mmc-pill mmc-weights${missing.length ? " missing" : ""}`,
       title: missing.length
-        ? `Not picked yet: ${missing.map((f) => S.PRESTAGE_FIELD_LABEL[f]).join(", ")}. `
-          + "The render is refused without them."
-        : `Which files ${S.PRESTAGE_ARCH_LABEL[this.state.arch]} loads.`,
+        ? t("Not picked yet: {fields}. The render is refused without them.",
+            { fields: missing.map((f) => t(S.PRESTAGE_FIELD_LABEL[f])).join(", ") })
+        : t("Which files {arch} loads.", { arch: S.PRESTAGE_ARCH_LABEL[this.state.arch] }),
       onclick: (event) => this.openWeights(event.currentTarget),
     }, [icon("weights", 16), el("span", { text: label })]);
   }
 
   openWeights(anchor) {
-    const NONE = "— none —";
+    const NONE = t("— none —");
     const state = this.state;
     const pop = el("div", { class: "mmc-pop mmc-weights-pop" });
     const body = el("div");
@@ -511,13 +514,13 @@ export class PreStageEditor {
       const rows = S.PRESTAGE_FIELDS[state.arch].map((field) => el("div", {
         class: `mmc-weight-row${missing.has(field) ? " missing" : ""}`,
       }, [
-        el("span", { class: "mmc-weight-name", text: S.PRESTAGE_FIELD_LABEL[field] }),
+        el("span", { class: "mmc-weight-name", text: t(S.PRESTAGE_FIELD_LABEL[field]) }),
         el("button", {
           class: `mmc-weight-file${side[field] ? "" : " empty"}`,
-          title: S.PRESTAGE_FIELD_HINT[state.arch][field],
-          text: side[field] || "not set",
+          title: t(S.PRESTAGE_FIELD_HINT[state.arch][field]),
+          text: side[field] || t("not set"),
           onclick: (event) => openChoicePopover(event.currentTarget, {
-            title: S.PRESTAGE_FIELD_LABEL[field],
+            title: t(S.PRESTAGE_FIELD_LABEL[field]),
             options: [NONE, ...lists[field]],
             value: side[field] || NONE,
             onPick: (picked) => {
@@ -530,14 +533,14 @@ export class PreStageEditor {
       ]));
 
       rows.push(el("div", { class: "mmc-weight-row" }, [
-        el("span", { class: "mmc-weight-name", text: "Precision" }),
+        el("span", { class: "mmc-weight-name", text: t("Precision") }),
         el("button", {
           class: "mmc-weight-file",
-          title: "How the checkpoints are loaded. fp8 halves the weights in VRAM at some cost "
-               + "in fidelity; 'default' loads them as they were saved.",
+          title: t("How the checkpoints are loaded. fp8 halves the weights in VRAM at some cost "
+                 + "in fidelity; 'default' loads them as they were saved."),
           text: state.models.dtype,
           onclick: (event) => openChoicePopover(event.currentTarget, {
-            title: "Precision",
+            title: t("Precision"),
             options: S.MODEL_DTYPES,
             value: state.models.dtype,
             onPick: (picked) => { state.models.dtype = picked; this.commit(); render(); },
@@ -548,7 +551,7 @@ export class PreStageEditor {
       body.replaceChildren(...rows);
     };
 
-    pop.append(el("div", { class: "mmc-pop-title", text: `Weights — ${S.PRESTAGE_ARCH_LABEL[state.arch]}` }), body);
+    pop.append(el("div", { class: "mmc-pop-title", text: t("Weights — {arch}", { arch: S.PRESTAGE_ARCH_LABEL[state.arch] }) }), body);
     render();
     document.body.appendChild(pop);
     placeNear(pop, anchor);
@@ -559,7 +562,7 @@ export class PreStageEditor {
   // ---- popovers --------------------------------------------------------------
 
   openAspect(anchor) {
-    const pop = el("div", { class: "mmc-pop" }, [el("div", { class: "mmc-pop-title", text: "Aspect Ratio" })]);
+    const pop = el("div", { class: "mmc-pop" }, [el("div", { class: "mmc-pop-title", text: t("Aspect Ratio") })]);
     for (const [label, ratio] of S.PRESTAGE_ASPECTS) {
       pop.appendChild(el("button", {
         class: "mmc-opt",
@@ -579,7 +582,7 @@ export class PreStageEditor {
     const body = edgeSlider({
       min: S.PRESTAGE_MIN_EDGE, max: S.PRESTAGE_MAX_EDGE, step: S.PRESTAGE_CANVAS_MULTIPLE,
       value: this.state.short_edge,
-      mark: S.PRESTAGE_DEFAULT_EDGE, markLabel: "default",
+      mark: S.PRESTAGE_DEFAULT_EDGE, markLabel: t("default"),
       apply: (edge) => { this.state.short_edge = edge; },
       describe: () => {
         const geometry = S.resolvedPreStage(this.state,
@@ -587,9 +590,11 @@ export class PreStageEditor {
         return {
           size: `${geometry.width} × ${geometry.height}`,
           note: this.state.short_edge >= S.PRESTAGE_MAX_EDGE
-            ? "The models' 2048 ceiling — wide ratios trade the short edge down to hold the area."
-            : `${this.state.short_edge < S.PRESTAGE_DEFAULT_EDGE ? "Faster, softer." : "Sharper, slower."} `
-              + `${S.PRESTAGE_DEFAULT_EDGE} is the comfortable default for both models.`,
+            ? t("The models' 2048 ceiling — wide ratios trade the short edge down to hold the area.")
+            : t("{speed} {edge} is the comfortable default for both models.", {
+                speed: t(this.state.short_edge < S.PRESTAGE_DEFAULT_EDGE ? "Faster, softer." : "Sharper, slower."),
+                edge: S.PRESTAGE_DEFAULT_EDGE,
+              }),
         };
       },
       commit: () => this.commit(),
@@ -779,9 +784,9 @@ export class PreStageBody {
     };
     return el("button", {
       class: `mmc-pill mmc-prestage-arch${S.isStill(state) ? " mmc-experimental" : ""}`,
-      title: `${ARCH_TITLE[state.arch]} Click to switch.`,
+      title: t("{arch} Click to switch.", { arch: t(ARCH_TITLE[state.arch]) }),
       onclick: (event) => openChoicePopover(event.currentTarget, {
-        title: "Image model",
+        title: t("Image model"),
         options: S.PRESTAGE_ARCHES.map((arch) => S.PRESTAGE_ARCH_LABEL[arch]),
         value: S.PRESTAGE_ARCH_LABEL[state.arch],
         onPick: (picked) => this.setArch(
@@ -798,17 +803,22 @@ export class PreStageBody {
     const still = this.state.minimax;
     const latents = S.stillLatentFrames(still.frames);
 
+    const lengthLabel = (n) => t("{frames} frames · {latents} latent",
+                                 { frames: n, latents: S.stillLatentFrames(n) });
     const length = el("button", {
       class: "mmc-pill",
-      title: `${still.frames} frames sampled — ${latents} latent frames, of which one is `
+      title: t("{frames} frames sampled — {latents} latent frames, of which one is "
            + "decoded. The shortest clip is the cheapest still; H3's trained range starts at "
            + "124 frames, so longer is more in-distribution and proportionally slower.",
+           { frames: still.frames, latents }),
       onclick: (event) => openChoicePopover(event.currentTarget, {
-        title: "Sampled length",
-        options: S.PRESTAGE_STILL_LENGTHS.map((n) => `${n} frames · ${S.stillLatentFrames(n)} latent`),
-        value: `${still.frames} frames · ${latents} latent`,
+        title: t("Sampled length"),
+        options: S.PRESTAGE_STILL_LENGTHS.map(lengthLabel),
+        value: lengthLabel(still.frames),
         onPick: (picked) => {
-          still.frames = Number(picked.split(" ")[0]);
+          const frames = S.PRESTAGE_STILL_LENGTHS.find((n) => lengthLabel(n) === picked);
+          if (frames == null) return;
+          still.frames = frames;
           // A shorter clip can leave the kept frame past the end of it.
           const total = S.stillLatentFrames(still.frames);
           if (still.latent_index >= total) still.latent_index = total - 1;
@@ -817,14 +827,14 @@ export class PreStageBody {
         },
       }),
     }, [icon("clock", 16), el("span", { text: `${still.frames}f` }),
-        el("span", { class: "mmc-pill-sub", text: `${latents} latent` })]);
+        el("span", { class: "mmc-pill-sub", text: t("{latents} latent", { latents }) })]);
 
     const index = stepperPill({
       value: still.latent_index, min: -latents, max: latents - 1, step: 1, width: "56px",
-      title: "Which latent frame becomes the picture. 0 is the causal first frame — the one "
-           + "slice the single-image VAE was trained on, and the only one that is a function "
-           + "of a single video frame. Negative counts from the end.",
-      format: (n) => `latent ${n}`,
+      title: t("Which latent frame becomes the picture. 0 is the causal first frame — the one "
+             + "slice the single-image VAE was trained on, and the only one that is a function "
+             + "of a single video frame. Negative counts from the end."),
+      format: (n) => t("latent {n}", { n }),
       onChange: (next) => { still.latent_index = Math.round(next); this.commit(); },
     });
 
@@ -838,10 +848,10 @@ export class PreStageBody {
   renderFrameGrabTool() {
     return el("button", {
       class: "mmc-tool",
-      title: "Pull a single frame off a video's playhead and open on it — saved as a PNG in "
-           + "the input folder.",
+      title: t("Pull a single frame off a video's playhead and open on it — saved as a PNG in "
+             + "the input folder."),
       onclick: () => this.grabFrame(),
-    }, [el("span", { class: "mmc-tool-icon" }, [icon("video")]), el("span", { text: "From video" })]);
+    }, [el("span", { class: "mmc-tool-icon" }, [icon("video")]), el("span", { text: t("From video") })]);
   }
 
   async grabFrame() {
@@ -877,8 +887,8 @@ export class PreStageBody {
     const filename = `${saved.subfolder ? `${saved.subfolder}/` : ""}${saved.filename} [output]`;
     const chip = (role, label, title) => el("button", {
       class: "mmc-stage-chip mmc-stage-send",
-      text: label,
-      title: `${title} on ${target.label}.`,
+      text: t(label),
+      title: t("{action} on {target}.", { action: t(title), target: target.label }),
       onpointerdown: (event) => event.stopPropagation(),
       onclick: () => target.attach(role, filename),
     });

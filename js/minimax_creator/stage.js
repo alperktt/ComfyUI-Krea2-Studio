@@ -32,6 +32,7 @@
 import { api } from "../../../scripts/api.js";
 import { el } from "./dom.js";
 import { outputUrl } from "./api.js";
+import { t } from "./i18n.js";
 
 /** Every event this listens to. `b_preview` is the metadata-less legacy frame:
  *  it names no node, so it is only trusted while `progress_state` already says
@@ -229,7 +230,7 @@ export class Stage {
         this.state = "failed";
         this.progress = null;
         clearInterval(this.ticker);
-        this.error = detail.exception_message || "the render failed";
+        this.error = detail.exception_message || t("the render failed");
         this.render();
         break;
     }
@@ -305,8 +306,8 @@ export class Stage {
         ...(this.state === "done" && this.onGallery ? [
           el("button", {
             class: "mmc-stage-chip mmc-stage-gallery",
-            text: "Gallery",
-            title: "Browse finished renders",
+            text: t("Gallery"),
+            title: t("Browse finished renders"),
             onclick: () => this.onGallery(),
             onpointerdown: (event) => event.stopPropagation(),
           }),
@@ -319,7 +320,7 @@ export class Stage {
     this.readout.replaceChildren(
       el("span", {
         class: "mmc-stage-chip",
-        text: this.progress?.total ? `${this.progress.step} / ${this.progress.total}` : "sampling",
+        text: this.progress?.total ? `${this.progress.step} / ${this.progress.total}` : t("sampling"),
       }),
       el("span", { class: "mmc-stage-chip", text: elapsed(Date.now() - this.startedAt) }),
     );

@@ -12,6 +12,7 @@
 // parses.
 
 import { el, floatAbove } from "./dom.js";
+import { t } from "./i18n.js";
 import { listAssets, viewUrl } from "./api.js";
 import { tagIndex } from "./state.js";
 
@@ -36,7 +37,7 @@ export class PromptBox {
       spellcheck: "false",
       role: "textbox",
       "aria-multiline": "true",
-      "data-placeholder": "Describe your video, use @ to reference images, videos, audio, or elements",
+      "data-placeholder": t("Describe your video, use @ to reference images, videos, audio, or elements"),
     });
 
     this.root.addEventListener("input", () => this.onEdit());
@@ -107,8 +108,8 @@ export class PromptBox {
   setSuperseded(on) {
     this.root.classList.toggle("superseded", !!on);
     this.root.title = on
-      ? "Not queued while the rewrite below is on — that is what the model reads. "
-        + "Edit this and refine again, or revert the rewrite, to send it."
+      ? t("Not queued while the rewrite below is on — that is what the model reads. "
+        + "Edit this and refine again, or revert the rewrite, to send it.")
       : "";
   }
 
@@ -287,7 +288,7 @@ export class PromptBox {
     this.menu.replaceChildren();
     this.rows = [];
     if (!this.flat.length) {
-      this.menu.appendChild(el("div", { class: "mmc-mention-empty", text: "Nothing matches." }));
+      this.menu.appendChild(el("div", { class: "mmc-mention-empty", text: t("Nothing matches.") }));
       return;
     }
 
@@ -328,14 +329,14 @@ export class PromptBox {
     };
 
     if (attached.length) {
-      this.menu.appendChild(el("div", { class: "mmc-mention-head", text: "Attached" }));
+      this.menu.appendChild(el("div", { class: "mmc-mention-head", text: t("Attached") }));
       for (const option of attached) this.menu.appendChild(row(option));
     }
     if (library.length) {
       const blocked = this.hooks.attachBlocked("reference");
       this.menu.appendChild(el("div", {
         class: "mmc-mention-head",
-        text: blocked ? "Input folder — unavailable while a start/end frame is set" : "Input folder",
+        text: blocked ? t("Input folder — unavailable while a start/end frame is set") : t("Input folder"),
       }));
       for (const option of library) this.menu.appendChild(row(option));
     }

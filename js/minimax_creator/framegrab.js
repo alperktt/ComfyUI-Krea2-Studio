@@ -11,6 +11,7 @@
 
 import { el, icon, drawFrame, mountOverlay } from "./dom.js";
 import { viewUrl, upload } from "./api.js";
+import { t } from "./i18n.js";
 
 /** Where grabbed frames land under input/ — a shelf of their own, so the picker
  *  does not mix them into the root. */
@@ -48,7 +49,7 @@ class FrameGrab {
     this.media.addEventListener("loadeddata", () => this.draw());
     this.media.addEventListener("seeked", () => this.draw());
 
-    this.time = el("span", { class: "mmc-grab-time", text: "0.00 s" });
+    this.time = el("span", { class: "mmc-grab-time", text: t("{seconds} s", { seconds: "0.00" }) });
     this.scrub = el("input", {
       class: "mmc-grab-scrub",
       type: "range", min: "0", max: "0", step: "0.001", value: "0",
@@ -71,8 +72,8 @@ class FrameGrab {
 
     this.use = el("button", {
       class: "mmc-btn mmc-btn-primary",
-      text: "Use this frame",
-      title: "Save the frame on the playhead as a PNG in the input folder, at the clip's own resolution.",
+      text: t("Use this frame"),
+      title: t("Save the frame on the playhead as a PNG in the input folder, at the clip's own resolution."),
       onclick: () => this.commit(),
     });
 
@@ -81,17 +82,17 @@ class FrameGrab {
         el("span", { text: this.path.split("/").pop() })]),
       this.stage,
       el("div", { class: "mmc-grab-row" }, [
-        stepButton("−1s", -1, "Back one second"),
+        stepButton("−1s", -1, t("Back one second")),
         // 1/24 s: the pipeline's own frame grid. The clip may not be 24 fps,
         // but a step the size of ours is the useful nudge either way.
-        stepButton("−f", -1 / 24, "Back one frame"),
+        stepButton("−f", -1 / 24, t("Back one frame")),
         this.scrub,
-        stepButton("+f", 1 / 24, "Forward one frame"),
-        stepButton("+1s", 1, "Forward one second"),
+        stepButton("+f", 1 / 24, t("Forward one frame")),
+        stepButton("+1s", 1, t("Forward one second")),
         this.time,
       ]),
       el("div", { class: "mmc-grab-actions" }, [
-        el("button", { class: "mmc-btn", text: "Cancel", onclick: () => this.close(null) }),
+        el("button", { class: "mmc-btn", text: t("Cancel"), onclick: () => this.close(null) }),
         this.use,
       ]),
     ]);
@@ -110,24 +111,24 @@ class FrameGrab {
   }
 
   renderTime() {
-    this.time.textContent = `${(Number(this.scrub.value) || 0).toFixed(2)} s`;
+    this.time.textContent = t("{seconds} s", { seconds: (Number(this.scrub.value) || 0).toFixed(2) });
   }
 
   async commit() {
     if (this.busy || !this.media.videoWidth) return;
     this.busy = true;
-    this.use.textContent = "Saving…";
+    this.use.textContent = t("Saving…");
     this.use.disabled = true;
     try {
       this.draw();
       const blob = await new Promise((done) => this.stage.toBlob(done, "image/png"));
-      if (!blob) throw new Error("could not read the frame");
+      if (!blob) throw new Error(t("could not read the frame"));
       const stem = this.path.split("/").pop().replace(/\.[^.]+$/, "");
       const name = `${stem}_t${(this.media.currentTime || 0).toFixed(2)}s.png`;
       const saved = await upload(new File([blob], name, { type: "image/png" }), SUBFOLDER);
       this.close({ path: saved.path });
     } catch (error) {
-      this.use.textContent = `failed — ${String(error.message || error)}`;
+      this.use.textContent = t("failed — {error}", { error: String(error.message || error) });
       this.use.disabled = false;
       this.busy = false;
     }

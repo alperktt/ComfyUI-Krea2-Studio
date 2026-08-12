@@ -4,6 +4,7 @@
 
 import { ASPECT_PRESETS, FPS, MIN_SHORT_EDGE, NATIVE_SHORT_EDGE, CANVAS_MULTIPLE,
          framesForSeconds, secondsForFrames, resolveCanvas } from "./canvas.js";
+import { t } from "./i18n.js";
 // Where files land is not in the blob any more — it is a preference of this
 // machine, in `settings.js`, so a shared workflow does not carry one person's
 // folder names onto another person's disk.
@@ -1337,22 +1338,25 @@ export function singleProblem(timeline) {
     // was written for it at all.
     const text = (refinedBody(shot) || shot.prompt || "").trim();
     if (!text && !(index === 0 && globalPrompt)) {
-      return `Shot ${index + 1} has no prompt. In one pass the shots are one description `
-           + `with cuts in it, so an empty one leaves a cut with nothing on the far side.`;
+      return t("Shot {shot} has no prompt. In one pass the shots are one description "
+             + "with cuts in it, so an empty one leaves a cut with nothing on the far side.",
+             { shot: index + 1 });
     }
     if (frameAsset(shot, "first_frame") && index !== 0) {
-      return `Shot ${index + 1} has a start frame, but one pass opens on shot 1.`;
+      return t("Shot {shot} has a start frame, but one pass opens on shot 1.", { shot: index + 1 });
     }
     if (frameAsset(shot, "last_frame") && index !== shots.length - 1) {
-      return `Shot ${index + 1} has an end frame, but one pass ends on shot ${shots.length}.`;
+      return t("Shot {shot} has an end frame, but one pass ends on shot {last}.",
+               { shot: index + 1, last: shots.length });
     }
   }
 
   const withRefs = shots.findIndex(hasReferences);
   const withFrames = shots.findIndex((s) => frameAsset(s, "first_frame") || frameAsset(s, "last_frame"));
   if (withRefs >= 0 && withFrames >= 0) {
-    return `Shot ${withFrames + 1} has a start/end frame and shot ${withRefs + 1} has references. `
-         + `Those are different checkpoints and one pass runs on one of them.`;
+    return t("Shot {frames} has a start/end frame and shot {refs} has references. "
+           + "Those are different checkpoints and one pass runs on one of them.",
+           { frames: withFrames + 1, refs: withRefs + 1 });
   }
 
   for (const [key, what] of [["checkpoint", "the checkpoint"], ["soundscape", "the soundscape"],
@@ -1361,7 +1365,7 @@ export function singleProblem(timeline) {
       .map((shot) => (key === "checkpoint" ? shot.checkpoint : (shot[key] || "").trim()))
       .filter((value) => value && value !== "auto"));
     if (key !== "checkpoint" && (timeline[key] || "").trim()) seen.add((timeline[key] || "").trim());
-    if (seen.size > 1) return `The shots disagree about ${what}. One pass has only one.`;
+    if (seen.size > 1) return t("The shots disagree about {what}. One pass has only one.", { what: t(what) });
   }
   return null;
 }
@@ -1480,12 +1484,12 @@ export function capacity(state, kind) {
  */
 export function overflow(state) {
   const used = counts(state);
-  if (used.image > MAX_REF_IMAGES) return `At most ${MAX_REF_IMAGES} reference images.`;
-  if (used.video > MAX_REF_VIDEOS) return `At most ${MAX_REF_VIDEOS} reference videos.`;
+  if (used.image > MAX_REF_IMAGES) return t("At most {max} reference images.", { max: MAX_REF_IMAGES });
+  if (used.video > MAX_REF_VIDEOS) return t("At most {max} reference videos.", { max: MAX_REF_VIDEOS });
   if (used.audio > MAX_REF_AUDIOS) {
-    return `At most ${MAX_REF_AUDIOS} reference audio clips, counting video soundtracks.`;
+    return t("At most {max} reference audio clips, counting video soundtracks.", { max: MAX_REF_AUDIOS });
   }
-  if (used.files > MAX_REF_FILES) return `At most ${MAX_REF_FILES} reference files in total.`;
+  if (used.files > MAX_REF_FILES) return t("At most {max} reference files in total.", { max: MAX_REF_FILES });
   return null;
 }
 
@@ -1513,17 +1517,17 @@ export function blockedReason(state, action) {
   // on the segment's own timeline, which Ref2VA reads alongside its
   // references. Only a segment's *own* frame files still conflict with them.
   if (action === "reference" && frameFile(state)) {
-    return "Remove the start/end frame first — references use the Ref2VA checkpoint, frames use FL2VA.";
+    return t("Remove the start/end frame first — references use the Ref2VA checkpoint, frames use FL2VA.");
   }
   if (action === "first_frame" && continues(state)) {
-    return "This segment's start frame is an earlier segment's last frame. Turn continuation off to choose one.";
+    return t("This segment's start frame is an earlier segment's last frame. Turn continuation off to choose one.");
   }
   if ((action === "first_frame" || action === "last_frame") && hasReferences(state)) {
-    return "Remove the references first — start/end frames use the FL2VA checkpoint, references use Ref2VA.";
+    return t("Remove the references first — start/end frames use the FL2VA checkpoint, references use Ref2VA.");
   }
   if (action === "continue" && frameAsset(state, "first_frame")) {
-    return "Remove this segment's start frame first — continuing would replace it with the source "
-         + "segment's last frame.";
+    return t("Remove this segment's start frame first — continuing would replace it with the source "
+           + "segment's last frame.");
   }
   return null;
 }

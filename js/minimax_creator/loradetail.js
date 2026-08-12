@@ -17,6 +17,7 @@
 
 import { el, ICONS, svg, mountOverlay } from "./dom.js";
 import { loraDetail, loraShowcaseUrl } from "./api.js";
+import { t } from "./i18n.js";
 
 /** Open the sheet for one listing row. Resolves when it closes. */
 export function openLoraDetail(row) {
@@ -138,6 +139,8 @@ function headerFacts(header, size) {
   if (software?.name) push("Trainer", `${software.name} ${software.version || ""}`.trim());
   else if (Object.keys(md).some((key) => key.startsWith("ss_"))) push("Trainer", "kohya sd-scripts");
   push("Base model", md.ss_base_model_version || md.ss_sd_model_name);
+  // Labels stay English here; they are translated where they are rendered
+  // (and filtered against in fileFacts by their English spelling).
   const rank = header?.ranks?.length ? header.ranks.join(" / ") : md.ss_network_dim;
   const alpha = md.ss_network_alpha;
   push("Rank", rank && (alpha ? `${rank} · α ${alpha}` : String(rank)));
@@ -146,10 +149,12 @@ function headerFacts(header, size) {
   push("Tensors", header?.tensors);
   const steps = training?.step ?? md.ss_steps ?? md.ss_max_train_steps;
   const epoch = training?.epoch ?? md.ss_epoch ?? md.ss_num_epochs;
-  push("Trained", [steps && `${fmtCount(Number(steps)) ?? steps} steps`, epoch && `epoch ${epoch}`]
-    .filter(Boolean).join(" · "));
+  push("Trained", [
+    steps && t("{steps} steps", { steps: fmtCount(Number(steps)) ?? steps }),
+    epoch && t("epoch {epoch}", { epoch }),
+  ].filter(Boolean).join(" · "));
   push("Resolution", md.ss_resolution);
-  push("Dataset", md.ss_num_train_images && `${md.ss_num_train_images} images`);
+  push("Dataset", md.ss_num_train_images && t("{count} images", { count: md.ss_num_train_images }));
   push("Learning rate", md.ss_learning_rate);
   const hash = md.sshs_model_hash || md.ss_new_sd_model_hash;
   push("Hash", hash && String(hash).slice(0, 12));
@@ -186,7 +191,7 @@ class LoraDetailSheet {
 
   mount() {
     this.sheet = el("div", { class: "mmc-sheet" }, [
-      el("div", { class: "mmc-sheet-info" }, [el("div", { class: "mmc-empty", text: "Loading…" })]),
+      el("div", { class: "mmc-sheet-info" }, [el("div", { class: "mmc-empty", text: t("Loading…") })]),
     ]);
     this.overlay = el("div", {
       class: "mmc-overlay",
@@ -216,7 +221,7 @@ class LoraDetailSheet {
     if (detail.error) {
       this.sheet.replaceChildren(el("div", { class: "mmc-sheet-info" }, [
         this.closeButton(),
-        el("div", { class: "mmc-empty", text: `Could not read this LoRA: ${detail.error}` }),
+        el("div", { class: "mmc-empty", text: t("Could not read this LoRA: {error}", { error: detail.error }) }),
       ]));
       return;
     }
@@ -299,7 +304,7 @@ class LoraDetailSheet {
     if (facts.length) {
       children.push(el("div", { class: "mmc-sheet-recipe-facts" }, facts.map(([label, value]) =>
         el("span", {}, [
-          el("span", { class: "mmc-sheet-recipe-k", text: label }),
+          el("span", { class: "mmc-sheet-recipe-k", text: t(label) }),
           " ",
           el("span", { class: "mmc-sheet-recipe-v", text: value }),
         ]))));
@@ -313,7 +318,7 @@ class LoraDetailSheet {
     if (meta.negative_prompt) {
       children.push(el("div", {
         class: "mmc-sheet-negative",
-        text: `negative: ${meta.negative_prompt}`,
+        text: t("negative: {prompt}", { prompt: meta.negative_prompt }),
         title: meta.negative_prompt,
       }));
     }
@@ -323,15 +328,15 @@ class LoraDetailSheet {
   copyButton(text) {
     const button = el("button", {
       class: "mmc-sheet-copy",
-      text: "Copy prompt",
+      text: t("Copy prompt"),
       onclick: async () => {
         try {
           await navigator.clipboard.writeText(text);
-          button.textContent = "Copied";
+          button.textContent = t("Copied");
         } catch {
-          button.textContent = "Copy failed";
+          button.textContent = t("Copy failed");
         }
-        setTimeout(() => { button.textContent = "Copy prompt"; }, 1500);
+        setTimeout(() => { button.textContent = t("Copy prompt"); }, 1500);
       },
     });
     return button;
@@ -360,10 +365,10 @@ class LoraDetailSheet {
     const eyebrow = [meta.type, meta.base_model].filter(Boolean).join(" · ");
 
     const statRow = el("div", { class: "mmc-sheet-stats" }, [
-      Number.isFinite(stats.downloads) && this.stat(fmtCount(stats.downloads), "downloads"),
-      stats.rating > 0 && this.stat(`★ ${stats.rating.toFixed(1)}`, "rating"),
-      stats.favorites > 0 && this.stat(fmtCount(stats.favorites), "favorites"),
-      stats.comments > 0 && this.stat(fmtCount(stats.comments), "comments"),
+      Number.isFinite(stats.downloads) && this.stat(fmtCount(stats.downloads), t("downloads")),
+      stats.rating > 0 && this.stat(`★ ${stats.rating.toFixed(1)}`, t("rating")),
+      stats.favorites > 0 && this.stat(fmtCount(stats.favorites), t("favorites")),
+      stats.comments > 0 && this.stat(fmtCount(stats.comments), t("comments")),
     ].filter(Boolean));
 
     const description = [meta.description, meta.version_description]
@@ -383,41 +388,41 @@ class LoraDetailSheet {
       class: "mmc-sheet-link",
       href: meta.url,
       target: "_blank", rel: "noopener noreferrer",
-      text: "Open on Civitai ↗",
+      text: t("Open on Civitai ↗"),
     }) : null;
 
     return el("div", { class: "mmc-sheet-info" }, [
       this.closeButton(),
       el("div", { class: "mmc-sheet-eyebrow" }, [
         eyebrow,
-        meta.nsfw ? el("span", { class: "mmc-sheet-nsfw", text: "NSFW" }) : null,
+        meta.nsfw ? el("span", { class: "mmc-sheet-nsfw", text: t("NSFW") }) : null,
       ]),
       el("div", { class: "mmc-sheet-title", text: meta.title || this.row.base }),
       el("div", {
         class: "mmc-sheet-byline",
         text: [
           meta.version,
-          meta.creator && `by ${meta.creator}`,
-          meta.fetched_at && `fetched ${fmtDate(meta.fetched_at)}`,
+          meta.creator && t("by {creator}", { creator: meta.creator }),
+          meta.fetched_at && t("fetched {date}", { date: fmtDate(meta.fetched_at) }),
         ].filter(Boolean).join(" · "),
       }),
       statRow.childElementCount ? statRow : null,
-      this.section("Trigger words", this.chips(meta.trained_words, "mmc-sheet-chip accent")),
+      this.section(t("Trigger words"), this.chips(meta.trained_words, "mmc-sheet-chip accent")),
       // Whoever wrote the sidecar had settled on a weight. The manager's slider
       // now starts there, so the sheet says where "there" came from.
-      this.section("Suggested strength", Number.isFinite(meta.strength)
+      this.section(t("Suggested strength"), Number.isFinite(meta.strength)
         ? el("div", { class: "mmc-sheet-license", text: meta.strength.toFixed(2) })
         : null),
-      this.section("Notes", meta.notes
+      this.section(t("Notes"), meta.notes
         ? el("div", { class: "mmc-sheet-desc" }, [el("div", { text: meta.notes })])
         : null),
-      this.section("About", about),
-      this.section("Versions", this.versions(meta)),
-      this.section("License", this.license(meta.license)),
-      this.section("Tags", meta.tags?.length
+      this.section(t("About"), about),
+      this.section(t("Versions"), this.versions(meta)),
+      this.section(t("License"), this.license(meta.license)),
+      this.section(t("Tags"), meta.tags?.length
         ? el("div", { class: "mmc-sheet-tags", text: meta.tags.join(" · ") })
         : null),
-      this.section("File", this.fileFacts(meta)),
+      this.section(t("File"), this.fileFacts(meta)),
       link,
     ]);
   }
@@ -439,7 +444,7 @@ class LoraDetailSheet {
           class: "mmc-sheet-version-sub",
           text: [version.base_model, fmtDate(version.created_at)].filter(Boolean).join(" · "),
         }),
-        version.id === meta.version_id ? el("span", { class: "mmc-sheet-installed", text: "installed" }) : null,
+        version.id === meta.version_id ? el("span", { class: "mmc-sheet-installed", text: t("installed") }) : null,
       ])));
   }
 
@@ -450,9 +455,9 @@ class LoraDetailSheet {
     if (!license) return null;
     const lines = [
       license.commercial?.length
-        ? `Commercial use: ${license.commercial.join(", ")}` : "No commercial use",
-      license.credit ? "Credit required" : "Credit not required",
-      license.derivatives ? "Derivatives allowed" : "No derivatives",
+        ? t("Commercial use: {kinds}", { kinds: license.commercial.join(", ") }) : t("No commercial use"),
+      license.credit ? t("Credit required") : t("Credit not required"),
+      license.derivatives ? t("Derivatives allowed") : t("No derivatives"),
     ];
     return el("div", { class: "mmc-sheet-license", text: lines.join(" · ") });
   }
@@ -461,20 +466,20 @@ class LoraDetailSheet {
     const header = this.detail.header || {};
     const facts = headerFacts(header, this.detail.size)
       .filter(([label]) => ["Rank", "Precision", "Tensors", "File size"].includes(label));
-    const sources = (meta.sources || []).map((key) => SOURCE_LABEL[key] || key);
+    const sources = (meta.sources || []).map((key) => (SOURCE_LABEL[key] ? t(SOURCE_LABEL[key]) : key));
     return el("div", { class: "mmc-sheet-file" }, [
       el("div", { class: "mmc-sheet-path", text: this.row.name, title: this.row.name }),
       facts.length ? el("div", {
         class: "mmc-sheet-file-facts",
-        text: facts.map(([label, value]) => `${label.toLowerCase()} ${value}`).join(" · "),
+        text: facts.map(([label, value]) => `${t(label).toLowerCase()} ${value}`).join(" · "),
       }) : null,
-      meta.hash ? el("div", { class: "mmc-sheet-hash", text: `sha256 ${String(meta.hash).slice(0, 12)}…`, title: meta.hash }) : null,
+      meta.hash ? el("div", { class: "mmc-sheet-hash", text: t("sha256 {hash}…", { hash: String(meta.hash).slice(0, 12) }), title: meta.hash }) : null,
       // Only worth reading when something above looks wrong, which is exactly
       // when knowing which file on disk said it is the whole answer.
       sources.length ? el("div", {
         class: "mmc-sheet-file-facts",
-        title: "Where the fields above were read from. Later entries only fill in what earlier ones left blank.",
-        text: `read from ${sources.join(", ")}`,
+        title: t("Where the fields above were read from. Later entries only fill in what earlier ones left blank."),
+        text: t("read from {sources}", { sources: sources.join(", ") }),
       }) : null,
     ]);
   }
@@ -489,7 +494,7 @@ class LoraDetailSheet {
 
     const spec = facts.length ? el("div", { class: "mmc-sheet-spec" }, facts.map(([label, value]) =>
       el("div", { class: "mmc-sheet-spec-row" }, [
-        el("span", { class: "mmc-sheet-spec-k", text: label }),
+        el("span", { class: "mmc-sheet-spec-k", text: t(label) }),
         el("span", { class: "mmc-sheet-spec-v", text: value }),
       ]))) : null;
 
@@ -501,7 +506,7 @@ class LoraDetailSheet {
 
     const keys = Object.keys(metadata);
     const raw = keys.length ? el("details", { class: "mmc-sheet-raw" }, [
-      el("summary", { text: `All header fields (${keys.length})` }),
+      el("summary", { text: t("All header fields ({count})", { count: keys.length }) }),
       el("div", { class: "mmc-sheet-raw-rows" }, keys.sort().map((key) => {
         const value = String(metadata[key]);
         return el("div", { class: "mmc-sheet-raw-row" }, [
@@ -519,26 +524,26 @@ class LoraDetailSheet {
       this.closeButton(),
       el("div", { class: "mmc-sheet-eyebrow" }, [
         el("span", { class: "mmc-sheet-mono-mark" }, [svg(ICONS.effect, 13)]),
-        header.error ? "safetensors" : "safetensors header",
+        header.error ? "safetensors" : t("safetensors header"),
       ]),
       el("div", { class: "mmc-sheet-title", text: metadata.name || metadata.ss_output_name || this.row.base }),
       el("div", {
         class: "mmc-sheet-byline",
-        text: "No sidecar anywhere beside this file — everything below was read from the file itself.",
+        text: t("No sidecar anywhere beside this file — everything below was read from the file itself."),
       }),
       header.error
-        ? el("div", { class: "mmc-sheet-license", text: `The header could not be read: ${header.error}` })
+        ? el("div", { class: "mmc-sheet-license", text: t("The header could not be read: {error}", { error: header.error }) })
         : null,
-      this.section("Specification", spec),
-      this.section("Dataset tags", tagChips && [
+      this.section(t("Specification"), spec),
+      this.section(t("Dataset tags"), tagChips && [
         el("div", {
           class: "mmc-sheet-hint",
-          text: "The most frequent words in the training captions — the closest thing this file has to trigger words.",
+          text: t("The most frequent words in the training captions — the closest thing this file has to trigger words."),
         }),
         tagChips,
       ]),
       raw,
-      this.section("File", el("div", { class: "mmc-sheet-file" }, [
+      this.section(t("File"), el("div", { class: "mmc-sheet-file" }, [
         el("div", { class: "mmc-sheet-path", text: this.row.name, title: this.row.name }),
       ])),
     ]);
