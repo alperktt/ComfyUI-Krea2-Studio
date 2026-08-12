@@ -957,6 +957,61 @@ check("one pass uses each shot's rewrite as its shot body",
       one_pass_refine.body,
       "[Shot 1] A courier waits, in 16mm. [Shot 2] At 00:06.000, Her hands, closer.")
 
+# A shot-scoped rewrite is the segment's own sentence, not the piece: the
+# refiner returns the global prompt as a field of its own now, so compile joins
+# it in front of the rewrite exactly as it joins it in front of typed text.
+# That is what keeps the timeline's global box a live input after refining —
+# and only the unmarked blobs from before the marker existed, which absorbed
+# the join when they were written, are still left whole.
+check("refined_scope reads the marker",
+      compiler.refined_scope({"refined": refined(scope="shot")}), "shot")
+check("...and not off a legacy blob",
+      compiler.refined_scope({"refined": refined()}), None)
+check("...nor off a disabled rewrite",
+      compiler.refined_scope({"refined": refined(scope="shot", enabled=False)}), None)
+check("...nor off an empty body",
+      compiler.refined_scope({"refined": {"body": "  ", "scope": "shot"}}), None)
+
+scoped = timeline([segment("a courier waits", refined=refined(body=PLAIN, scope="shot"))],
+                  prompt="Live-action")
+check("a shot-scoped rewrite gets the global prompt joined in front",
+      scoped[0].body, "Live-action\n" + PLAIN)
+check("...and an empty global prompt joins nothing",
+      timeline([segment("a courier waits",
+                        refined=refined(body=PLAIN, scope="shot"))])[0].body,
+      PLAIN)
+check("a disabled shot-scoped rewrite falls back to the typed join",
+      timeline([segment("a courier waits",
+                        refined=refined(body=PLAIN, scope="shot", enabled=False))],
+               prompt="Live-action")[0].body,
+      "Live-action\na courier waits")
+
+# The join composes with a reference card's own sections: the global prose
+# leads the body, and the body is still wrapped as the six-section form.
+scoped_ref = timeline(
+    [segment("her face is @img-1",
+             refined={"body": "The woman from @img-1 turns to the window.",
+                      "scope": "shot", "source": "her face is @img-1",
+                      "sections": {"subject_definitions": "<Subject 1>: the woman",
+                                   "summary": "[Ref2VA] a portrait",
+                                   "retention_analysis": "fully_preserved: her face"}},
+             assets=[ref("img-1", "her.png")])],
+    prompt="Live-action")
+check("a shot-scoped reference rewrite keeps its sections around the joined body",
+      scoped_ref[0].body, "Live-action\nThe woman from <Picture 1> turns to the window.")
+check("...and still compiles to the six-section form",
+      [line.split(":")[0] for line in scoped_ref[0].prompt.split("\n\n")][:4],
+      ["subject_definitions", "summary", "retention_analysis", "detailed_description"])
+
+one_pass_scoped = single(
+    [segment("a courier waits", refined=refined(body="A courier waits, in 16mm.", scope="shot")),
+     segment("her hands", refined=refined(body="Her hands, closer.", scope="shot"))],
+    prompt="Live-action")
+check("one pass joins the global prompt in front of a shot-scoped shot 1",
+      one_pass_scoped.body,
+      "[Shot 1] Live-action. A courier waits, in 16mm. "
+      "[Shot 2] At 00:06.000, Her hands, closer.")
+
 check("an absent render mode means chained", compiler.render_mode({}), "chained")
 expect_error("an unknown render mode", lambda: compiler.render_mode({"render": "stitched"}), "unknown render mode")
 

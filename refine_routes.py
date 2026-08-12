@@ -179,11 +179,16 @@ def _shot(compiled, text, seconds, continues, show_labels):
 
 
 def _plan(body):
-    """The request -> (mode, shots, images), whichever of the three shapes it is.
+    """The request -> (mode, shots, images, piece, single), whichever shape it is.
 
     One shot for the Creator node and for a single timeline card; every card at
     once for a whole-timeline refine, which is the only way shot 4 can be written
     knowing what shot 1 established.
+
+    `piece` is the timeline's global prompt, or None on the Creator node, which
+    has no such field. It is handed to the model once, beside the shots, rather
+    than joined into every one of them: the join is `compile`'s at queue time,
+    and a rewrite that absorbed it would leave the global box editing nothing.
     """
     kind = body.get("kind")
     data = body.get("data")
@@ -196,7 +201,7 @@ def _plan(body):
         compiled = compiler.compile_request(data, media.image_size)
         shot, images = _shot(compiled, str(data.get("prompt") or ""),
                              compiled.seconds, False, True)
-        return compiled.mode, [shot], images
+        return compiled.mode, [shot], images, None, False
 
     single = compiler.render_mode(data) == "single"
     segments = compiler.timeline_segments(data)
@@ -216,10 +221,10 @@ def _plan(body):
         compiled = compiler.compile_segment(payload, media.image_size)
         shot, pictures = _shot(
             compiled,
-            # The joined text: in a chained timeline the global prompt stands in
-            # front of every segment, and the rewrite has to have absorbed it,
-            # because at compile time it replaces the join outright.
-            str(payload["request"].get("prompt") or ""),
+            # The segment's own text, not the payload's join: the global prompt
+            # rides beside the shots as THE PIECE, said once, and stays a
+            # compile-time join in front of the shot-scoped rewrite.
+            str(segments[index].get("prompt") or ""),
             float(segments[index].get("duration_s") or 0) if single else compiled.seconds,
             bool(payload.get("continue")),
             lone,
@@ -228,7 +233,8 @@ def _plan(body):
         shots.append(shot)
         images.extend(pictures)
 
-    return _representative(data, shots, single), shots, images
+    piece = str(data.get("prompt") or "")
+    return _representative(data, shots, single), shots, images, piece, single
 
 
 def _representative(data, shots, single):
@@ -236,10 +242,13 @@ def _representative(data, shots, single):
 
     The four keyframe modes share one guide and one reply shape, so a strip that
     mixes them needs nothing special — each card's own note goes in the message
-    beside its text. The reference form is a different document with three more
-    sections in its reply, and a single call cannot be writing both at once, so a
-    strip that mixes the two is refused here rather than silently rewritten into
-    whichever form came first.
+    beside its text. A strip with references anywhere is written under the
+    REF2VA template — the reference form is the superset, and Ref2VA is the
+    stronger checkpoint, a superset of what FL2VA was trained for — with each
+    reference card carrying its own analysis sections inside its shot entry
+    (`reply_shape`'s `ref_shots`) and each plain card keeping its own mode note
+    beside its text. So neither a mixed strip nor a chained strip of reference
+    segments needs refusing any more.
     """
     if single:
         # One pass is one generation, so the merged request has the only mode
@@ -247,28 +256,8 @@ def _representative(data, shots, single):
         return compiler.compile_single(data, media.image_size).mode
 
     modes = [shot["mode"] for shot in shots]
-    reference = [n + 1 for n, mode in enumerate(modes) if mode == "REF2VA"]
-    if reference and len(reference) != len(modes):
-        plain = next(n + 1 for n, mode in enumerate(modes) if mode != "REF2VA")
-        raise compiler.CompileError(
-            f"segment {reference[0]} has @ references and segment {plain} has none. "
-            f"Those are two different prompt formats — the six-section reference "
-            f"form and the plain one — and one rewrite is written in one of them. "
-            f"Refine those cards individually."
-        )
-    # Every chained segment is its own generation over its own reference pool,
-    # so each needs its own `subject_definitions` and `retention_analysis` — and
-    # one call returns one set. Copying that set onto every segment would put
-    # labels in a card's analysis that the card's own references never define.
-    # One pass has no such problem: there the shots share one merged pool.
-    if reference and len(modes) > 1:
-        raise compiler.CompileError(
-            "a chained timeline of reference segments is refined a card at a time. "
-            "Each segment is its own generation over its own references, so each "
-            "needs its own reference analysis, and one rewrite writes one. "
-            "(One-pass mode merges the references into a single pool and refines "
-            "the whole strip at once.)"
-        )
+    if "REF2VA" in modes:
+        return "REF2VA"
     return modes[0] if modes else "T2VA"
 
 
@@ -333,7 +322,7 @@ def _shared(shots):
     return handles, refs, labels
 
 
-def _run_skill(body, name, mode, shots, pictures, seconds, dropped):
+def _run_skill(body, name, mode, shots, pictures, seconds, dropped, piece_text=None):
     """The skill path: the packaged skill is the whole instruction.
 
     Nothing of the harness rides along — no rules, no guide, no JSON contract,
@@ -351,6 +340,12 @@ def _run_skill(body, name, mode, shots, pictures, seconds, dropped):
             "or switch the refiner back to its built-in prompts"
         )
     shot = shots[0]
+    # The skill's contract is one finished document from one request, so the
+    # global prompt is joined into the request text here, exactly as compile
+    # joins it for typed prompts — and the reply absorbs it, which is why this
+    # path returns no `scope` and compile keeps treating its rewrites whole.
+    if (piece_text or "").strip():
+        shot = {**shot, "text": compiler._join_prompt(piece_text, shot.get("text"))}
 
     skill = refine_skill.load(name)
     content = refine_local.chat(
@@ -398,7 +393,8 @@ def _run_skill(body, name, mode, shots, pictures, seconds, dropped):
 
 def _run(body):
     """The blocking half: compile, look, ask, parse. Runs on a thread."""
-    derived, shots, pictures = _plan(body)
+    kind = body.get("kind")
+    derived, shots, pictures, piece_text, single = _plan(body)
 
     dropped = _number(shots, MAX_IMAGES)
     pictures = pictures[:MAX_IMAGES]
@@ -407,7 +403,8 @@ def _run(body):
 
     skill = str(body.get("skill") or "").strip()
     if skill:
-        return _run_skill(body, skill, derived, shots, pictures, seconds, dropped)
+        return _run_skill(body, skill, derived, shots, pictures, seconds, dropped,
+                          piece_text)
 
     # Which template writes the rewrite. `auto` — the default — is the derived
     # mode; a pinned template replaces it everywhere the prompting looks,
@@ -426,12 +423,33 @@ def _run(body):
     # times are the running sum of the durations the user set — so it is left
     # alone, and a model moving a cut off the frame the next card starts on is
     # not a failure mode this can have.
-    cuts = refine.shot_limit(seconds) if body.get("kind") == "creator" else 0
+    cuts = refine.shot_limit(seconds) if kind == "creator" else 0
+
+    # Who owns the global prompt. A whole-timeline refine rewrites it — it is
+    # the piece's standing description and the shots are written to inherit
+    # from it — while a single-card refine only reads it: the other cards'
+    # rewrites were written against it, so one card must not move it.
+    ask_piece = kind == "timeline"
+    piece = None
+    if ask_piece:
+        piece = {"text": piece_text, "rewrite": True}
+    elif kind == "segment" and (piece_text or "").strip():
+        piece = {"text": piece_text, "rewrite": False}
+
+    # Which shots carry their own reference sections in the reply. Chained,
+    # every segment is its own generation over its own reference pool, so each
+    # reference card gets its own analysis inside its shot entry — which is
+    # also what lets a strip mix reference and plain cards under one template.
+    # One pass keeps the top-level set: its shots share one merged pool.
+    ref_shots = ()
+    if kind == "timeline" and not single and mode == "REF2VA":
+        ref_shots = tuple(n for n, s in enumerate(shots) if s["mode"] == "REF2VA")
 
     # ComfyUI's generation loop samples plain logits — nothing constrains the
     # reply to a shape — so the shape is written into the instruction as words
     # and the reply is started mid-object.
-    shape = refine.reply_shape(mode, len(shots), cuts=cuts, images=len(pictures))
+    shape = refine.reply_shape(mode, len(shots), cuts=cuts, images=len(pictures),
+                               piece=ask_piece, ref_shots=ref_shots)
     system = refine.system_prompt(mode, body.get("language") or "English",
                                   shape=shape, cuts=cuts)
     message = refine.user_message(
@@ -439,6 +457,7 @@ def _run(body):
         seconds=seconds,
         images=len(pictures),
         mode=mode,
+        piece=piece,
     )
     content = refine_local.chat(
         body.get("model") or "",
@@ -449,7 +468,8 @@ def _run(body):
         seed=body.get("seed", -1),
         max_tokens=body.get("max_tokens"),
     )
-    parsed = refine.parse_reply(content, mode, len(shots), cuts=cuts)
+    parsed = refine.parse_reply(content, mode, len(shots), cuts=cuts,
+                                piece=ask_piece, ref_shots=ref_shots)
 
     # Several shots came back where one card was asked about, which is the whole
     # point of `cuts` — they are one description with cuts in it, assembled here
@@ -473,16 +493,48 @@ def _run(body):
             "have written past them — check the rewrite against your frames"
         )
 
+    shot_sections = parsed.get("shot_sections") or [None] * len(shots)
     out = []
-    for shot, written in zip(shots, parsed["shots"]):
+    for position, (shot, written) in enumerate(zip(shots, parsed["shots"])):
         # Back to handles: the model has just read a guide written entirely in
         # ordinals, so it reaches for them however it is asked. Storing the
         # handle instead is what lets the rewrite survive an asset being added.
         written = refine.normalize_handles(written, shot["labels"])
+        where = f"Shot {shot['index'] + 1} " if "index" in shot else "The rewrite "
         for problem in refine.check(written, shot["handles"], shot["labels"]):
-            where = f"Shot {shot['index'] + 1} " if "index" in shot else "The rewrite "
             problems.append(where + problem)
-        out.append({"index": shot.get("index"), "body": written})
+        entry = {"index": shot.get("index"), "body": written}
+
+        # This card's own reference analysis, where the reply carries it per
+        # shot. Normalized and checked against this card's own labels — the one
+        # map in which its ordinals are unambiguous — and a reference card that
+        # came back without its analysis is said, not papered over: its
+        # rewrite still queues, as a plain body the six-section form lacks.
+        if position in ref_shots:
+            own = shot_sections[position] if position < len(shot_sections) else None
+            if own:
+                own = {name: refine.normalize_handles(text, shot["labels"])
+                       for name, text in own.items()}
+                for name, text in own.items():
+                    for problem in refine.check(text, shot["handles"], shot["labels"]):
+                        problems.append(f"{where.rstrip()}'s {name} {problem}")
+                entry["sections"] = own
+            else:
+                problems.append(
+                    where + "has @ references and the rewrite wrote no reference "
+                    "analysis for it — refine again, or refine that card alone"
+                )
+            # Cited per card, because chained each card is its own generation:
+            # a reference named only in another card's prose conditions nothing
+            # in this one.
+            here = "\n".join([written] + list((own or {}).values()))
+            for handle in refine.uncited(here, shot["refs"], shot["labels"]):
+                problems.append(
+                    f"{where.rstrip()} never mentions @{handle} — the file is still "
+                    f"attached, but nothing in that card's prompt will point at "
+                    f"it. Refine again, or write it in yourself."
+                )
+        out.append(entry)
 
     # The fields written once for the whole reply get the same treatment as the
     # bodies. This is where the references usually end up in the reference form
@@ -504,22 +556,53 @@ def _run(body):
         sections = {name: normalized(text, name) for name, text in sections.items()}
         parsed["sections"] = sections
 
+    # The rewritten global prompt. Never normalized: nothing may point at an
+    # asset from it — it is joined in front of *every* segment at compile time,
+    # and handles are allocated per segment, so an `@img-1` here would bind to
+    # a different file in each. Anything reference-shaped is reported instead.
+    piece_out = None
+    if ask_piece:
+        piece_out = parsed.get("piece") or ""
+        if not piece_out.strip():
+            problems.append(
+                "the model did not rewrite the global prompt — the one you typed "
+                "stays in front of every segment as it is"
+            )
+        else:
+            pointed = ["@" + h for h in sorted(set(refine.HANDLE_RE.findall(piece_out)))]
+            pointed += sorted({f"<{kind_} {int(n)}>" for kind_, n in
+                               (m.groups() for m in refine.LABEL_RE.finditer(piece_out))})
+            if pointed:
+                problems.append(
+                    "the rewritten global prompt mentions " + ", ".join(pointed)
+                    + " — it stands in front of every segment, and references "
+                    "belong to a segment's own text. Edit it out before queueing."
+                )
+
     # A reference the whole rewrite never points at conditions nothing, and
-    # until now that was the one failure nothing reported.
+    # until now that was the one failure nothing reported. With per-shot
+    # sections the citation check already ran card by card, against the one
+    # label map in which each card's ordinals mean anything.
     everything = "\n".join([entry["body"] for entry in out]
+                           + [text for entry in out
+                              for text in (entry.get("sections") or {}).values()]
                            + list((sections or {}).values())
-                           + [parsed["soundscape"], parsed["music"]])
-    for handle in refine.uncited(everything, refs, labels):
-        problems.append(
-            f"the rewrite never mentions @{handle} — the file is still attached, "
-            f"but nothing in the prompt will point at it. Refine again, or write "
-            f"it in yourself."
-        )
+                           + [parsed["soundscape"], parsed["music"], piece_out or ""])
+    if not ref_shots:
+        for handle in refine.uncited(everything, refs, labels):
+            problems.append(
+                f"the rewrite never mentions @{handle} — the file is still attached, "
+                f"but nothing in the prompt will point at it. Refine again, or write "
+                f"it in yourself."
+            )
 
     # Quoted request text is the user dictating exact words, and it is the one
     # fidelity promise that can be checked mechanically rather than trusted to
-    # the system prompt.
-    for span in refine.dropped_quotes([s.get("text") or "" for s in shots], everything):
+    # the system prompt. The global prompt counts on both sides: words the user
+    # quoted there must survive too, and the rewrite may legitimately carry a
+    # quoted span in whichever field it now belongs to.
+    for span in refine.dropped_quotes(
+            [s.get("text") or "" for s in shots] + [piece_text or ""], everything):
         problems.append(
             f'the request quotes "{span}" and the rewrite never writes it — '
             f'those exact words will not reach the video model. Refine again, '
@@ -539,6 +622,15 @@ def _run(body):
         "soundscape": parsed["soundscape"],
         "music": parsed["music"],
         "sections": parsed.get("sections"),
+        # The rewritten global prompt, on a whole-timeline refine. Stored back
+        # into the timeline's own editable box — the join onto each segment
+        # stays compile-time, which is what keeps the box live after refining.
+        "piece": piece_out,
+        # These rewrites are the shot alone: compile joins the global prompt in
+        # front of them exactly as it joins it in front of typed text. Absent —
+        # a Creator rewrite, or one stored before this existed — means the body
+        # absorbed its join, and compile leaves those whole.
+        "scope": "shot" if kind in ("segment", "timeline") else None,
         # What the model said it could see. Not stored in the blob and not
         # queued — it is a readout of this call, and it goes stale the moment
         # anything is refined again.

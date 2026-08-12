@@ -469,10 +469,18 @@ function serializeLoras(entries) {
 function serializeRefined(refined) {
   const body = (refined?.body ?? "").trim();
   const sections = refined?.sections;
-  if (!body && !sections) return {};
+  // A timeline's own `refined` may hold nothing but `replaced` — a chained
+  // refine-all writes the rewritten global prompt and audio into the visible
+  // fields and keeps only the originals here — and dropping it would leave
+  // Revert nothing to restore after a reload.
+  if (!body && !sections && !refined?.replaced) return {};
   return {
     refined: {
       ...(body ? { body } : {}),
+      // The rewrite is the shot alone, and compile joins the global prompt in
+      // front of it as it does for typed text. Absent means it absorbed the
+      // join when it was written, and compile leaves it whole.
+      ...(refined.scope === "shot" ? { scope: "shot" } : {}),
       ...(sections ? { sections: { ...sections } } : {}),
       // Kept so the panel can say the prompt has moved on since; compile.py
       // never reads either, and both are small enough not to be worth splitting
@@ -620,7 +628,14 @@ export function emptyTimeline() {
     // One set of weights for the whole clip. Chained or not, the segments are
     // concatenated at the end and cannot come from different checkpoints of the
     // same name any more than they can come out different sizes.
-    models: emptyModels(),
+    //
+    // Routed to Ref2VA rather than auto: it is the stronger checkpoint — a
+    // superset of what FL2VA was trained for, handling text-only and keyframe
+    // segments alongside references — and one route means a strip mixing
+    // reference and plain cards runs on one set of weights. The pill still
+    // overrides it, and a saved timeline keeps whatever it stored (a blob with
+    // a models block and no route reads back as auto, exactly as it ran).
+    models: { ...emptyModels(), route: "ref2va" },
     // The turbo switch. Global like the LoRA it engages: a speed-up belongs to
     // the run, not to shot 3.
     turbo: emptyTurbo(),

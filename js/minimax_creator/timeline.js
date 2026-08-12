@@ -280,16 +280,17 @@ class Timeline {
         className: "mmc-pill mmc-tl-refine",
         title: t("Rewrite {what} into the expanded "
              + "description H3 was trained to read, in one pass so the later shots keep what the "
-             + "first establishes. Everything you wrote is kept and expanded. A rewrite is queued "
-             + "in place of the card's own prompt, not alongside it.",
+             + "first establishes. The global prompt is rewritten too, in its own box, and still "
+             + "stands in front of every shot. Everything you wrote is kept and expanded. A "
+             + "rewrite is queued in place of the card's own prompt, not alongside it.",
              { what: count === 1 ? t("the shot") : t("all {count} shots", { count }) }),
       }),
       // The way back from that one press. Without it, undoing a whole-strip
       // refine means opening every card in turn.
       ...(refined ? [el("button", {
         class: "mmc-pill mmc-tl-unrefine",
-        title: t("Throw every rewrite away and go back to the prompts you typed. The soundscape "
-             + "and score the refiner wrote go with them."),
+        title: t("Throw every rewrite away and go back to the prompts you typed. The global "
+             + "prompt, soundscape and score the refiner wrote go with them."),
         onclick: () => this.revertAll(),
       }, [el("span", { text: t("Revert all") })])] : []),
       el("div", { class: "mmc-tl-total" }, [
@@ -635,29 +636,41 @@ class Timeline {
   }
 
   /**
-   * The two fields a rewrite writes that belong to the piece rather than a shot.
+   * The fields a rewrite writes that belong to the piece rather than a shot:
+   * the global prompt, the soundscape and the score.
    *
    * Straight into the timeline's own textareas, which are the ones the user is
    * looking at — a refined soundscape hidden inside a card would be invisible
-   * and would then disagree with the box above it. An empty `music` is left
-   * alone rather than written: the refiner returns one only when the request
-   * asked for music, and clearing a score the user typed is not what "the model
-   * had nothing to add" means.
+   * and would then disagree with the box above it. The global prompt lands in
+   * its own box the same way, and stays a live input: compile joins it in
+   * front of every shot-scoped rewrite exactly as it joins it in front of
+   * typed text, so editing it here keeps meaning something. An empty `music`
+   * is left alone rather than written: the refiner returns one only when the
+   * request asked for music, and clearing a score the user typed is not what
+   * "the model had nothing to add" means.
    */
-  takeAudio(result) {
+  takePiece(result) {
     // What was in them first, so `revertAll` can put them back. Taken once and
     // then left alone: refining again must not record the last rewrite's prose
-    // as the thing the user typed.
+    // as the thing the user typed. The prompt joins the snapshot the first
+    // time a rewrite actually moves it — older snapshots simply lack the key,
+    // and reverting one leaves the prompt exactly where it stands.
     const replaced = this.timeline.refined?.replaced
       ?? { soundscape: this.timeline.soundscape ?? "", music: this.timeline.music ?? "" };
 
+    if (result.piece) {
+      if (replaced.prompt === undefined) replaced.prompt = this.timeline.prompt ?? "";
+      this.timeline.prompt = result.piece;
+      if (this.promptBox) this.promptBox.value = result.piece;
+    }
     if (result.soundscape) this.timeline.soundscape = result.soundscape;
     if (result.music) this.timeline.music = result.music;
     this.timeline.refined = {
       ...(this.timeline.refined || {}),
       replaced,
       // Only the reference form has these, and in one pass they describe the one
-      // merged generation, so they are the timeline's.
+      // merged generation, so they are the timeline's. Chained, each reference
+      // card carries its own set and they live on the card instead.
       ...(result.sections && S.isSingle(this.timeline) ? { sections: result.sections } : {}),
     };
     this.soundscapeBox.value = this.timeline.soundscape ?? "";
@@ -694,6 +707,12 @@ class Timeline {
     if (replaced) {
       this.timeline.soundscape = replaced.soundscape ?? "";
       this.timeline.music = replaced.music ?? "";
+      // Only when a rewrite actually moved it — see `takePiece` — so reverting
+      // an audio-only rewrite cannot blank a global prompt the user typed.
+      if (replaced.prompt !== undefined) {
+        this.timeline.prompt = replaced.prompt;
+        if (this.promptBox) this.promptBox.value = this.timeline.prompt;
+      }
       if (this.soundscapeBox) this.soundscapeBox.value = this.timeline.soundscape;
       if (this.musicBox) this.musicBox.value = this.timeline.music;
     }
@@ -720,18 +739,22 @@ class Timeline {
         if (!segment || !shot.body) continue;
         segment.refined = {
           body: shot.body,
-          // Chained, a segment is its own generation over its own references, so
-          // the reference form's analysis sections are the segment's. In one
-          // pass there is one merged pool and they go on the timeline instead —
-          // which is why the server refuses a chained strip of several reference
-          // segments rather than copying one analysis across all of them.
-          ...(result.sections && !S.isSingle(this.timeline) ? { sections: result.sections } : {}),
+          // The rewrite is the shot alone: compile joins the (rewritten) global
+          // prompt in front of it, exactly as it joins it in front of typed
+          // text, which is what keeps the global box live after refining.
+          ...(result.scope ? { scope: result.scope } : {}),
+          // Chained, a segment is its own generation over its own references,
+          // so each reference card carries its own analysis sections in its
+          // shot entry. In one pass there is one merged pool and the one
+          // top-level set goes on the timeline instead — see `takePiece`.
+          ...(shot.sections ? { sections: shot.sections } : {}),
+          ...(result.template ? { template: result.template, forced: !!result.forced } : {}),
           source: segment.prompt ?? "",
           model: refineModel(),
           enabled: true,
         };
       }
-      this.takeAudio(result);
+      this.takePiece(result);
       this.refineError = (result.problems ?? []).join(" · ") || null;
     } catch (error) {
       this.refineError = String(error.message || error);
@@ -767,8 +790,11 @@ class Timeline {
       }),
       // The soundscape and the score describe the piece rather than the shot, so
       // they land on the timeline's own fields where they are visible and
-      // editable — not inside the card that happened to be refined.
-      onRefined: (result) => this.takeAudio(result),
+      // editable — not inside the card that happened to be refined. A single
+      // card's refine never returns a rewritten global prompt — the other
+      // cards' rewrites were written against the standing one — so `takePiece`
+      // only moves the audio here.
+      onRefined: (result) => this.takePiece(result),
       // …and go with the last rewrite that was using them. The commit is this
       // callback's own: the editor's fired before it, so what it wrote out still
       // had the timeline's audio fields in it.

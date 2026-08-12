@@ -560,6 +560,27 @@ def refined_body(data):
     return body or None
 
 
+def refined_scope(data):
+    """What a refined body stands for: `"shot"`, or None for the whole request.
+
+    A rewrite made since the global prompt became the refiner's own field is
+    the shot alone — `scope: "shot"` — and the global prompt is joined in front
+    of it at compile time exactly as it is for typed text, which is what keeps
+    the timeline's global box live after refining. A blob without the marker
+    was written when the rewrite absorbed the join, and is left whole: joining
+    the global onto one of those would say it twice.
+
+    None when there is no usable rewrite at all, so callers can gate the join
+    on the scope without re-checking `refined_body`.
+    """
+    refined = data.get("refined")
+    if not isinstance(refined, dict) or refined.get("enabled") is False:
+        return None
+    if not str(refined.get("body") or "").strip():
+        return None
+    return "shot" if refined.get("scope") == "shot" else None
+
+
 def refined_sections(data):
     """The reference form's three extra sections, when a refiner wrote them."""
     refined = data.get("refined")
@@ -956,6 +977,16 @@ def timeline_payloads(data, image_size_lookup=None):
         request.pop("continue_from", None)
         request.pop("feather", None)
         request["prompt"] = _join_prompt(global_prompt, segment.get("prompt"))
+        # A shot-scoped rewrite gets the same join: it stands in for the
+        # segment's own sentence, not for the piece, so the global prompt goes
+        # in front of it here exactly as it goes in front of typed text — which
+        # is what keeps the timeline's global box a live input after refining.
+        # An unmarked rewrite absorbed the join when it was written and is left
+        # whole; see `refined_scope`.
+        if refined_scope(segment) == "shot":
+            request["refined"] = {**segment["refined"],
+                                  "body": _join_prompt(global_prompt,
+                                                       segment["refined"].get("body"))}
         request["aspect"] = data.get("aspect", "16:9")
         request["short_edge"] = data.get("short_edge", canvas.NATIVE_SHORT_EDGE)
         # The two-pass choice travels with the canvas it is a property of.
@@ -1130,9 +1161,6 @@ def single_payload(data):
         # A refined shot replaces the typed one here rather than downstream,
         # because the merged request is a single generation and `compile_request`
         # would otherwise see one `refined` blob standing for the whole strip.
-        # The refiner was shown the global prompt as the piece's standing
-        # description, so a refined shot 1 has already absorbed it and is not
-        # given it a second time.
         written = refined_body(segment)
 
         # One pass, single-pass substitution: a rename map applied in two passes
@@ -1141,11 +1169,16 @@ def single_payload(data):
             lambda m: "@" + rename.get(m.group(1), m.group(1)),
             written or str(segment.get("prompt") or ""),
         ).strip()
-        if number == 1 and global_prompt and not written:
-            # The standing description of the piece opens the description, which
-            # is where the guide puts the style and the initial composition. A
-            # terminator is added when the user left none, because without one the
-            # two clauses run together into a sentence neither of them is.
+        # The standing description of the piece opens the description, which is
+        # where the guide puts the style and the initial composition — in front
+        # of typed text, and in front of a shot-scoped rewrite, which stands in
+        # for the shot alone. Only a rewrite from before the scope marker
+        # existed absorbed the global itself and is not given it a second time;
+        # see `refined_scope`. A terminator is added when the user left none,
+        # because without one the two clauses run together into a sentence
+        # neither of them is.
+        if number == 1 and global_prompt and (not written
+                                              or refined_scope(segment) == "shot"):
             joiner = "" if global_prompt[-1] in ".!?,;:—" else "."
             text = f"{global_prompt}{joiner} {text}".strip()
         shots.append((at, text))

@@ -140,9 +140,13 @@ export async function listSkills({ force = false } = {}) {
  * because the server has to compile it to find out what the request is: the
  * mode, the reference slots, and which ordinal each handle will be given.
  *
- * @returns {Promise<{mode, shots: {index, body}[], soundscape, music,
- *                    sections: object|null, seen: string, problems: string[],
+ * @returns {Promise<{mode, shots: {index, body, sections?}[], soundscape, music,
+ *                    sections: object|null, piece: string|null,
+ *                    scope: string|null, seen: string, problems: string[],
  *                    skill?: string}>}
+ *   `piece` is the rewritten global prompt (whole-timeline refines only);
+ *   `scope: "shot"` marks bodies that compile joins the global prompt onto,
+ *   like typed text; chained reference cards carry their own `sections`.
  */
 export async function refine(payload) {
   const { model, temperature, seed, language, maxTokens, skill, template } = settings();
@@ -436,6 +440,10 @@ export class RefinePanel {
 
     state.refined = {
       body: shot.body,
+      // Present on a timeline segment's rewrite: the body is the shot alone,
+      // and compile joins the global prompt in front of it as it does for
+      // typed text. The Creator node has no global prompt and gets none.
+      ...(result.scope ? { scope: result.scope } : {}),
       ...(result.sections ? { sections: result.sections } : {}),
       // Which skill package wrote this, when one did — the answer to "why does
       // this rewrite look nothing like yesterday's" once the setting has moved.
