@@ -16,7 +16,11 @@ const TIMELINE = "MiniMaxH3Timeline";
 const PRESTAGE = "MiniMaxH3PreStage";
 // Unchanged by the stage: the picture floats in a satellite card beside the
 // node, so a node with a render is the same size as one without.
-const MIN_SIZE = { [CREATOR]: [620, 520], [TIMELINE]: [620, 360], [PRESTAGE]: [460, 420] };
+// The PreStage's floor is the Creator's width and a little more height: its Krea 2
+// pills (moodboard, edit, style, position) sit on the panel row and its loader and
+// stage segments sit above the sampler row, so at the old 460x420 the rows wrapped
+// into a box that was not tall enough to hold them and drew over each other.
+const MIN_SIZE = { [CREATOR]: [620, 520], [TIMELINE]: [620, 360], [PRESTAGE]: [620, 560] };
 const WIDGET = { [CREATOR]: "creator_data", [TIMELINE]: "timeline_data", [PRESTAGE]: "prestage_data" };
 // Which edge of the node the satellite result card hangs off. The PreStage sits
 // to the *left* of its Creator, so its result goes further left — the desk

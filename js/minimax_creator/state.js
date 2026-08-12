@@ -457,6 +457,10 @@ function serializeLoras(entries) {
     if (entry.triggers?.length) out.triggers = [...entry.triggers];
     // Absent means both checkpoints, so the common case adds nothing.
     if (!claimsBoth(entry)) out.modes = [...entry.modes];
+    // Which way this LoRA reaches a 4-bit model. Absent means `bypass`, the
+    // exact one, so only the other choice is written — but it *is* written:
+    // a mode the blob drops is a mode the render never sees.
+    if (entry.adapters && entry.adapters !== "bypass") out.adapters = entry.adapters;
     return out;
   });
 }
@@ -1320,10 +1324,37 @@ export function serializePreStage(state) {
                    ...(state.turbo.saved ? { saved: { ...state.turbo.saved } } : {}) } }
       : {}),
     ...(state.quality !== "default" ? { quality: state.quality } : {}),
+    // The Krea 2 controls. Written whenever they are not at their default,
+    // because this whitelist *is* what the node executes — a field missing here
+    // is a pill that lights up in the UI and changes nothing about the render,
+    // and then resets the next time the blob is read back. See
+    // `test_prestage_roundtrip.py`, which exists because that is what happened.
+    ...(state.loader !== "standard" ? { loader: state.loader } : {}),
+    ...(state.moodboard?.on ? { moodboard: { ...state.moodboard } } : {}),
+    ...(state.edit?.on ? { edit: serializeEdit(state.edit) } : {}),
+    ...(state.style?.on ? { style: { ...state.style, refs: state.style.refs.map(
+      (r) => ({ filename: r.filename })) } } : {}),
+    ...(state.stages?.count > 1 ? { stages: { ...state.stages } } : {}),
+    ...(state.dype?.on ? { dype: { ...state.dype } } : {}),
+    ...(state.sega?.on ? { sega: { ...state.sega } } : {}),
     minimax: serializeStill(state.minimax),
     ...(Object.keys(models).length ? { models } : {}),
     ...(state.peer != null ? { peer: state.peer } : {}),
   }, null, 2);
+}
+
+/** The edit block, with its two image slots reduced to filenames. */
+function serializeEdit(edit) {
+  return {
+    on: true,
+    source: { filename: edit.source.filename },
+    ...(edit.source_b ? { source_b: { filename: edit.source_b.filename } } : {}),
+    ...(edit.lora ? { lora: edit.lora, lora_strength: round2(edit.lora_strength) } : {}),
+    ref_boost: round2(edit.ref_boost),
+    ref_boost_a: round2(edit.ref_boost_a),
+    fit_mode: edit.fit_mode,
+    grounding_px: edit.grounding_px,
+  };
 }
 
 /** Fill empty weight fields from unambiguous filename matches — the same

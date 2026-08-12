@@ -587,47 +587,53 @@ export class PreStageEditor {
 
   // ---- DyPE and SEGA ----------------------------------------------------------
 
-  /** The two position-encoding patches, one pill each.
+  /** DyPE and SEGA behind one pill.
    *
-   *  Written once for both because they are the same shape — a toggle, a method
-   *  and one amplitude — and because the thing that separates them is what they
-   *  each say, not how they are drawn. DyPE is also the pill that moves the
-   *  resolution ceiling, so switching it off pulls an oversize short edge back
-   *  down rather than leaving a number the slider can no longer reach. */
-  positionPill(kind) {
-    const state = this.state;
-    const block = state[kind];
-    const label = kind === "dype" ? "DyPE" : "SEGA";
+   *  One rather than two because they are one concern — both rewrite the position
+   *  encoding, and the panel was already going to hold both — and because the
+   *  panel row had grown past what the node's width can carry. The label says
+   *  which are on, so nothing is hidden by the grouping.
+   *
+   *  DyPE is also the pill that moves the resolution ceiling, so switching it off
+   *  pulls an oversize short edge back down rather than leaving a number the
+   *  slider can no longer reach. */
+  positionPill() {
+    const { dype, sega } = this.state;
+    const on = [dype.on && "dype", sega.on && "sega"].filter(Boolean);
     return el("button", {
-      class: `mmc-pill${block.on ? " accel-on" : ""}`,
-      title: block.on
-        ? `${label} on, ${block.method}. Click to change the method or amplitude.`
-        : kind === "dype"
-          ? `Extrapolate the position encoding so a render past ${S.PRESTAGE_MAX_EDGE} does `
-            + `not wrap. On, the resolution slider reaches ${S.PRESTAGE_DYPE_MAX_EDGE}. Off.`
-          : "Sharpen attention from the latent's own Fourier spectrum, per RoPE "
-            + "dimension and per step. Independent of DyPE. Off.",
-      onclick: (event) => this.openPosition(kind, event.currentTarget),
+      class: `mmc-pill${on.length ? " accel-on" : ""}`,
+      title: on.length
+        ? `${on.join(" + ")} on. Click to change either.`
+        : `Position encoding. DyPE extrapolates it, so a render past `
+          + `${S.PRESTAGE_MAX_EDGE} does not wrap and the resolution slider reaches `
+          + `${S.PRESTAGE_DYPE_MAX_EDGE}; SEGA sharpens attention from the latent's own `
+          + `spectrum. Both off.`,
+      onclick: (event) => this.openPosition(event.currentTarget),
     }, [
       icon("res", 16),
-      el("span", { text: block.on ? label.toLowerCase() : `${label.toLowerCase()} off` }),
+      el("span", { text: on.length ? on.join("+") : "position" }),
     ]);
   }
 
-  openPosition(kind, anchor) {
+  openPosition(anchor) {
     const state = this.state;
-    const block = state[kind];
-    const isDype = kind === "dype";
-    const methods = isDype ? S.PRESTAGE_DYPE_METHODS : S.PRESTAGE_SEGA_METHODS;
-    const hints = isDype ? S.PRESTAGE_DYPE_METHOD_HINT : S.PRESTAGE_SEGA_METHOD_HINT;
     const pop = el("div", { class: "mmc-pop mmc-weights-pop" });
     const body = el("div");
 
-    const render = () => {
+    const section = (kind) => {
+      const block = state[kind];
+      const isDype = kind === "dype";
+      const methods = isDype ? S.PRESTAGE_DYPE_METHODS : S.PRESTAGE_SEGA_METHODS;
+      const hints = isDype ? S.PRESTAGE_DYPE_METHOD_HINT : S.PRESTAGE_SEGA_METHOD_HINT;
       const rows = [el("div", { class: "mmc-weight-row" }, [
         el("span", { class: "mmc-weight-name", text: isDype ? "DyPE" : "SEGA" }),
         el("button", {
           class: "mmc-weight-file",
+          title: isDype
+            ? `Extrapolates the position encoding. On, the resolution slider reaches `
+              + `${S.PRESTAGE_DYPE_MAX_EDGE} instead of ${S.PRESTAGE_MAX_EDGE}.`
+            : "Sharpens attention from the latent's Fourier spectrum, per RoPE dimension "
+              + "and per step. Independent of DyPE.",
           text: block.on ? "on" : "off",
           onclick: () => {
             block.on = !block.on;
@@ -642,64 +648,62 @@ export class PreStageEditor {
         }),
       ])];
 
-      if (block.on) {
+      if (!block.on) return rows;
+
+      rows.push(el("div", { class: "mmc-weight-row" }, [
+        el("span", { class: "mmc-weight-name", text: "Method" }),
+        el("button", {
+          class: "mmc-weight-file",
+          title: hints[block.method],
+          text: block.method,
+          onclick: (event) => openChoicePopover(event.currentTarget, {
+            title: "Method",
+            options: [...methods],
+            value: block.method,
+            onPick: (picked) => { block.method = picked; this.commit(); render(); },
+          }),
+        }),
+      ]));
+
+      if (isDype && block.method === "yarn") {
+        // Only read on the plain `yarn` method — the node says so — so the row
+        // appears only where it means something.
         rows.push(el("div", { class: "mmc-weight-row" }, [
-          el("span", { class: "mmc-weight-name", text: "Method" }),
+          el("span", { class: "mmc-weight-name", text: "Scaling" }),
           el("button", {
             class: "mmc-weight-file",
-            title: hints[block.method],
-            text: block.method,
-            onclick: (event) => openChoicePopover(event.currentTarget, {
-              title: "Method",
-              options: [...methods],
-              value: block.method,
-              onPick: (picked) => { block.method = picked; this.commit(); render(); },
-            }),
-          }),
-        ]));
-
-        if (isDype && block.method === "yarn") {
-          // Only read on the plain `yarn` method — the node says so — so the row
-          // appears only where it means something.
-          rows.push(el("div", { class: "mmc-weight-row" }, [
-            el("span", { class: "mmc-weight-name", text: "Scaling" }),
-            el("button", {
-              class: "mmc-weight-file",
-              title: "Anisotropic is the pack's alternate scaling for ultra-high resolutions; "
-                   + "isotropic is its stable default. Ignored by vision_yarn.",
-              text: block.yarn_alt ? "anisotropic" : "isotropic",
-              onclick: () => { block.yarn_alt = !block.yarn_alt; this.commit(); render(); },
-            }),
-          ]));
-        }
-
-        rows.push(el("div", { class: "mmc-weight-row" }, [
-          el("span", { class: "mmc-weight-name", text: isDype ? "Scale" : "Amplitude" }),
-          stepperPill({
-            value: isDype ? block.scale : block.alpha,
-            min: 0, max: isDype ? S.PRESTAGE_MAX_DYPE_SCALE : 1,
-            step: isDype ? 0.1 : 0.01, width: "56px",
-            format: (n) => n.toFixed(2),
-            title: isDype
-              ? "DyPE magnitude (λs). The pack's default is 2.0."
-              : "How much spectral redistribution is applied. The pack's default is 0.15.",
-            onChange: (value) => {
-              if (isDype) block.scale = value;
-              else block.alpha = value;
-              this.commit();
-              render();
-            },
+            title: "Anisotropic is the pack's alternate scaling for ultra-high resolutions; "
+                 + "isotropic is its stable default. Ignored by vision_yarn.",
+            text: block.yarn_alt ? "anisotropic" : "isotropic",
+            onclick: () => { block.yarn_alt = !block.yarn_alt; this.commit(); render(); },
           }),
         ]));
       }
 
-      body.replaceChildren(...rows);
+      rows.push(el("div", { class: "mmc-weight-row" }, [
+        el("span", { class: "mmc-weight-name", text: isDype ? "Scale" : "Amplitude" }),
+        stepperPill({
+          value: isDype ? block.scale : block.alpha,
+          min: 0, max: isDype ? S.PRESTAGE_MAX_DYPE_SCALE : 1,
+          step: isDype ? 0.1 : 0.01, width: "56px",
+          format: (n) => n.toFixed(2),
+          title: isDype
+            ? "DyPE magnitude (λs). The pack's default is 2.0."
+            : "How much spectral redistribution is applied. The pack's default is 0.15.",
+          onChange: (value) => {
+            if (isDype) block.scale = value;
+            else block.alpha = value;
+            this.commit();
+            render();
+          },
+        }),
+      ]));
+      return rows;
     };
 
-    pop.append(el("div", {
-      class: "mmc-pop-title",
-      text: isDype ? "DyPE — position extrapolation" : "SEGA — spectral attention",
-    }), body);
+    const render = () => body.replaceChildren(...section("dype"), ...section("sega"));
+
+    pop.append(el("div", { class: "mmc-pop-title", text: "Position encoding" }), body);
     render();
     document.body.appendChild(pop);
     placeNear(pop, anchor);
@@ -1023,10 +1027,7 @@ export class PreStageEditor {
     ]);
 
     const pills = [archPill, aspectPill, resPill, this.moodboardPill()];
-    if (state.arch === "krea2") {
-      pills.push(this.editPill(), this.stylePill(),
-                 this.positionPill("dype"), this.positionPill("sega"));
-    }
+    if (state.arch === "krea2") pills.push(this.editPill(), this.stylePill(), this.positionPill());
 
     if (state.arch === "ideogram4") {
       // Ideogram's speed axis. The preset owns the schedule shape as well as
