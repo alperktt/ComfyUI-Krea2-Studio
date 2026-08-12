@@ -837,6 +837,46 @@ check("one stage still emits a single KSampler and nothing else",
       (len(plain_graph["KSampler"]), ri.TWO_STAGE in plain_graph,
        ri.THREE_STAGE in plain_graph), (1, False, False))
 
+# ---- DyPE and SEGA --------------------------------------------------------------
+#
+# Two patches over the same embedder, emitted last because everything above them
+# assumes the position encoding they rewrite.
+
+positioned = emitted(ci.compile_prestage(
+    {"arch": "krea2", "prompt": "p", "aspect": "1:1", "short_edge": 2048,
+     "dype": {"on": True, "scale": 3.0}, "sega": {"on": True, "alpha": 0.2}}))
+
+check("both patches are emitted", (len(positioned[ri.DYPE]), len(positioned[ri.SEGA])), (1, 1))
+check("DyPE first, then SEGA — the pack's own order",
+      list(positioned[ri.SEGA][0][1]["model"]), [positioned[ri.DYPE][0][0], 0])
+check("and the sampler runs the fully patched model",
+      list(positioned["KSampler"][0][1]["model"]), [positioned[ri.SEGA][0][0], 0])
+# Both nodes' tooltips say width/height must match the empty latent, so they are
+# the resolved canvas rather than anything the user can set separately.
+check("DyPE is told the canvas it is extrapolating for",
+      (positioned[ri.DYPE][0][1]["width"], positioned[ri.DYPE][0][1]["height"]),
+      (positioned["EmptySD3LatentImage"][0][1]["width"],
+       positioned["EmptySD3LatentImage"][0][1]["height"]))
+check("the scale and amplitude arrive from the payload",
+      (positioned[ri.DYPE][0][1]["dype_scale"], positioned[ri.SEGA][0][1]["mscale_alpha"]),
+      (3.0, 0.2))
+# `auto` rather than `flux`: Krea 2 is not in the pack's list, and auto reaches
+# the flux branch by elimination — which is right, because SingleStreamDiT's
+# pe_embedder *is* Flux's EmbedND.
+check("the architecture is left to the pack to detect",
+      positioned[ri.DYPE][0][1]["model_type"], "auto")
+check("and everything not exposed comes from the pack's own defaults",
+      positioned[ri.DYPE][0][1]["method"], ci.DEFAULT_DYPE_METHOD)
+
+only_sega = emitted(ci.compile_prestage(
+    {"arch": "krea2", "prompt": "p", "aspect": "1:1", "short_edge": 1024,
+     "sega": {"on": True}}))
+check("SEGA alone patches the loaded model directly",
+      (ri.DYPE in only_sega, len(only_sega[ri.SEGA])), (False, 1))
+
+for absent in (ri.DYPE, ri.SEGA):
+    check(f"no {absent} without its pill", absent in by_class(build().expand), False)
+
 expect_error("a multi-stage run with no Turbo checkpoint picked says which file",
              lambda: ri.emit(
                  ci.compile_prestage({"arch": "krea2", "prompt": "p", "aspect": "1:1",

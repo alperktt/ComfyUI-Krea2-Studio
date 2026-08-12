@@ -406,6 +406,43 @@ expect_error("and it is refused on Ideogram",
              lambda: compile(arch="ideogram4", stages={"count": 2}), "Krea 2")
 
 
+# ---- DyPE and SEGA --------------------------------------------------------------
+
+check("a default blob has neither", (base.dype, base.sega), (None, None))
+
+dyped = compile(dype={"on": True})
+check("DyPE carries the pack's method and scale",
+      (dyped.dype["method"], dyped.dype["scale"]),
+      (ci.DEFAULT_DYPE_METHOD, ci.DEFAULT_DYPE_SCALE))
+segad = compile(sega={"on": True, "method": "ntk", "alpha": 0.3})
+check("SEGA carries its own", (segad.sega["method"], segad.sega["alpha"]), ("ntk", 0.3))
+check("and the two are independent",
+      bool(compile(dype={"on": True}, sega={"on": True}).sega), True)
+
+# The reason DyPE is in this package at all: it is what lifts the ceiling. With
+# it off the model's own 2048 still holds, so the same blob resolves differently.
+tall = {"aspect": "1:1", "short_edge": 4096}
+check("without DyPE a 4096 request is clamped to the model's ceiling",
+      compile(**tall).width, ci.MAX_SHORT_EDGE)
+check("with DyPE it is not",
+      compile(**tall, dype={"on": True}).width, ci.DYPE_MAX_SHORT_EDGE)
+# And the area cap moves with it, not just the per-axis one.
+check("a 16:9 4K render keeps its aspect under the raised area cap",
+      compile(aspect="16:9", short_edge=2160, dype={"on": True}).width > ci.MAX_SHORT_EDGE,
+      True)
+
+expect_error("an unknown DyPE method is refused, listing the real ones",
+             lambda: compile(dype={"on": True, "method": "rope2"}), "vision_yarn")
+expect_error("an unknown SEGA method is refused",
+             lambda: compile(sega={"on": True, "method": "spectral"}), "unknown SEGA method")
+expect_error("a DyPE scale past the node's ceiling is refused",
+             lambda: compile(dype={"on": True, "scale": 20}), "DyPE scale")
+expect_error("DyPE is refused on Ideogram, which the pack has no path for",
+             lambda: compile(arch="ideogram4", dype={"on": True}), "no Ideogram 4 path")
+expect_error("and so is SEGA",
+             lambda: compile(arch="ideogram4", sega={"on": True}), "no Ideogram 4 path")
+
+
 if FAILURES:
     print(f"{len(FAILURES)} failure(s):")
     for failure in FAILURES:

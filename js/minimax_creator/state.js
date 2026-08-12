@@ -981,6 +981,31 @@ export const PRESTAGE_STAGE_HINT = {
   3: "Base, Turbo, then base again. Stage 3 reuses stage 1's settings.",
 };
 
+/** DyPE and SEGA. Mirrors compile_image.
+ *
+ *  DyPE is the reason the resolution ceiling can move — see
+ *  `PRESTAGE_DYPE_MAX_EDGE`. SEGA is independent and composes after it. */
+export const PRESTAGE_DYPE_METHODS = ["vision_yarn", "yarn", "ntk", "pi", "base"];
+export const PRESTAGE_DYPE_METHOD_HINT = {
+  vision_yarn: "The pack's default, and the one to start from.",
+  yarn: "Plain YARN. The alternate-scaling switch only applies here.",
+  ntk: "NTK-aware interpolation.",
+  pi: "Positional interpolation.",
+  base: "No extrapolation — the schedule patch only.",
+};
+export const PRESTAGE_DYPE_SCALE = 2.0;
+export const PRESTAGE_YARN_ALT = false;
+export const PRESTAGE_MAX_DYPE_SCALE = 8.0;
+export const PRESTAGE_DYPE_MAX_EDGE = 4096;
+export const PRESTAGE_DYPE_MAX_PIXELS = 4096 * 4096;
+
+export const PRESTAGE_SEGA_METHODS = ["sega", "ntk"];
+export const PRESTAGE_SEGA_METHOD_HINT = {
+  sega: "NTK base plus the spectral per-dimension mscale. The pack's default.",
+  ntk: "Base NTK only — no spectral term.",
+};
+export const PRESTAGE_SEGA_ALPHA = 0.15;
+
 export const PRESTAGE_ADAPTER_MODES = ["bypass", "bake"];
 export const PRESTAGE_ADAPTER_LABEL = { bypass: "bypass", bake: "bake" };
 export const PRESTAGE_ADAPTER_HINT = {
@@ -1086,6 +1111,10 @@ export function emptyPreStage() {
     // The multi-stage sampler. count 1 is off, and off emits the same single
     // KSampler it always did.
     stages: { count: 1, handoff: 16.67, handoff3: 83.33, stage1_scale: 1.0 },
+    // DyPE and SEGA. Off, and off is what keeps the resolution ceiling at the
+    // model's own 2048 — DyPE is the thing that lifts it.
+    dype: { on: false, method: "vision_yarn", scale: 2.0, yarn_alt: false },
+    sega: { on: false, method: "sega", alpha: 0.15 },
     // Ideogram's speed axis: which official preset shapes the schedule.
     quality: "default",
     // The H3 branch: its own settings, and its generation in the Creator's
@@ -1211,6 +1240,23 @@ export function parsePreStage(raw) {
       // refused by the compile; a hand-edited blob is settled here instead.
       if (count > 1 && (state.init || state.loader === "svdquant")) state.stages.count = 1;
 
+      const dype = state.dype && typeof state.dype === "object" ? state.dype : {};
+      state.dype = {
+        on: dype.on === true,
+        method: PRESTAGE_DYPE_METHODS.includes(dype.method) ? dype.method : "vision_yarn",
+        scale: clamp(dype.scale, 0, PRESTAGE_MAX_DYPE_SCALE, PRESTAGE_DYPE_SCALE),
+        yarn_alt: dype.yarn_alt === true,
+      };
+      const sega = state.sega && typeof state.sega === "object" ? state.sega : {};
+      state.sega = {
+        on: sega.on === true,
+        method: PRESTAGE_SEGA_METHODS.includes(sega.method) ? sega.method : "sega",
+        alpha: clamp(sega.alpha, 0, 1, PRESTAGE_SEGA_ALPHA),
+      };
+      // Neither has an Ideogram path — the pack's model_type list does not
+      // include it — so a blob that arrives with one on off-arch is corrected.
+      if (state.arch !== "krea2") { state.dype.on = false; state.sega.on = false; }
+
       const board = state.moodboard && typeof state.moodboard === "object" ? state.moodboard : {};
       state.moodboard = {
         // On with nothing chosen is not a state the compile accepts, so it is
@@ -1318,6 +1364,14 @@ export function guessPreStageModels(models, byFolder) {
 
 /** The resolved image canvas, mirroring compile_image.resolve_canvas: /16 grid,
  *  2048² area cap, and the aspect taken from the init image when there is one. */
+/** The resolution ceiling for a state: the model's own, or DyPE's when it is on.
+ *  Mirrors the `max_edge` / `max_pixels` arguments `compile_image.resolve_canvas`
+ *  takes. */
+export const preStageMaxEdge = (state) => (
+  state?.dype?.on ? PRESTAGE_DYPE_MAX_EDGE : PRESTAGE_MAX_EDGE);
+export const preStageMaxPixels = (state) => (
+  state?.dype?.on ? PRESTAGE_DYPE_MAX_PIXELS : PRESTAGE_MAX_PIXELS);
+
 export function resolvedPreStage(state, initSize = null) {
   let ratio = PRESTAGE_ASPECTS.find(([label]) => label === state.aspect)?.[1] ?? 16 / 9;
   let fromImage = false;
@@ -1326,20 +1380,24 @@ export function resolvedPreStage(state, initSize = null) {
     fromImage = true;
   }
   ratio = Math.min(PRESTAGE_MAX_RATIO, Math.max(PRESTAGE_MIN_RATIO, ratio));
-  const edge = Math.max(PRESTAGE_MIN_EDGE, Math.min(PRESTAGE_MAX_EDGE, Math.round(state.short_edge)));
+  // DyPE is what lifts the ceiling: it extrapolates the position encoding rather
+  // than letting it wrap, which is the thing 2048 was protecting against.
+  const maxEdge = preStageMaxEdge(state);
+  const maxPixels = preStageMaxPixels(state);
+  const edge = Math.max(PRESTAGE_MIN_EDGE, Math.min(maxEdge, Math.round(state.short_edge)));
 
   let width, height;
   if (ratio >= 1) { width = edge * ratio; height = edge; }
   else { width = edge; height = edge / ratio; }
-  if (width * height > PRESTAGE_MAX_PIXELS) {
-    const scale = Math.sqrt(PRESTAGE_MAX_PIXELS / (width * height));
+  if (width * height > maxPixels) {
+    const scale = Math.sqrt(maxPixels / (width * height));
     width *= scale;
     height *= scale;
   }
-  // The long side is capped too — 2048 is the models' per-axis ceiling, and a
-  // 3:1 sheet at a big short edge would sail past it inside the area cap.
-  if (Math.max(width, height) > PRESTAGE_MAX_EDGE) {
-    const scale = PRESTAGE_MAX_EDGE / Math.max(width, height);
+  // The long side is capped too — the ceiling is a per-axis limit, and a 3:1
+  // sheet at a big short edge would sail past it inside the area cap.
+  if (Math.max(width, height) > maxEdge) {
+    const scale = maxEdge / Math.max(width, height);
     width *= scale;
     height *= scale;
   }
@@ -1347,7 +1405,7 @@ export function resolvedPreStage(state, initSize = null) {
     Math.floor(v / PRESTAGE_CANVAS_MULTIPLE + 0.5) * PRESTAGE_CANVAS_MULTIPLE);
   width = snap16(width);
   height = snap16(height);
-  while (width * height > PRESTAGE_MAX_PIXELS && Math.max(width, height) > PRESTAGE_CANVAS_MULTIPLE) {
+  while (width * height > maxPixels && Math.max(width, height) > PRESTAGE_CANVAS_MULTIPLE) {
     if (width >= height) width -= PRESTAGE_CANVAS_MULTIPLE;
     else height -= PRESTAGE_CANVAS_MULTIPLE;
   }

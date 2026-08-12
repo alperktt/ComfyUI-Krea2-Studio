@@ -44,6 +44,13 @@ MAX_SHORT_EDGE = 2048
 DEFAULT_SHORT_EDGE = 1024
 MAX_PIXELS = 2048 * 2048
 
+# What DyPE raises the ceiling to. Its whole purpose is renders past the trained
+# resolution — extrapolating the position encoding instead of letting it wrap —
+# so the cap that exists because "past it Krea 2's own card stops" is exactly the
+# cap it lifts. Off, the numbers above still apply.
+DYPE_MAX_SHORT_EDGE = 4096
+DYPE_MAX_PIXELS = 4096 * 4096
+
 # Wider than the video envelope on purpose: a style sheet or a poster is a
 # legitimate still even though no H3 render could take its shape.
 MIN_RATIO = 1 / 3
@@ -175,6 +182,29 @@ DEFAULT_HANDOFF3 = 83.33
 DEFAULT_STAGE1_SCALE = 1.0
 MIN_STAGE1_SCALE = 0.25
 
+# DyPE: extrapolate the position encoding so a render past the trained
+# resolution does not wrap. The methods and the pack's own default.
+DYPE_METHODS = ("vision_yarn", "yarn", "ntk", "pi", "base")
+DEFAULT_DYPE_METHOD = "vision_yarn"
+# Krea 2's native training resolution, which is also the node's own default — so
+# this is right here rather than coincidentally right.
+DYPE_BASE_RESOLUTION = 1024
+DEFAULT_DYPE_SCALE = 2.0
+MAX_DYPE_SCALE = 8.0
+# `yarn_alt_scaling`. The node defaults it off; the reference Krea 2 workflow sets
+# it on — while using `vision_yarn`, where the node's own tooltip says it has no
+# effect, so that is weak evidence for a different default and it keeps the
+# node's. Exposed rather than guessed: it is documented as being for ultra-high
+# resolutions, which is the only situation DyPE is on for, and it only applies to
+# the plain `yarn` method.
+DEFAULT_YARN_ALT = False
+
+# SEGA: per-dimension RoPE mscale computed from the latent's Fourier spectrum.
+# Independent of DyPE and composes after it.
+SEGA_METHODS = ("sega", "ntk")
+DEFAULT_SEGA_METHOD = "sega"
+DEFAULT_SEGA_ALPHA = 0.15
+
 # Ideogram's official preset table, verbatim from the shipped ComfyUI template
 # (V4_QUALITY_48 / V4_DEFAULT_20 / V4_TURBO_12). mu and std shape the
 # resolution-shifted schedule, so they belong to the preset, not to the user.
@@ -229,6 +259,11 @@ class ImagePayload:
     # `{count, handoff, handoff3, width, height}` — the two sizes are stage 1's
     # canvas; `ImagePayload.width/height` stays the final one.
     stages: dict = None
+    # DyPE, or None. `{method, scale}` — the width and height it needs are the
+    # payload's own, so they are not repeated here.
+    dype: dict = None
+    # SEGA, or None. `{method, alpha}`. Independent of DyPE.
+    sega: dict = None
     # Set when an edit's canvas is past the size its weights work best at. Not a
     # refusal and not a clamp — the render is fine, just slower and looser than
     # the same edit at 1 MP, and the UI says so.
@@ -290,32 +325,36 @@ def _snap(value):
     return max(CANVAS_MULTIPLE, int(value / CANVAS_MULTIPLE + 0.5) * CANVAS_MULTIPLE)
 
 
-def resolve_canvas(ratio, short_edge):
+def resolve_canvas(ratio, short_edge, max_edge=MAX_SHORT_EDGE, max_pixels=MAX_PIXELS):
     """(aspect ratio, slider short edge) -> the (width, height) generated.
 
     Same construction as `canvas.resolve_canvas` at the image models' /16 grid:
     the short edge is what the slider says, the long edge follows the ratio, and
     the area cap steps the long axis back down if snapping pushed past it.
+
+    The two caps are arguments because DyPE raises them — see
+    `DYPE_MAX_SHORT_EDGE`. They default to the model's own, so a caller that does
+    not know about DyPE gets the behaviour this always had.
     """
     ratio, _ = clamp_ratio(float(ratio))
-    short_edge = max(MIN_SHORT_EDGE, min(MAX_SHORT_EDGE, int(short_edge)))
+    short_edge = max(MIN_SHORT_EDGE, min(max_edge, int(short_edge)))
 
     if ratio >= 1.0:
         width, height = short_edge * ratio, float(short_edge)
     else:
         width, height = float(short_edge), short_edge / ratio
 
-    if width * height > MAX_PIXELS:
-        scale = (MAX_PIXELS / (width * height)) ** 0.5
+    if width * height > max_pixels:
+        scale = (max_pixels / (width * height)) ** 0.5
         width, height = width * scale, height * scale
-    # The long side is capped too: 2048 is the models' ceiling per axis, not
-    # only as an area, and a 3:1 sheet at a big short edge would sail past it.
-    if max(width, height) > MAX_SHORT_EDGE:
-        scale = MAX_SHORT_EDGE / max(width, height)
+    # The long side is capped too: the ceiling is the models' per-axis limit, not
+    # only an area, and a 3:1 sheet at a big short edge would sail past it.
+    if max(width, height) > max_edge:
+        scale = max_edge / max(width, height)
         width, height = width * scale, height * scale
 
     width, height = _snap(width), _snap(height)
-    while width * height > MAX_PIXELS and max(width, height) > CANVAS_MULTIPLE:
+    while width * height > max_pixels and max(width, height) > CANVAS_MULTIPLE:
         if width >= height:
             width -= CANVAS_MULTIPLE
         else:
@@ -517,6 +556,33 @@ def _parse_stages(raw):
     return {"count": count, "handoff": handoff, "handoff3": handoff3, "scale": scale}
 
 
+def _parse_dype(raw):
+    """The DyPE block, validated. `None` when the pill is off."""
+    if not isinstance(raw, dict) or not raw.get("on"):
+        return None
+    method = raw.get("method", DEFAULT_DYPE_METHOD)
+    if method not in DYPE_METHODS:
+        raise CompileError(
+            f"unknown DyPE method {method!r} — it is one of {', '.join(DYPE_METHODS)}")
+    return {"method": method,
+            "scale": _number(raw.get("scale"), "the DyPE scale", 0.0, MAX_DYPE_SCALE,
+                             DEFAULT_DYPE_SCALE),
+            "yarn_alt": raw.get("yarn_alt", DEFAULT_YARN_ALT) is True}
+
+
+def _parse_sega(raw):
+    """The SEGA block, validated. `None` when the pill is off."""
+    if not isinstance(raw, dict) or not raw.get("on"):
+        return None
+    method = raw.get("method", DEFAULT_SEGA_METHOD)
+    if method not in SEGA_METHODS:
+        raise CompileError(
+            f"unknown SEGA method {method!r} — it is one of {', '.join(SEGA_METHODS)}")
+    return {"method": method,
+            "alpha": _number(raw.get("alpha"), "the SEGA amplitude", 0.0, 1.0,
+                             DEFAULT_SEGA_ALPHA)}
+
+
 def compile_prestage(data, image_size_lookup=None, moodboard_lookup=None):
     """`prestage_data` dict -> `ImagePayload`.
 
@@ -646,6 +712,17 @@ def compile_prestage(data, image_size_lookup=None, moodboard_lookup=None):
                 "control — so it cannot restyle an init image. Remove the init "
                 "image, or set the stages pill back to one")
 
+    dype = _parse_dype(data.get("dype"))
+    sega = _parse_sega(data.get("sega"))
+    for name, block in (("DyPE", dype), ("SEGA", sega)):
+        if block is not None and arch != "krea2":
+            # The pack has no Ideogram path at all — its `model_type` list does
+            # not include it, and auto-detection would land on the flux branch and
+            # patch an embedder of a different shape.
+            raise CompileError(
+                f"{name} has no Ideogram 4 path — switch the model pill to Krea 2, "
+                f"or the {name} pill off")
+
     short_edge = data.get("short_edge", DEFAULT_SHORT_EDGE)
     ratio_clamped = False
     # An edit's canvas follows its source for the same reason an img2img render's
@@ -662,7 +739,12 @@ def compile_prestage(data, image_size_lookup=None, moodboard_lookup=None):
             ratio = ASPECT_PRESETS.get(aspect) or float(aspect)
         except (TypeError, ValueError):
             raise CompileError(f"unknown aspect {aspect!r}")
-    width, height = resolve_canvas(ratio, short_edge)
+    # DyPE is the reason the ceiling can move: it extrapolates the position
+    # encoding rather than letting it wrap, which is what the 2048 cap was
+    # protecting against. With it off, the model's own limits still apply.
+    max_edge = DYPE_MAX_SHORT_EDGE if dype else MAX_SHORT_EDGE
+    max_pixels = DYPE_MAX_PIXELS if dype else MAX_PIXELS
+    width, height = resolve_canvas(ratio, short_edge, max_edge, max_pixels)
 
     # A two-reference edit has a lower ceiling than a single-reference one: the
     # release notes give ~1 MP for one image and ~1.5 MP for two people.
@@ -717,5 +799,6 @@ def compile_prestage(data, image_size_lookup=None, moodboard_lookup=None):
         checkpoint_field=checkpoint_field, loader=loader,
         loras=loras, refs=refs, init=init, negative_prompt=negative_prompt,
         edit=edit, edit_oversize=edit_oversize, style=style, stages=stages,
+        dype=dype, sega=sega,
         mu=mu, std=std, ratio_clamped=ratio_clamped,
     )

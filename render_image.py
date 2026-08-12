@@ -83,6 +83,8 @@ STYLE_TWO_REFERENCES = "K2S_Krea2TwoStyleReferences"
 STYLE_TWO_TRANSFER = "K2S_Krea2TwoStyleTransfer"
 TWO_STAGE = "K2S_KreaTwoStageSampler"
 THREE_STAGE = "K2S_KreaThreeStageSampler"
+DYPE = "K2S_DyPE"
+SEGA = "K2S_SEGA"
 
 # The reference template's shift, applied only on the style-reference branch —
 # plain t2i leaves the shift the checkpoint detection already set (1.15).
@@ -425,6 +427,66 @@ def _emit_style(graph, payload, model, vae, latent, positive):
                       ref_conditioning=positive, **kwargs).out(0)
 
 
+def _emit_position(graph, payload, model):
+    """DyPE and SEGA, in that order. Returns the new MODEL link.
+
+    Last before the sampler because both rewrite the position encoding, and
+    everything upstream — LoRAs, the edit patch, the style transfer — is either a
+    weight patch or an attention patch that assumes the encoding it was trained
+    against. `accel.py` argues the same ordering for its own two packs.
+
+    `width` and `height` are the resolved canvas rather than a control: both
+    nodes' tooltips say they must match the empty latent, so passing anything
+    else would be a way for them to disagree.
+
+    Off adds nothing. That is stronger than the node's own `enable_dype: False`,
+    which patches the schedule and then unpatches it — there is nothing here to
+    undo.
+    """
+    from . import accel
+
+    if payload.dype:
+        _require_vendored(DYPE, "DyPE", "Switch the DyPE pill off to render without it.")
+        import nodes
+
+        kwargs = accel.node_defaults(nodes.NODE_CLASS_MAPPINGS[DYPE],
+                                    skip=("model", "width", "height"))
+        kwargs.update({
+            "width": payload.width, "height": payload.height,
+            # `auto` rather than `flux`: Krea 2 is not in the pack's list at all,
+            # and auto-detection reaches the flux branch by elimination — which is
+            # the right branch, because `SingleStreamDiT.pe_embedder` *is* Flux's
+            # `EmbedND`. Naming `flux` outright would work today and would be a
+            # lie the day the pack learns about Krea 2 properly.
+            "model_type": "auto",
+            "method": payload.dype["method"],
+            "enable_dype": True,
+            "base_resolution": payload.dype.get("base_resolution",
+                                                kwargs.get("base_resolution", 1024)),
+            "dype_scale": payload.dype["scale"],
+            # Only read on the plain `yarn` method — the node says so — so it is
+            # passed through rather than gated here.
+            "yarn_alt_scaling": payload.dype["yarn_alt"],
+        })
+        model = graph.node(DYPE, model=model, **kwargs).out(0)
+
+    if payload.sega:
+        _require_vendored(SEGA, "SEGA", "Switch the SEGA pill off to render without it.")
+        import nodes
+
+        kwargs = accel.node_defaults(nodes.NODE_CLASS_MAPPINGS[SEGA],
+                                    skip=("model", "width", "height"))
+        kwargs.update({
+            "width": payload.width, "height": payload.height,
+            "model_type": "auto",
+            "method": payload.sega["method"],
+            "mscale_alpha": payload.sega["alpha"],
+        })
+        model = graph.node(SEGA, model=model, **kwargs).out(0)
+
+    return model
+
+
 def _emit_sampler(graph, payload, sampling, weights, model, positive, negative,
                   latent, denoise):
     """The sampling pass: one `KSampler`, or the multi-stage node in its place.
@@ -567,6 +629,7 @@ def _emit_krea2(graph, payload, sampling, weights, clip, vae, model, unique_id,
         # last so it wraps the edit's, matching the plain branch's order.
         if payload.style:
             model = _emit_style(graph, payload, model, vae, latent, positive)
+        model = _emit_position(graph, payload, model)
         sampled = _emit_sampler(graph, payload, sampling, weights, model,
                                 positive, negative, latent, denoise)
         return _emit_tail(graph, sampled, vae, unique_id, filename_prefix)
@@ -596,6 +659,10 @@ def _emit_krea2(graph, payload, sampling, weights, clip, vae, model, unique_id,
     # so this only ever wraps a plain t2i or img2img model.
     if payload.style:
         model = _emit_style(graph, payload, model, vae, latent, positive)
+
+    # Last before the sampler: both rewrite the position encoding, and everything
+    # above assumes the encoding it was trained against.
+    model = _emit_position(graph, payload, model)
 
     sampled = _emit_sampler(graph, payload, sampling, weights, model,
                             positive, negative, latent, denoise)

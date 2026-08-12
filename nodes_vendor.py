@@ -68,23 +68,69 @@ VENDORED: list[tuple[str, str, str]] = [
     ("K2S_Krea2TwoStyleTransfer", "styletransfer.nodes", "Krea2TwoStyleTransfer"),
     ("K2S_KreaTwoStageSampler", "twostage", "KreaTwoStageSampler"),
     ("K2S_KreaThreeStageSampler", "twostage", "KreaThreeStageSampler"),
+    # The only V3 pack of the six — see `_wrap` for why that needs its own path.
+    ("K2S_DyPE", "dype", "DyPE_FLUX"),
+    ("K2S_SEGA", "dype", "SEGA"),
 ]
+
+
+def _is_v3(source):
+    """Whether this is a `comfy_api` V3 node rather than a dict-based V1 one.
+
+    The two describe themselves in completely different places — V1 in class
+    attributes, V3 in a `Schema` returned from `define_schema` — so renaming and
+    hiding them are different edits. Detected by base class rather than by
+    sniffing for `INPUT_TYPES`, which V3 also grows at runtime.
+    """
+    try:
+        from comfy_api.latest import io
+    except ImportError:
+        return False
+    return isinstance(source, type) and issubclass(source, io.ComfyNode)
 
 
 def _wrap(node_id, source):
     """`source` as a hidden node under our own id, without touching `source`.
 
-    A subclass rather than a copy: `INPUT_TYPES`, `RETURN_TYPES`, `FUNCTION` and
-    everything else the vendored author declared are inherited, so a pack that
-    gains an input gains it here too the next time it is re-vendored. Only the
-    three attributes this module exists to change are overridden.
+    A subclass rather than a copy: everything the vendored author declared is
+    inherited, so a pack that gains an input gains it here too the next time it
+    is re-vendored. Only what this module exists to change is overridden.
+
+    **V1 and V3 are renamed differently.** A V1 node carries its category and
+    deprecation as class attributes, so overriding them is enough. A V3 node
+    carries them — and its *id* — inside the `Schema` its `define_schema`
+    returns, and the loader reads that schema rather than the registry key. So
+    for those the schema is rebuilt with our id on it: a class registered under
+    `K2S_DyPE` whose schema still said `DyPE_FLUX` would be a node whose name
+    depends on which code path asked.
     """
-    return type(node_id, (source,), {
-        "CATEGORY": CATEGORY,
-        "DEPRECATED": True,
+    doc = (source.__doc__ or "").strip() or None
+
+    if not _is_v3(source):
+        return type(node_id, (source,), {
+            "CATEGORY": CATEGORY,
+            "DEPRECATED": True,
+            "__module__": __name__,
+            "__doc__": doc,
+        })
+
+    import dataclasses
+
+    @classmethod
+    def define_schema(cls):
+        schema = super(wrapper, cls).define_schema()
+        return dataclasses.replace(
+            schema, node_id=node_id, display_name=node_id,
+            category=CATEGORY,
+            # The same field the pack's own internal save node is hidden with.
+            is_dev_only=True)
+
+    wrapper = type(node_id, (source,), {
+        "define_schema": define_schema,
         "__module__": __name__,
-        "__doc__": (source.__doc__ or "").strip() or None,
+        "__doc__": doc,
     })
+    return wrapper
 
 
 def register():
