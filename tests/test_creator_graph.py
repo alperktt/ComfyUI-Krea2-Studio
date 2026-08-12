@@ -444,6 +444,85 @@ finally:
 
 check("no device list without the pack", models_mod.device_options(), [])
 
+# ---- GGUF checkpoints -------------------------------------------------------
+#
+# ComfyUI-GGUF's loaders take the same filename input and return the same links,
+# so a quantized checkpoint is a class swap keyed off the picked file's own
+# extension — no mode, no setting. What is worth pinning: the swap happens on a
+# `.gguf` name and only then, `weight_dtype` (a core-loader widget the GGUF
+# nodes do not have) is not emitted with it, and picking one without the pack
+# refuses up front naming it, exactly as a pinned device without MultiGPU does.
+# The harness boots with custom nodes off, so the refusal path runs unaided.
+
+
+def with_gguf(**files):
+    blob = json.loads(DATA)
+    blob["models"].update(files)
+    return json.dumps(blob)
+
+
+GGUF_UNET = "h3/fl2va-Q4_K_M.gguf"
+GGUF_CLIP = "h3/text_encoder-Q8_0.gguf"
+
+expect_error("a GGUF checkpoint without the pack is refused up front",
+             lambda: build(with_gguf(fl2va=GGUF_UNET)),
+             "ComfyUI-GGUF")
+expect_error("...naming the file that asked for it",
+             lambda: build(with_gguf(fl2va=GGUF_UNET)),
+             GGUF_UNET)
+
+
+class _FakeGGUF:
+    """Stands in for the pack's loaders — only their registration matters, the
+    emitter writes filenames into widgets and never instantiates them."""
+
+    FUNCTION = "load"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+
+
+_restore_gguf = dict(comfy_nodes.NODE_CLASS_MAPPINGS)
+for gguf_node in ("UnetLoaderGGUF", "CLIPLoaderGGUF"):
+    comfy_nodes.NODE_CLASS_MAPPINGS[gguf_node] = _FakeGGUF
+try:
+    quant = by_class(build(with_gguf(fl2va=GGUF_UNET)).expand)
+    check("a .gguf checkpoint loads through the pack's loader",
+          len(quant["UnetLoaderGGUF"]), 1)
+    check("...by its filename",
+          quant["UnetLoaderGGUF"][0][1]["unet_name"], GGUF_UNET)
+    check("...without weight_dtype, which is the core loader's widget",
+          "weight_dtype" in quant["UnetLoaderGGUF"][0][1], False)
+    check("...and no core UNETLoader beside it", "UNETLoader" in quant, False)
+    check("a safetensors text encoder stays on the core loader",
+          len(quant["CLIPLoader"]), 1)
+
+    both = by_class(build(with_gguf(fl2va=GGUF_UNET, clip=GGUF_CLIP)).expand)
+    check("a .gguf text encoder swaps its loader the same way",
+          both["CLIPLoaderGGUF"][0][1]["clip_name"], GGUF_CLIP)
+    check("...keeping the H3 clip type",
+          both["CLIPLoaderGGUF"][0][1]["type"], "minimax")
+
+    # The two swaps compose: a quantized checkpoint pinned to a card goes
+    # through MultiGPU's subclass of the *GGUF* loader, not of the core one.
+    comfy_nodes.NODE_CLASS_MAPPINGS["UnetLoaderGGUFMultiGPU"] = _FakeMultiGPU
+    blob = json.loads(with_gguf(fl2va=GGUF_UNET))
+    blob["models"]["devices"] = {"fl2va": "cuda:1"}
+    pinned = by_class(build(json.dumps(blob)).expand)
+    check("a pinned .gguf checkpoint composes both swaps",
+          pinned["UnetLoaderGGUFMultiGPU"][0][1],
+          {"unet_name": GGUF_UNET, "device": "cuda:1"})
+finally:
+    comfy_nodes.NODE_CLASS_MAPPINGS.clear()
+    comfy_nodes.NODE_CLASS_MAPPINGS.update(_restore_gguf)
+
+# The one file nothing can quantize: a `.gguf` VAE has no loader in the pack
+# either, and the refusal says so rather than KeyError-ing.
+expect_error("a .gguf VAE is refused as unloadable",
+             lambda: build(with_gguf(vae="h3/video_vae.gguf")),
+             "nothing loads a GGUF VAE")
+
 # ---- the preview override ---------------------------------------------------
 #
 # KJNodes' node is optional in the way the accelerators are optional, except that

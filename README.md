@@ -46,6 +46,13 @@ You pick the files in the node itself, on the **weights** pill. Anything a rende
 needs and does not have is refused before the queue starts, naming the field and
 the folder it looks in.
 
+GGUF-quantized checkpoints and text encoders work too, with
+[ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) installed: drop the
+`.gguf` in the same folders and pick it like any other file — the format is read
+off the extension and the right loader is emitted, no setting to switch. The
+precision control does not apply to them (theirs was decided at quantization),
+and picking one without the pack refuses up front naming it.
+
 > The single-image VAE is a merged H3 VAE and loads through the same node as the
 > real one, so nothing downstream can tell them apart. It belongs in the
 > PreStage's VAE slot and nowhere else — in a video workflow it costs multi-frame
@@ -374,6 +381,8 @@ This pack is glue. The work underneath it belongs to other people:
   live preview a real decoder. Kijai's turbo conversions are in the switch too.
 - **[ComfyUI-MultiGPU](https://github.com/pollockjj/ComfyUI-MultiGPU)** by pollockjj —
   puts a device chip on every row of the weights popover.
+- **[ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF)** by city96 — loads the
+  `.gguf` files the weights popover offers once it is installed.
 - **[MiniMax-H3-Image-VAE](https://huggingface.co/Mamad8/MiniMax-H3-Image-VAE)** by
   Mamad8 — the experimental single-image decoder the PreStage's H3 branch reads a
   still through. Trained with H3's own encoder frozen, which is what lets one file

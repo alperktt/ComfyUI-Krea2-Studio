@@ -220,7 +220,7 @@ export const ja = {
  "unavailable": "利用不可",
  "not set": "未設定",
  "— none —": "— なし —",
- "How the checkpoints are loaded. fp8 halves the weights in VRAM at some cost in fidelity; 'default' loads them as they were saved.": "チェックポイントの読み込み方法。fp8 は VRAM 上のウェイトを半分にしますが忠実度が多少下がります。'default' は保存されたままの形で読み込みます。",
+ "How the checkpoints are loaded. fp8 halves the weights in VRAM at some cost in fidelity; 'default' loads them as they were saved. GGUF files ignore this — their precision was baked in when they were quantized.": "チェックポイントの読み込み方法。fp8 は VRAM 上のウェイトを半分にしますが忠実度が多少下がります。'default' は保存されたままの形で読み込みます。GGUF ファイルはこの設定を無視します — 精度は量子化の時点で決まっています。",
  "Weights": "ウェイト",
  "Absolute paths are not allowed — this is relative to ComfyUI's output folder. Use --output-directory to move that.": "絶対パスは使えません — ComfyUI の出力フォルダーからの相対パスです。場所を移すには --output-directory を使ってください。",
  "Empty folder name.": "フォルダー名が空です。",

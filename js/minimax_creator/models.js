@@ -248,7 +248,9 @@ export function openWeightsPopover(anchor, { models, checkpoints, onChange, turb
       el("button", {
         class: "mmc-weight-file",
         title: t("How the checkpoints are loaded. fp8 halves the weights in VRAM at "
-             + "some cost in fidelity; 'default' loads them as they were saved."),
+             + "some cost in fidelity; 'default' loads them as they were saved. "
+             + "GGUF files ignore this — their precision was baked in when they "
+             + "were quantized."),
         text: models.dtype,
         onclick: (event) => openChoicePopover(event.currentTarget, {
           title: t("Precision"),

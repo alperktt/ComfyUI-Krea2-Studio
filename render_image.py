@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from . import outputs
 from .compile import CompileError
 from .compile_image import IDEOGRAM_CFG_LATE
+from .models import is_gguf, loader_for
 
 SAVE_NODE = "MiniMaxH3SaveImage"
 # Where a still lands when the blob does not say — see `outputs`, which owns
@@ -160,6 +161,16 @@ def _require_arch(arch):
             )
 
 
+def _unet(graph, weights, name):
+    """One DiT loader, GGUF-aware the way `models.emit_links` is: a `.gguf`
+    filename swaps the class through `loader_for`, and `weight_dtype` is only a
+    core-loader input — a quantized file's precision is already decided."""
+    filename = weights.get(name)
+    node_id, _ = loader_for("UNETLoader", None, filename)
+    dtype = {} if is_gguf(filename) else {"weight_dtype": weights.dtype}
+    return graph.node(node_id, unet_name=filename, **dtype).out(0)
+
+
 def emit(payload, weights, sampling, unique_id, filename_prefix=FILENAME_PREFIX):
     """-> the graph, which the caller finalizes with `render.expanded`.
 
@@ -176,11 +187,11 @@ def emit(payload, weights, sampling, unique_id, filename_prefix=FILENAME_PREFIX)
 
     graph = GraphBuilder()
 
-    clip = graph.node("CLIPLoader", clip_name=weights.get("clip"),
+    clip = graph.node(loader_for("CLIPLoader", None, weights.get("clip"))[0],
+                      clip_name=weights.get("clip"),
                       type=CLIP_TYPE[payload.arch]).out(0)
     vae = graph.node("VAELoader", vae_name=weights.get("vae")).out(0)
-    model = graph.node("UNETLoader", unet_name=weights.get(payload.checkpoint_field),
-                       weight_dtype=weights.dtype).out(0)
+    model = _unet(graph, weights, payload.checkpoint_field)
     # Model-only, exactly as the official workflows patch these DiTs — there is
     # no text-encoder half to a Krea or Ideogram LoRA.
     for entry in payload.loras:
@@ -262,9 +273,7 @@ def _emit_ideogram4(graph, payload, sampling, weights, clip, vae, model, unique_
     guider_inputs = {"model": model, "positive": positive, "negative": negative,
                      "cfg": sampling.cfg}
     if weights.get("uncond_model"):
-        guider_inputs["model_negative"] = graph.node(
-            "UNETLoader", unet_name=weights.get("uncond_model"),
-            weight_dtype=weights.dtype).out(0)
+        guider_inputs["model_negative"] = _unet(graph, weights, "uncond_model")
     guider = graph.node("DualModelGuider", **guider_inputs).out(0)
 
     sigmas = graph.node("Ideogram4Scheduler", steps=sampling.steps,

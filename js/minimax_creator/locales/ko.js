@@ -220,7 +220,7 @@ export const ko = {
  "unavailable": "사용 불가",
  "not set": "설정 안 됨",
  "— none —": "— 없음 —",
- "How the checkpoints are loaded. fp8 halves the weights in VRAM at some cost in fidelity; 'default' loads them as they were saved.": "체크포인트를 로드하는 방식입니다. fp8은 VRAM의 가중치를 절반으로 줄이는 대신 충실도가 다소 떨어지고, 'default'는 저장된 그대로 로드합니다.",
+ "How the checkpoints are loaded. fp8 halves the weights in VRAM at some cost in fidelity; 'default' loads them as they were saved. GGUF files ignore this — their precision was baked in when they were quantized.": "체크포인트를 로드하는 방식입니다. fp8은 VRAM의 가중치를 절반으로 줄이는 대신 충실도가 다소 떨어지고, 'default'는 저장된 그대로 로드합니다. GGUF 파일은 이 설정을 무시합니다 — 정밀도는 양자화 시점에 이미 결정되었습니다.",
  "Weights": "가중치",
  "Absolute paths are not allowed — this is relative to ComfyUI's output folder. Use --output-directory to move that.": "절대 경로는 허용되지 않습니다 — ComfyUI의 출력 폴더 기준 상대 경로입니다. 위치를 옮기려면 --output-directory를 사용하세요.",
  "Empty folder name.": "폴더 이름이 비어 있습니다.",

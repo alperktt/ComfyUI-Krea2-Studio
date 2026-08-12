@@ -221,7 +221,7 @@ export const zh = {
  "unavailable": "不可用",
  "not set": "未设置",
  "— none —": "— 无 —",
- "How the checkpoints are loaded. fp8 halves the weights in VRAM at some cost in fidelity; 'default' loads them as they were saved.": "检查点的加载方式。fp8 使显存中的权重减半，代价是一定的保真度；'default' 按保存时的样子加载。",
+ "How the checkpoints are loaded. fp8 halves the weights in VRAM at some cost in fidelity; 'default' loads them as they were saved. GGUF files ignore this — their precision was baked in when they were quantized.": "检查点的加载方式。fp8 使显存中的权重减半，代价是一定的保真度；'default' 按保存时的样子加载。GGUF 文件会忽略此设置 — 其精度在量化时就已固定。",
  "Weights": "权重",
  "Absolute paths are not allowed — this is relative to ComfyUI's output folder. Use --output-directory to move that.": "不允许绝对路径——此处相对于 ComfyUI 的输出文件夹。用 --output-directory 可以移动它。",
  "Empty folder name.": "文件夹名为空。",
